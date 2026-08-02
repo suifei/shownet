@@ -1,0 +1,8 @@
+{
+  "default": "shownet-app-icon-master.png",
+  "bg_color": "#101315",
+  "android_bg": "shownet-android-background.png",
+  "android_fg": "shownet-android-foreground.png",
+  "android_fg_scale": 82,
+  "android_monochrome": "shownet-android-monochrome.png"
+}

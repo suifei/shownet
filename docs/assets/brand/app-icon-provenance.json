@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "asset": "ShowNet app icon",
+  "generatedAt": "2026-08-02T05:11:32+08:00",
+  "generation": {
+    "mode": "Codex imagegen fallback CLI",
+    "endpoint": "https://claudegpt.org/v1",
+    "endpointType": "user-authorized OpenAI-compatible endpoint",
+    "modelRequested": "gpt-image-2",
+    "quality": "high",
+    "sizeRequested": "1024x1024",
+    "sizeReceived": "1254x1254",
+    "selectedCandidate": "C: Signal Aperture",
+    "promptSource": "docs/brand/app-icon.md#candidate-c-signal-aperture"
+  },
+  "attestation": "The endpoint is not api.openai.com; this record proves the requested model identifier and returned bytes, not the provider's underlying model implementation.",
+  "credentialsStored": false,
+  "files": {
+    "shownet-app-icon-source.png": "d2f3249318a772e1cba6189be1e5fc32d3fbd4857594686a6430d603f48fe39c",
+    "shownet-app-icon-master.png": "0510183cbb21609f68d70fd51e94e9e22f2d258fce0f6e3f607963b1c0ce2e64",
+    "shownet-android-background.png": "e36a908ac9fd108d93cd2b6423943c2b1fea953cddeaf5afc56855f1abb2adf2",
+    "shownet-android-foreground.png": "214cc6dd6a6b53be1fe17f984a30301b6eca82b78b64418532e77a8a37a88754",
+    "shownet-android-monochrome.png": "ae88db09762166546a68eb0eaabb3adff09c09e1c683b84ddbb34b3d7d58a17b"
+  }
+}

@@ -1,0 +1,59 @@
+[package]
+name = "shownet"
+version = "0.1.0"
+description = "Full-scene traffic capture and AI protocol analysis"
+authors = ["ShowNet Team"]
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+name = "shownet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+brotli = "8"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+cookie_store = "0.22.1"
+flate2 = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+ipnet = "2"
+futures-util = "0.3"
+md-5 = "0.10"
+pem = "3"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "stream", "rustls", "socks"] }
+reqwest_cookie_store = "0.10.0"
+rusqlite = { version = "0.38", features = ["bundled", "functions", "hooks"] }
+regex = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
+tree-sitter = "0.25"
+tree-sitter-javascript = "0.23"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+webpki-roots = "1"
+zstd = "0.13"
+boa_engine = "0.20"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_Security_Cryptography"] }

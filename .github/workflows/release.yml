@@ -1,0 +1,253 @@
+name: Quality and signed release
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shownet-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SHOWNET_UPDATE_MANIFEST_URL: https://claudegpt.org/shownet/latest.json
+
+jobs:
+  quality:
+    name: Quality / ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run check:release
+      - run: npm run build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: npm run test:rust:network
+      - run: npm run tauri -- build --debug --no-bundle
+
+  release-macos:
+    name: Signed macOS release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: quality
+    runs-on: macos-14
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Install pinned Agent Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Validate release version and signing secrets
+        shell: bash
+        run: |
+          npm run check:release
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "Required secret $name is missing" >&2
+              exit 1
+            fi
+          done
+      - name: Build and verify built-in Agent sidecar
+        run: |
+          npm run build:agent-sidecar -- --target aarch64-apple-darwin
+          npm run check:release -- --require-agent-target aarch64-apple-darwin
+          npm run test:agent-sidecar
+      - name: Build, sign and notarize
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.grok.conf.json
+      - name: Verify Apple signature and notarization ticket
+        shell: bash
+        run: |
+          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
+          dmg_path="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg_path"
+          npm run verify:release:macos -- \
+            --app "$app_path" \
+            --dmg "$dmg_path" \
+            --team-id "$APPLE_TEAM_ID" \
+            --architecture arm64 \
+            --report src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shownet-macos-aarch64
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
+          if-no-files-found: error
+
+  release-windows:
+    name: Signed Windows release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: quality
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install pinned Agent Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Validate release version and import signing certificate
+        shell: pwsh
+        run: |
+          npm run check:release
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD are required"
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "shownet-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Remove-Item $pfxPath -Force
+      - name: Build and verify built-in Agent sidecar
+        shell: pwsh
+        run: |
+          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc
+          $sidecar = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
+          & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $sidecar
+          if ($LASTEXITCODE -ne 0) { throw "Failed to sign built-in Agent sidecar" }
+          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
+          npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
+          $signature = Get-AuthenticodeSignature $sidecar
+          if ($signature.Status -ne "Valid") { throw "Built-in Agent sidecar signature is $($signature.Status)" }
+          npm run test:agent-sidecar
+      - name: Build and sign PortableApps package
+        shell: pwsh
+        run: |
+          npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.grok.conf.json
+          $env:CARGO_TARGET_DIR = (Resolve-Path "src-tauri/target").Path
+          cargo build --manifest-path packaging/windows/launcher/Cargo.toml --release --target x86_64-pc-windows-msvc
+          $application = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
+          $launcher = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
+          foreach ($executable in @($application, $launcher)) {
+            & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $executable
+            if ($LASTEXITCODE -ne 0) { throw "Failed to sign $executable" }
+          }
+          npm run package:windows:portable -- --target x86_64-pc-windows-msvc
+          $portableRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable"
+          $executables = Get-ChildItem $portableRoot -Recurse -File -Filter *.exe
+          if ($executables.Count -ne 3) { throw "Portable package must contain exactly three executables" }
+          foreach ($executable in $executables) {
+            $signature = Get-AuthenticodeSignature $executable.FullName
+            if ($signature.Status -ne "Valid") { throw "$($executable.Name) signature is $($signature.Status)" }
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $archive = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable_${version}_windows_x86_64.zip"
+          Compress-Archive -Path $portableRoot -DestinationPath $archive -CompressionLevel Optimal -Force
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $([IO.Path]::GetFileName($archive))" | Set-Content -Path "$archive.sha256" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shownet-windows-x86_64
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/*.zip
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release and update manifest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-macos, release-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SHOWNET_UPDATE_PUBLISH_URL: ${{ secrets.SHOWNET_UPDATE_PUBLISH_URL }}
+      SHOWNET_UPDATE_PUBLISH_TOKEN: ${{ secrets.SHOWNET_UPDATE_PUBLISH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shownet-*
+          path: release-assets
+          merge-multiple: true
+      - name: Build update manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mac_name="$(find release-assets -type f -name '*.dmg' -printf '%f\n' | head -n 1)"
+          win_name="$(find release-assets -type f -name '*.zip' -printf '%f\n' | head -n 1)"
+          test -n "$mac_name"
+          test -n "$win_name"
+          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          mac_url="${release_base}/$(jq -rn --arg value "$mac_name" '$value|@uri')"
+          win_url="${release_base}/$(jq -rn --arg value "$win_name" '$value|@uri')"
+          version="${GITHUB_REF_NAME#v}"
+          notes="$(git tag -l "$GITHUB_REF_NAME" --format='%(contents)' | head -c 12000)"
+          published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "$notes" \
+            --arg publishedAt "$published_at" \
+            --arg macUrl "$mac_url" \
+            --arg windowsUrl "$win_url" \
+            '{version:$version,notes:$notes,publishedAt:$publishedAt,platforms:{"darwin-aarch64":{url:$macUrl},"windows-x86_64":{url:$windowsUrl}}}' \
+            > release-assets/latest.json
+          (cd release-assets && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/**/*
+      - name: Publish latest.json to ClaudeGPT.org
+        shell: bash
+        run: |
+          if [ -z "$SHOWNET_UPDATE_PUBLISH_URL" ] || [ -z "$SHOWNET_UPDATE_PUBLISH_TOKEN" ]; then
+            echo "ClaudeGPT.org manifest publishing is not configured; latest.json remains attached to the GitHub release."
+            exit 0
+          fi
+          curl --fail --show-error --silent \
+            --request PUT \
+            --header "Authorization: Bearer $SHOWNET_UPDATE_PUBLISH_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data-binary @release-assets/latest.json \
+            "$SHOWNET_UPDATE_PUBLISH_URL"

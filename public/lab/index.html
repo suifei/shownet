@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShowNet Crypto Lab</title>
+    <link rel="stylesheet" href="./lab.css" />
+    <script>
+      if (typeof window.__SHOWNET_HOOK_BRIDGE__ !== "function") {
+        window.__SHOWNET_HOOK_BRIDGE__ = (serialized) => {
+          try {
+            parent.postMessage({ type: "shownet-browser-hook", payload: JSON.parse(serialized) }, location.origin);
+          } catch {}
+        };
+      }
+    </script>
+    <script src="./shownet-hook-runtime.js"></script>
+  </head>
+  <body>
+    <header class="lab-header">
+      <div class="lab-brand"><span>SN</span><div><strong>ShowNet Crypto Lab</strong><small>HTTPS capture validation target</small></div></div>
+      <span id="state" class="state state--idle">就绪</span>
+    </header>
+    <main>
+      <section class="control-pane">
+        <div class="section-heading"><span>SCENARIO</span><h1>签名登录请求</h1><p>浏览器生成摘要、加密业务参数并签名，再发送到 HTTPS Echo 服务。</p></div>
+        <label><span>目标接口</span><input id="endpoint" value="https://httpbin.org/post" spellcheck="false" /></label>
+        <label><span>用户标识</span><input id="account" value="shownet-lab-user" autocomplete="off" /></label>
+        <label><span>业务数据</span><textarea id="message" rows="5">{"action":"login","scope":["profile","orders"],"device":"shownet-lab"}</textarea></label>
+        <button id="run" type="button">运行加密并发送</button>
+        <div class="notice">测试密钥仅在当前页面内随机生成，不写入请求或本地存储。</div>
+      </section>
+      <section class="result-pane">
+        <div class="pipeline" aria-label="测试流程">
+          <div data-step="digest"><span>01</span><strong>SHA-256</strong><small>业务摘要</small></div>
+          <i>→</i>
+          <div data-step="encrypt"><span>02</span><strong>AES-GCM</strong><small>正文加密</small></div>
+          <i>→</i>
+          <div data-step="sign"><span>03</span><strong>HMAC</strong><small>请求签名</small></div>
+          <i>→</i>
+          <div data-step="send"><span>04</span><strong>HTTPS</strong><small>代理捕获</small></div>
+        </div>
+        <section class="drag-test" aria-label="拖放验证">
+          <header><span>INPUT PARITY</span><strong>拖放验证</strong></header>
+          <div class="drag-test__row">
+            <button id="drag-source" type="button" draggable="true"><span>DRAG</span><strong>页面元素</strong></button>
+            <div id="drop-target" tabindex="0">
+              <span>DROP</span>
+              <strong>页面元素 / 本地文件</strong>
+              <small id="drop-status">等待事件</small>
+            </div>
+          </div>
+        </section>
+        <div class="evidence-grid">
+          <article><span>SHA-256</span><code id="digest">等待运行</code></article>
+          <article><span>AES-GCM IV</span><code id="iv">等待运行</code></article>
+          <article><span>HMAC 签名</span><code id="signature">等待运行</code></article>
+          <article><span>HTTP 响应</span><code id="response">等待运行</code></article>
+        </div>
+        <div class="event-log"><header><strong>执行日志</strong><button id="clear" type="button">清空</button></header><ol id="log"></ol></div>
+      </section>
+    </main>
+    <script src="./lab.js"></script>
+  </body>
+</html>

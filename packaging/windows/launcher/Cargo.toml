@@ -1,0 +1,14 @@
+[package]
+name = "shownet-portable-launcher"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "shownet-portable-launcher"
+path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "3.0.11"
