@@ -62,6 +62,7 @@ import { headerValue, INSPECTOR_PREFERENCES_KEY, legacyBodyMetadata, parseCookie
 import { initialRequestSelection, requestSelectionReducer } from "../requestSelection";
 import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
 import { nextRequestListWindowOffset, REQUEST_LIST_WINDOW_SIZE, shouldChangeRequestListWindow } from "../requestList";
+import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
 import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
 import { filterAndOrderSseEvents, isSseTerminal, prettySseData, sseEventLabel, type SseOrder } from "../sseInspector";
 import type { CaptureRuleRun, CryptoCodeSnippet, FilterExpression, RequestAnnotation, RequestAnnotationInput, RequestAnnotationSummary, RequestFacets, RequestField, RequestListItem, RequestRecord, RequestSort, RiskLevel, SavedRequestView, SourceType, SseEvent, WebSocketFrameEvent } from "../types";
@@ -1363,36 +1364,17 @@ function formatFrameSize(size: number) {
   return `${(size / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
-type CodeTemplate = "curl" | "httpie" | "python" | "fetch" | "axios" | "go";
-
 function CodeTemplateDialog({ request, onClose }: { request: RequestRecord; onClose: () => void }) {
-  const [template, setTemplate] = useState<CodeTemplate>("curl");
-  const [code, setCode] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [template, setTemplate] = useState<RequestCodeTemplate>("python");
   const [copied, setCopied] = useState(false);
-  const templates: Array<[CodeTemplate, string]> = [
-    ["curl", "cURL"],
-    ["httpie", "HTTPie"],
-    ["python", "Python"],
-    ["fetch", "Fetch"],
-    ["axios", "Axios"],
-    ["go", "Go"],
-  ];
 
   useEscapeDismiss(true, onClose);
-
-  useEffect(() => {
-    let disposed = false;
-    setLoading(true);
-    const generated = isTauri()
-      ? invoke<string>("generate_request_code", { requestId: request.id, template })
-      : Promise.resolve(previewRequestCode(request, template));
-    generated
-      .then((value) => { if (!disposed) setCode(value); })
-      .catch((error) => { if (!disposed) setCode(`生成失败：${String(error)}`); })
-      .finally(() => { if (!disposed) setLoading(false); });
-    return () => { disposed = true; };
-  }, [request, template]);
+  const code = generateRequestCode({
+    method: request.method,
+    url: `${request.tls === "明文" ? "http" : "https"}://${request.host}${request.path}${request.query ? `?${request.query}` : ""}`,
+    headers: request.requestHeaders,
+    body: request.requestBody,
+  }, template);
 
   const copyCode = async () => {
     await navigator.clipboard?.writeText(code);
@@ -1407,34 +1389,14 @@ function CodeTemplateDialog({ request, onClose }: { request: RequestRecord; onCl
           <div><span className="section-kicker">REQUEST CODE</span><h2 id="request-code-dialog-title">生成请求代码</h2><p>{request.method} · {request.host}{request.path}</p></div>
           <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
         </header>
-        <div className="code-template-toolbar">
-          <div className="code-template-tabs">{templates.map(([id, label]) => <button key={id} className={template === id ? "is-active" : ""} onClick={() => setTemplate(id)}>{label}</button>)}</div>
-        </div>
-        <pre className={`generated-code ${loading ? "is-loading" : ""}`}>{loading ? "正在生成…" : code}</pre>
-        <footer className="dialog-footer"><span /><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>关闭</button><button className="primary-button" onClick={copyCode} disabled={loading}><Copy size={14} />{copied ? "已复制" : "复制代码"}</button></span></footer>
+        <div className="code-template-toolbar"><label><span>代码语言</span><select aria-label="代码语言" value={template} onChange={(event) => setTemplate(event.target.value as RequestCodeTemplate)}>{requestCodeTemplates.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></div>
+        <pre className="generated-code">{code}</pre>
+        <footer className="dialog-footer"><span /><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>关闭</button><button className="primary-button" onClick={copyCode}><Copy size={14} />{copied ? "已复制" : "复制代码"}</button></span></footer>
       </section>
     </div>
   );
 }
 
-function previewRequestCode(request: RequestRecord, template: CodeTemplate) {
-  const url = `${request.tls === "明文" ? "http" : "https"}://${request.host}${request.path}${request.query ? `?${request.query}` : ""}`;
-  const headers = Object.fromEntries(request.requestHeaders
-    .filter((header) => !header.name.startsWith(":") && !["host", "content-length"].includes(header.name.toLowerCase()))
-    .map((header) => [header.name, header.value]));
-  const body = request.requestBody;
-  if (template === "curl" || template === "httpie") {
-    const command = template === "curl" ? `curl --request ${request.method} '${url}'` : `http ${request.method} '${url}'`;
-    const headerLines = Object.entries(headers).map(([name, value]) => template === "curl" ? `  --header '${name}: ${value}'` : `  '${name}:${value}'`);
-    if (body) headerLines.push(template === "curl" ? `  --data-raw '${body}'` : `  <<< '${body}'`);
-    return [command, ...headerLines].join(" \\\n");
-  }
-  if (template === "python") return `import requests\n\nresponse = requests.request(\n    ${JSON.stringify(request.method)},\n    ${JSON.stringify(url)},\n    headers=${JSON.stringify(headers, null, 2)},${body ? `\n    data=${JSON.stringify(body)},` : ""}\n)\nresponse.raise_for_status()\nprint(response.text)`;
-  if (template === "go") return `req, err := http.NewRequest(${JSON.stringify(request.method)}, ${JSON.stringify(url)}, strings.NewReader(${JSON.stringify(body || "")}))\nif err != nil { panic(err) }\n// Add captured headers before sending the request.`;
-  const options = { method: request.method, headers, ...(body ? { body } : {}) };
-  if (template === "axios") return `import axios from "axios";\n\nconst response = await axios({\n  method: ${JSON.stringify(request.method.toLowerCase())},\n  url: ${JSON.stringify(url)},\n  headers: ${JSON.stringify(headers, null, 2)}${body ? `,\n  data: ${JSON.stringify(body)}` : ""}\n});\nconsole.log(response.data);`;
-  return `const response = await fetch(${JSON.stringify(url)}, ${JSON.stringify(options, null, 2)});\nconsole.log(await response.text());`;
-}
 
 function TlsFingerprintDetail({ fingerprint }: { fingerprint: NonNullable<RequestRecord["tlsFingerprint"]> }) {
   const { inbound, outbound } = fingerprint;

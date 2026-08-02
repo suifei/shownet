@@ -4,9 +4,72 @@
 
 <h1 align="center">ShowNet</h1>
 
-ShowNet is an AI-native desktop traffic capture and protocol analysis workspace. It combines an isolated proxy Chrome controlled through CDP with a local MITM proxy, normalizes every source into one Session, and runs two-stage AI analysis over requests and correlated JS Hook evidence.
+ShowNet 是面向开发者的 AI 原生抓包、协议分析与请求调试桌面工具。浏览器、桌面程序、终端、脚本和移动设备的流量会汇总到同一个会话；从一条请求开始，可以检查完整证据、交给 AI Agent 分析、进入 Request Lab 重放，最后直接生成可运行的调用代码。
 
-## Core Workflows
+> 第一次使用不必配置系统代理或证书：打开内嵌浏览器后点击“开始抓包”，浏览器流量会自动进入当前会话。需要抓取手机或其他软件时，再按应用内的设备引导安装证书并连接代理。
+
+## 先看教程
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-B站横版.mp4">
+        <img src="docs/assets/tutorial/01-traffic-overview.png" alt="ShowNet 横版真实操作教程预览" width="100%" />
+      </a>
+      <br />
+      <strong>横版完整教程（Bilibili）</strong><br />
+      <sub>2 分钟，从开始抓包到 AI 分析、请求重放和代码生成。</sub><br />
+      <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-B站横版.mp4">播放 MP4</a> · <a href="docs/assets/tutorial/ShowNet-真实操作新手教程.srt">中文字幕</a>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-小红书竖版.mp4">
+        <img src="docs/assets/tutorial/04-ai-report.png" alt="ShowNet 竖版真实操作教程预览" width="100%" />
+      </a>
+      <br />
+      <strong>竖版教程（小红书）</strong><br />
+      <sub>适合手机观看的同一套真实操作流程。</sub><br />
+      <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-小红书竖版.mp4">播放 MP4</a> · <a href="docs/assets/tutorial/ShowNet-真实操作新手教程.srt">中文字幕</a>
+    </td>
+  </tr>
+</table>
+
+## 五步上手
+
+### 1. 打开内嵌浏览器，开始抓包
+
+进入“浏览器”，打开要测试的网站，点击右上角“开始抓包”。内嵌浏览器的请求和 JS Hook 证据会自动关联，不需要先折腾代理配置。
+
+<img src="docs/assets/tutorial/07-browser-capturing.png" alt="ShowNet 内嵌浏览器开始抓包并显示 Hook 事件" width="920" />
+
+### 2. 在统一会话里定位请求
+
+回到“流量”，所有来源的请求都会按时间进入当前会话。先用 URL、域名、状态码或关键字过滤，例如搜索 `login`，再打开最相关的一条。
+
+<img src="docs/assets/tutorial/01-traffic-overview.png" alt="ShowNet 流量会话和请求列表" width="920" />
+
+### 3. 查看请求和响应的完整证据
+
+在详情页检查 URL、方法、状态码、协议、请求头、Cookie、正文、响应、耗时，以及捕获到的 Hook 关联。这里是后续判断和复现的事实依据。
+
+<img src="docs/assets/tutorial/03-request-detail.png" alt="ShowNet 请求详情中的协议和证据" width="920" />
+
+### 4. 让 AI Agent 建立证据链
+
+在“AI 分析”中选择分析模式并限定范围。Agent 会先确认范围，再关联调用链、核验请求证据并输出报告；报告中的结论仍然可以回到原始流量逐条验证。
+
+<img src="docs/assets/tutorial/04-ai-report.png" alt="ShowNet AI 智能分析报告" width="920" />
+
+<img src="docs/assets/tutorial/06-agent-workflow.png" alt="ShowNet AI Agent 的范围确认、调用链关联和证据核验阶段" width="920" />
+
+### 5. 在 Request Lab 重放，并生成调用代码
+
+选中请求后直接进入“请求实验室”。方法、URL、Header、Cookie、认证和正文会带入草稿；可以修改后重放，也可以点“生成代码”，从下拉框选择 Python、Java、JavaScript、TypeScript、Go 或 cURL。
+
+<img src="docs/assets/tutorial/05-request-lab.png" alt="ShowNet 请求实验室" width="920" />
+
+<img src="docs/assets/tutorial/07-code-generation.png" alt="ShowNet Request Lab 中选择 Python 生成调用代码" width="920" />
+
+## 功能总览
 
 <table>
   <tr>

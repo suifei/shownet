@@ -146,7 +146,7 @@ pub fn read_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "requestId": { "type": "string" },
-                    "template": { "type": "string", "enum": ["curl", "httpie", "python", "fetch", "axios", "go"] }
+                    "template": { "type": "string", "enum": ["curl", "httpie", "python", "java", "fetch", "axios", "go"] }
                 },
                 "required": ["requestId", "template"],
                 "additionalProperties": false

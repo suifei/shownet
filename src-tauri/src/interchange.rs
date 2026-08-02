@@ -211,6 +211,7 @@ pub fn generate_code(request: &BundleRequest, template: &str) -> Result<String, 
         "curl" => Ok(curl_code(request, &url, &headers)),
         "httpie" => Ok(httpie_code(request, &url, &headers)),
         "python" => Ok(python_code(request, &url, &headers)),
+        "java" => Ok(java_code(request, &url, &headers)),
         "fetch" => Ok(fetch_code(request, &url, &headers)),
         "axios" => Ok(axios_code(request, &url, &headers)),
         "go" => Ok(go_code(request, &url, &headers)),
@@ -461,6 +462,40 @@ fn python_code(request: &BundleRequest, url: &str, headers: &[HeaderEntry]) -> S
     format!(
         "import requests\n\nresponse = requests.request(\n    {},\n)\nresponse.raise_for_status()\nprint(response.text)",
         arguments.join(",\n    ")
+    )
+}
+
+fn java_code(request: &BundleRequest, url: &str, headers: &[HeaderEntry]) -> String {
+    let body_publisher = request
+        .request_body
+        .as_deref()
+        .map(|body| {
+            format!(
+                "HttpRequest.BodyPublishers.ofString({}, StandardCharsets.UTF_8)",
+                json_string(body)
+            )
+        })
+        .unwrap_or_else(|| "HttpRequest.BodyPublishers.noBody()".to_string());
+    let header_lines = code_headers(headers)
+        .map(|header| {
+            format!(
+                "    .header({}, {})",
+                json_string(&header.name),
+                json_string(&header.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "import java.net.URI;\nimport java.net.http.HttpClient;\nimport java.net.http.HttpRequest;\nimport java.net.http.HttpResponse;\nimport java.nio.charset.StandardCharsets;\n\npublic class Main {{\n    public static void main(String[] args) throws Exception {{\n        HttpClient client = HttpClient.newHttpClient();\n        HttpRequest request = HttpRequest.newBuilder()\n            .uri(URI.create({})){}\n            .method({}, {})\n            .build();\n\n        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());\n        System.out.println(response.statusCode());\n        System.out.println(response.body());\n    }}\n}}",
+        json_string(url),
+        if header_lines.is_empty() {
+            "".to_string()
+        } else {
+            format!("\n{header_lines}")
+        },
+        json_string(&request.method),
+        body_publisher,
     )
 }
 
@@ -733,7 +768,7 @@ mod tests {
     #[test]
     fn generates_every_supported_request_template() {
         let request = request();
-        for template in ["curl", "httpie", "python", "fetch", "axios", "go"] {
+        for template in ["curl", "httpie", "python", "java", "fetch", "axios", "go"] {
             let code = generate_code(&request, template).unwrap();
             assert!(!code.trim().is_empty(), "empty {template} template");
             assert!(

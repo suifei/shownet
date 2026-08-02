@@ -5,6 +5,7 @@ import {
   createEmptyRuleDraft, isCaptureRuleDraftValid, prefillMirrorDraftFromRequest,
 } from "../src/captureRuleDraft.ts";
 import { compareRequestRecords, draftToCurl, parseCurl, redactSecrets, resolveTemplate, sanitizeReplayHeaders } from "../src/requestWorkbench.ts";
+import { generateRequestCode } from "../src/requestCode.ts";
 import type { CaptureRule, RequestRecord } from "../src/types.ts";
 
 const variables = {
@@ -52,6 +53,27 @@ describe("request workbench", () => {
     const exported = draftToCurl(parsed);
     assert.match(exported, /Bearer abc/);
     assert.match(exported, /X-Test: yes/);
+  });
+
+  it("generates Python, Java and other code without removing runtime credentials", () => {
+    const input = {
+      method: "POST",
+      url: "https://api.example.com/v1/items?key=secret-key",
+      headers: [
+        { name: "Authorization", value: "Bearer secret-token" },
+        { name: "Cookie", value: "sid=secret-cookie" },
+        { name: "X-Trace", value: "trace-value" },
+      ],
+      body: '{"token":"body-secret"}',
+    };
+    for (const template of ["curl", "httpie", "python", "java", "fetch", "axios", "go"] as const) {
+      const code = generateRequestCode(input, template);
+      assert.match(code, /secret-token/, `missing authorization in ${template}`);
+      assert.match(code, /secret-cookie/, `missing cookie in ${template}`);
+      assert.match(code, /body-secret/, `missing body in ${template}`);
+    }
+    assert.match(generateRequestCode(input, "java"), /HttpClient/);
+    assert.match(generateRequestCode(input, "python"), /import requests/);
   });
 
   it("creates key-aware JSON, header and transport differences with ignore paths", () => {

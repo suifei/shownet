@@ -109,11 +109,12 @@ describe("filter AST", () => {
 
 describe("request lab navigation", () => {
   it("uses a first-class workspace and carries selected traffic into a draft", async () => {
-    const [app, traffic, workbench, styles] = await Promise.all([
+    const [app, traffic, workbench, styles, requestCode] = await Promise.all([
       readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
       readFile(new URL("../src/components/TrafficView.tsx", import.meta.url), "utf8"),
       readFile(new URL("../src/components/RequestWorkbench.tsx", import.meta.url), "utf8"),
       readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+      readFile(new URL("../src/requestCode.ts", import.meta.url), "utf8"),
     ]);
 
     assert.match(app, /primaryNavigationGroups/);
@@ -130,6 +131,11 @@ describe("request lab navigation", () => {
     assert.match(workbench, /从抓包创建/);
     assert.match(workbench, /onSelectCapture/);
     assert.match(workbench, /title="草稿列表"/);
+    assert.match(workbench, /title="生成代码"/);
+    assert.match(workbench, /aria-label="代码语言"/);
+    assert.match(workbench, /requestCodeTemplates/);
+    assert.match(requestCode, /Python \(requests\)/);
+    assert.match(requestCode, /Java \(HttpClient\)/);
     assert.match(workbench, /list_request_cookies/);
     assert.match(workbench, /CookieJarManager/);
     assert.match(workbench, /delete_request_cookie/);

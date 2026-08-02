@@ -15,6 +15,7 @@ import {
   type RuleActionKind, type RuleDraft, type RuleOperationDraft, type RuleOperationTarget, type RuleStage,
 } from "../captureRuleDraft";
 import { matchesRequestDraftSearch, parseDraftTagInput, requestDraftCollectionPath } from "../requestCollections";
+import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
 import { compareRequestRecords, draftToCurl, parseCurl, type RequestDiffEntry } from "../requestWorkbench";
 import { HttpBodyViewer } from "./HttpBodyViewer";
 import type {
@@ -199,6 +200,9 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
   const [curlInput, setCurlInput] = useState("");
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [codeTemplate, setCodeTemplate] = useState<RequestCodeTemplate>("python");
+  const [codeCopied, setCodeCopied] = useState(false);
   const [creatingFromCapture, setCreatingFromCapture] = useState(autoCreateFromSelection && selected.length === 1);
   const timer = useRef<number | undefined>(undefined);
   const autoCreateAttempted = useRef(false);
@@ -299,6 +303,19 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
       else if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
       else throw new Error("当前环境不支持剪贴板");
       setMessage("完整 cURL 已复制");
+    } catch (reason) {
+      setMessage(`复制失败：${String(reason)}`);
+    }
+  };
+  const copyGeneratedCode = async () => {
+    if (!draft) return;
+    const value = generateRequestCode({ method: draft.method, url: draft.url, headers: draft.headers, body: draft.body }, codeTemplate);
+    try {
+      if (isTauri()) await writeText(value);
+      else if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+      else throw new Error("当前环境不支持剪贴板");
+      setCodeCopied(true);
+      window.setTimeout(() => setCodeCopied(false), 1200);
     } catch (reason) {
       setMessage(`复制失败：${String(reason)}`);
     }
@@ -440,9 +457,15 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
       : runs[0]?.status === "cancelled"
         ? "已取消"
         : "尚未发送";
+  const generatedCode = generateRequestCode({ method: draft.method, url: draft.url, headers: draft.headers, body: draft.body }, codeTemplate);
   return <div className="workbench-panel lab-panel">
     <header className="lab-request-line"><select value={draft.method} onChange={(event) => setDraft({ ...draft, method: event.target.value })}>{["GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"].map((method) => <option key={method}>{method}</option>)}</select><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />{sending ? <button className="secondary-button lab-cancel-button lab-send-button" onClick={() => void cancel()} title="取消请求"><Square size={13} /><span>取消</span></button> : <button className="primary-button lab-send-button" onClick={() => void send()} title="发送请求"><Send size={14} /><span>发送</span></button>}</header>
-    <div className="lab-context-line"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /><select value={draft.environmentId ?? ""} onChange={(event) => setDraft({ ...draft, environmentId: event.target.value || undefined })}><option value="">{automaticEnvironment ? `自动 · ${automaticEnvironment.name}` : "仅全局环境"}</option>{environments.filter((item) => item.kind === "named").map((item) => <option key={item.id} value={item.id}>{item.name}{item.active ? "（当前）" : ""}</option>)}</select><select className="lab-location-select" aria-label="请求归属" value={draftLocationValue(draft)} onChange={(event) => changeDraftLocation(event.target.value)}><option value="">未归档</option>{collectionLocationOptions(collectionWorkspace).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button className="icon-button" onClick={() => void openDraftList()} title="草稿列表"><History size={14} /></button><button className="icon-button" onClick={() => void copyCurl()} title="复制完整 cURL"><Copy size={14} /></button><button className="icon-button" onClick={() => void invoke("save_request_draft", { input: draftInput(draft) }).then(() => { setMessage("草稿已保存"); void loadCollections(); })} title="保存草稿"><Save size={14} /></button></div>
+    <div className="lab-context-line"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /><select value={draft.environmentId ?? ""} onChange={(event) => setDraft({ ...draft, environmentId: event.target.value || undefined })}><option value="">{automaticEnvironment ? `自动 · ${automaticEnvironment.name}` : "仅全局环境"}</option>{environments.filter((item) => item.kind === "named").map((item) => <option key={item.id} value={item.id}>{item.name}{item.active ? "（当前）" : ""}</option>)}</select><select className="lab-location-select" aria-label="请求归属" value={draftLocationValue(draft)} onChange={(event) => changeDraftLocation(event.target.value)}><option value="">未归档</option>{collectionLocationOptions(collectionWorkspace).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button className={codeOpen ? "icon-button is-active" : "icon-button"} onClick={() => setCodeOpen((open) => !open)} title="生成代码" aria-label="生成代码" aria-pressed={codeOpen}><Code2 size={14} /></button><button className="icon-button" onClick={() => void openDraftList()} title="草稿列表"><History size={14} /></button><button className="icon-button" onClick={() => void copyCurl()} title="复制完整 cURL"><Copy size={14} /></button><button className="icon-button" onClick={() => void invoke("save_request_draft", { input: draftInput(draft) }).then(() => { setMessage("草稿已保存"); void loadCollections(); })} title="保存草稿"><Save size={14} /></button></div>
+    {codeOpen && <section className="lab-code-panel" aria-label="生成代码">
+      <header><div><Code2 size={14} /><strong>生成代码</strong></div><div className="lab-code-panel__actions"><select aria-label="代码语言" value={codeTemplate} onChange={(event) => setCodeTemplate(event.target.value as RequestCodeTemplate)}>{requestCodeTemplates.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><button className="icon-button" onClick={() => void copyGeneratedCode()} title="复制代码" aria-label="复制代码"><Copy size={14} /></button><button className="icon-button" onClick={() => setCodeOpen(false)} title="关闭生成代码" aria-label="关闭生成代码"><X size={14} /></button></div></header>
+      <pre className="lab-generated-code">{generatedCode}</pre>
+      {codeCopied && <span className="lab-code-panel__copied" role="status">已复制</span>}
+    </section>}
     {draftCollection && <div className={`lab-inheritance-bar ${inheritsCollection ? "is-active" : ""}`}><span className="lab-inheritance-source"><FolderTree size={13} /><strong>{draftCollection.name}</strong></span>{inheritsCollection ? <span className="lab-inheritance-summary"><em>{inheritedHeaderCount} 公共 Header</em><em>{inheritedAuthKind === "none" ? "无公共 Auth" : `继承 ${authKindLabel(inheritedAuthKind)}`}</em><em>{automaticEnvironment ? automaticEnvironment.name : "仅全局环境"}</em></span> : <span className="lab-inheritance-summary"><em>已使用请求自身配置</em></span>}<label title="启用或关闭集合公共配置继承"><span>继承</span><input type="checkbox" checked={inheritsCollection} onChange={(event) => setDraft({ ...draft, settings: { ...draft.settings, inheritCollection: event.target.checked } })} /><i /></label></div>}
     <div className="lab-split">
       <div className="lab-request-pane">
