@@ -2281,6 +2281,11 @@ async fn forward_mitm_https(
             .unwrap_or((&host, port));
         let replace_host_header = authority_changed && !control.redirect_preserve_host
             || active_mirror_route.is_some_and(|route| route.identity == MirrorIdentity::Target);
+        // h2 needs absolute form; h1 needs origin form. Rebuilt here so the
+        // authority matches the Host header written just below.
+        if parts.version == Version::HTTP_2 {
+            parts.uri = absolute_form_uri(&scheme, host_header_host, host_header_port, &parts.uri)?;
+        }
         ensure_host_header(
             &mut parts.headers,
             &scheme,
@@ -4279,6 +4284,10 @@ async fn forward_http(
         .unwrap_or((&host, port));
     let replace_host_header = authority_changed && !control.redirect_preserve_host
         || active_mirror_route.is_some_and(|route| route.identity == MirrorIdentity::Target);
+    // h2 needs absolute form; h1 needs origin form. See absolute_form_uri.
+    if parts.version == Version::HTTP_2 {
+        parts.uri = absolute_form_uri(&scheme, host_header_host, host_header_port, &parts.uri)?;
+    }
     ensure_host_header(
         &mut parts.headers,
         &scheme,
@@ -4771,6 +4780,26 @@ fn origin_form_uri(uri: &Uri) -> Result<Uri, String> {
         .unwrap_or("/")
         .parse::<Uri>()
         .map_err(|error| error.to_string())
+}
+
+/// Absolute-form URI for an HTTP/2 origin connection.
+///
+/// h2 builds `:scheme` and `:authority` from the URI alone — there is no Host
+/// header fallback — so a request carrying only a path is rejected with
+/// `MissingUriSchemeAndAuthority` before any frame is written. HTTP/1.1 wants
+/// the opposite (origin form), which is why the two paths differ.
+///
+/// The authority is produced by the same helper that writes the Host header, so
+/// `:authority` and `Host` cannot drift apart.
+fn absolute_form_uri(scheme: &str, host: &str, port: u16, uri: &Uri) -> Result<Uri, String> {
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let authority = host_header_authority(scheme, host, port);
+    format!("{scheme}://{authority}{path}")
+        .parse::<Uri>()
+        .map_err(|error| format!("构造 HTTP/2 绝对形式 URI 失败: {error}"))
 }
 
 fn negotiated_http_protocol(alpn: Option<&[u8]>) -> &'static str {
@@ -5585,6 +5614,115 @@ mod tests {
             .body(())
             .unwrap();
         assert_eq!(infer_resource_type(response.headers()), "sse");
+    }
+
+    /// The form the h2 paths now send, and that `:authority` cannot drift from
+    /// the Host header (both come from `host_header_authority`).
+    #[test]
+    fn absolute_form_uri_carries_scheme_and_authority_matching_host() {
+        let origin = origin_form_uri(&"https://api.test/v1/x?q=1".parse::<Uri>().unwrap()).unwrap();
+        assert_eq!(origin.to_string(), "/v1/x?q=1");
+        assert!(origin.scheme().is_none() && origin.authority().is_none());
+
+        // Default port is elided, matching the Host header.
+        let absolute = absolute_form_uri("https", "api.test", 443, &origin).unwrap();
+        assert_eq!(absolute.to_string(), "https://api.test/v1/x?q=1");
+        assert_eq!(absolute.scheme_str(), Some("https"));
+        assert_eq!(
+            absolute.authority().map(|a| a.as_str()),
+            Some(host_header_authority("https", "api.test", 443).as_str())
+        );
+
+        // Non-default port is kept, still matching the Host header.
+        let odd = absolute_form_uri("https", "api.test", 8443, &origin).unwrap();
+        assert_eq!(odd.to_string(), "https://api.test:8443/v1/x?q=1");
+        assert_eq!(
+            odd.authority().map(|a| a.as_str()),
+            Some(host_header_authority("https", "api.test", 8443).as_str())
+        );
+
+        // A path-less request still produces a valid target.
+        let root =
+            absolute_form_uri("https", "api.test", 443, &"/".parse::<Uri>().unwrap()).unwrap();
+        assert_eq!(root.to_string(), "https://api.test/");
+    }
+
+    /// The shape `forward_mitm_https` and `forward_http` send to an h2 origin:
+    /// a URI rewritten to origin form (path only) together with HTTP_2.
+    ///
+    /// h2 derives `:scheme` and `:authority` from the URI alone — there is no
+    /// Host-header fallback — so an origin-form URI leaves both pseudo-headers
+    /// unset and the send is rejected before a frame goes out. No existing test
+    /// builds an `HttpsRequestSender::Http2`, so nothing covered this pairing.
+    #[tokio::test]
+    async fn h2_origin_rejects_origin_form_uri_but_accepts_absolute_form() {
+        async fn send(uri: Uri, version: Version) -> Result<StatusCode, String> {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(server_io),
+                        service_fn(|_req: Request<hyper::body::Incoming>| async move {
+                            Ok::<_, std::convert::Infallible>(Response::new(
+                                http_body_util::Full::new(Bytes::from_static(b"ok")),
+                            ))
+                        }),
+                    )
+                    .await;
+            });
+            let (mut sender, connection) = hyper::client::conn::http2::handshake(
+                TokioExecutor::new(),
+                TokioIo::new(client_io),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut request = Request::new(http_body_util::Empty::<Bytes>::new());
+            *request.uri_mut() = uri;
+            *request.version_mut() = version;
+            sender
+                .send_request(request)
+                .await
+                .map(|response| response.status())
+                .map_err(|error| {
+                    // hyper's Display is just "http2 error"; the useful detail is
+                    // in the source chain.
+                    let mut chain = error.to_string();
+                    let mut source = std::error::Error::source(&error);
+                    while let Some(inner) = source {
+                        chain.push_str(&format!(" | {inner}"));
+                        source = std::error::Error::source(inner);
+                    }
+                    chain
+                })
+        }
+
+        // Absolute form carries scheme and authority, so h2 can build the pseudo-headers.
+        let absolute = send(
+            "https://origin.test/path".parse::<Uri>().unwrap(),
+            Version::HTTP_2,
+        )
+        .await
+        .expect("absolute-form request must be accepted by an h2 origin");
+        assert_eq!(absolute, StatusCode::OK);
+
+        // Origin form is what origin_form_uri produces. This is the pairing the
+        // forwarding paths use, and h2 refuses it.
+        let origin_form = origin_form_uri(&"https://origin.test/path".parse::<Uri>().unwrap())
+            .expect("origin form");
+        assert_eq!(origin_form.to_string(), "/path");
+        let rejected = send(origin_form, Version::HTTP_2).await;
+        assert!(
+            rejected.is_err(),
+            "expected h2 to reject an origin-form URI, got {rejected:?}"
+        );
+        let message = rejected.unwrap_err();
+        assert!(
+            message.contains("scheme") || message.contains("authority"),
+            "expected a missing scheme/authority error, got: {message}"
+        );
     }
 
     #[tokio::test]
