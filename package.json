@@ -32,6 +32,7 @@
     "test:request-collections": "node --experimental-strip-types --test tests/request-collections.test.ts",
     "test:reverse-proxy-ui": "node --experimental-strip-types --test tests/reverse-proxy-ui.test.ts",
     "test:tls-interception-ui": "node --experimental-strip-types --test tests/tls-interception-ui.test.ts",
+    "test:tls-golden": "node --experimental-strip-types --test tests/tls-golden-gate.test.ts",
     "test:client-access-ui": "node --experimental-strip-types --test tests/client-access-ui.test.ts",
     "test:mcp-guide": "node --experimental-strip-types --test tests/mcp-client-guide.test.ts",
     "test:analysis-scope": "node --experimental-strip-types --test tests/analysis-scope.test.ts",

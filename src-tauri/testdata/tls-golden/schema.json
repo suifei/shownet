@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shownet.local/schema/tls-golden-entry.json",
+  "title": "ShowNet TLS golden fingerprint entry",
+  "description": "One captured ClientHello fingerprint for a (presetId, platform) pair. Used as the hard gate for outbound TLS alignment claims. See src-tauri/testdata/tls-golden/README.md and docs/plan-real-browser-ja3-impersonate.md section 4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "presetId",
+    "platform",
+    "family",
+    "major",
+    "stack",
+    "status",
+    "alignment",
+    "source",
+    "golden"
+  ],
+  "properties": {
+    "presetId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*[0-9]+$",
+      "description": "Catalog preset id this golden gates, e.g. chrome150, chrome-android150, safari-ios18."
+    },
+    "platform": {
+      "enum": [
+        "desktop-macos",
+        "desktop-windows",
+        "desktop-linux",
+        "android",
+        "ios"
+      ],
+      "description": "A presetId on a different platform is a DIFFERENT golden. Never reuse a desktop capture to gate an android or ios preset."
+    },
+    "family": {
+      "enum": ["chrome", "chrome-android", "chrome-ios", "edge", "firefox", "safari", "safari-ios"],
+      "description": "Client family. Drives which connector/stack is legitimate."
+    },
+    "major": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Client major version the capture represents."
+    },
+    "stack": {
+      "enum": ["chromium-boringssl", "gecko-nss", "apple-network", "unknown"],
+      "description": "TLS stack actually used by the client. iOS Safari and Chrome iOS are apple-network, NOT chromium-boringssl. Do not guess: mark unknown until confirmed."
+    },
+    "stackVersion": {
+      "type": ["string", "null"],
+      "description": "Free-form stack revision: Chromium full version, tree boringssl revision, iOS/CFNetwork version. Null when not determined."
+    },
+    "status": {
+      "enum": ["pending-capture", "captured", "superseded"],
+      "description": "pending-capture: placeholder, all golden fields MUST be null and the gate treats it as absent. captured: usable by the gate. superseded: target moved on, gate must fall back to recipe."
+    },
+    "alignment": {
+      "enum": ["recipe", "tool-matched", "browser-matched"],
+      "description": "Highest alignment this entry may authorise. Derived from source: tool-capture -> tool-matched, browser-capture -> browser-matched. A pending-capture entry is always recipe."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["browser-capture", "tool-capture", "pending"],
+          "description": "browser-capture is the acceptance basis. tool-capture (curl-impersonate et al) may only authorise tool-matched. pending means not yet collected."
+        },
+        "tool": {
+          "type": ["string", "null"],
+          "description": "Required when kind is tool-capture, e.g. curl-impersonate 0.9.x chrome150 profile."
+        },
+        "environment": {
+          "type": ["string", "null"],
+          "description": "Capture environment: exact client build, OS version, architecture, device."
+        },
+        "capturedAt": {
+          "type": ["string", "null"],
+          "format": "date",
+          "description": "ISO date of capture. Null only while pending."
+        }
+      }
+    },
+    "golden": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ja3", "ja3Raw", "ja4", "ja4Raw", "clientHelloHex"],
+      "description": "All fields MUST be null while status is pending-capture. Never populate these from documentation, blog posts, or the catalog documentedJa3 value.",
+      "properties": {
+        "ja3": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "MD5 of the JA3 canonical string."
+        },
+        "ja3Raw": {
+          "type": ["string", "null"],
+          "description": "JA3 canonical string, retained so the hash can be recomputed after an algorithm change."
+        },
+        "ja4": {
+          "type": ["string", "null"],
+          "description": "JA4 fingerprint. Soft gate: may lag behind ja3."
+        },
+        "ja4Raw": {
+          "type": ["string", "null"],
+          "description": "JA4 canonical string."
+        },
+        "clientHelloHex": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]*$",
+          "description": "Raw ClientHello record bytes, lowercase hex. The authoritative artefact: ja3/ja4 above are derived and can be recomputed from this."
+        }
+      }
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "GREASE behaviour, ECH presence, post-quantum groups, ALPS, or any caveat a reviewer needs."
+    }
+  }
+}

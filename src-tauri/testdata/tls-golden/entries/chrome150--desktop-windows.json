@@ -1,0 +1,24 @@
+{
+  "presetId": "chrome150",
+  "platform": "desktop-windows",
+  "family": "chrome",
+  "major": 150,
+  "stack": "chromium-boringssl",
+  "stackVersion": null,
+  "status": "pending-capture",
+  "alignment": "recipe",
+  "source": {
+    "kind": "pending",
+    "tool": null,
+    "environment": null,
+    "capturedAt": null
+  },
+  "golden": {
+    "ja3": null,
+    "ja3Raw": null,
+    "ja4": null,
+    "ja4Raw": null,
+    "clientHelloHex": null
+  },
+  "notes": "P0. Same Chromium family as macOS but capture separately - platform can change extension set."
+}
