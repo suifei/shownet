@@ -241,6 +241,46 @@ pub fn built_in_skills() -> Vec<SkillDefinition> {
             ],
         ),
         skill(
+            "auto-crawler",
+            "自动爬虫代码生成",
+            "1.0.0",
+            "工程落地",
+            "从抓包分析生成多语言、依赖尽量少的客户端/爬虫源码包：JA3/JA4 保真标签、代理出口环境变量、算法还原模式标注、离线 validate-against-capture 与测试状态文档",
+            "ready",
+            "crypto/auto 在检测到动态防护、签名参数、Hook 或加密代码时与算法重播一并启用；可单独生成/导出爬虫包",
+            &[
+                "shownet_get_report",
+                "shownet_analyze_dynamic_protection",
+                "shownet_build_algorithm_replay",
+                "shownet_build_auto_crawler",
+                "shownet_export_auto_crawler",
+                "shownet_export_analysis_artifacts",
+                "shownet_get_tls_fingerprints",
+                "shownet_get_hooks",
+            ],
+            &[
+                "读取会话与防护 schema",
+                "生成多语言爬虫客户端源码",
+                "离线对照抓包校验",
+                "导出爬虫包目录",
+            ],
+            &[
+                "基于 CAPTURE_SHAPE 生成无额外依赖倾向的 client_crawler（py/js/ts/go/rust 等）",
+                "诚实标注入站 JA3/JA4 与出站 TLS 保真标签，不宣称完整浏览器 impersonate",
+                "代理出口仅通过 SHOWNET_PROXY / HTTPS_PROXY 等环境变量配置",
+                "按证据标注 algorithm reconstruction 模式（reconstructed/partial/trace/sandbox/wasm/jsvmp）",
+                "离线 validate-against-capture：字段形状对齐抓包；禁止嵌入密钥/token",
+                "输出 CRAWLER_ANALYSIS.md / TEST_STATUS.md / VALIDATION_REPORT.json",
+            ],
+            &[
+                "client_crawler.* 源码",
+                "CAPTURE_SHAPE.json",
+                "CRAWLER_ANALYSIS.md",
+                "TEST_STATUS.md / VALIDATION_REPORT.json",
+                "导出目录路径",
+            ],
+        ),
+        skill(
             "web-risk-lab",
             "Web 风控研究 Lab",
             "1.0.0",
@@ -398,6 +438,10 @@ pub fn build_plan(mode: &str, requests: &[RequestRecord]) -> Result<SkillPlan, S
     {
         selected.insert("algorithm-replay");
         reasons.push("检测到可工程化的动态算法/签名/Hook 证据，启用算法重播编程".to_string());
+        selected.insert("auto-crawler");
+        reasons.push(
+            "启用自动爬虫代码生成：多语言客户端 + JA3/代理/算法模式 + 离线对照抓包校验".to_string(),
+        );
     }
     let has_captcha_or_interaction = requests.iter().any(|request| {
         let blob = format!(
@@ -818,6 +862,15 @@ mod tests {
         assert!(plan
             .tool_names
             .contains(&"shownet_build_algorithm_replay".to_string()));
+        assert!(plan
+            .selected_skill_ids
+            .contains(&"auto-crawler".to_string()));
+        assert!(plan
+            .tool_names
+            .contains(&"shownet_build_auto_crawler".to_string()));
+        assert!(plan
+            .tool_names
+            .contains(&"shownet_export_auto_crawler".to_string()));
         assert!(plan
             .tool_names
             .contains(&"shownet_build_web_risk_lab".to_string()));

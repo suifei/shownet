@@ -1,6 +1,7 @@
 use crate::algorithm_replay;
 use crate::analysis;
 use crate::analysis_pipeline;
+use crate::auto_crawler;
 use crate::challenge_decoder;
 use crate::crypto_code;
 use crate::interchange::generate_code;
@@ -181,6 +182,24 @@ pub fn read_tool_definitions() -> Vec<ToolDefinition> {
                         "enum": ["python", "javascript", "typescript", "go", "rust", "java", "csharp", "c++", "c", "zig"],
                         "default": "python",
                         "description": "目标编程语言；也接受 py/js/ts/golang/cpp/cxx 等别名"
+                    }
+                },
+                "required": ["sessionId"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "shownet_build_auto_crawler",
+            "从抓包会话生成自动爬虫/客户端包：多语言依赖尽量少的 client 源码、JA3/JA4 保真标签、代理 env、算法还原模式、CAPTURE_SHAPE 与离线 validate-against-capture 报告（不嵌入密钥/token）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": { "type": "string" },
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "javascript", "typescript", "go", "rust", "java", "csharp", "c++", "c", "zig"],
+                        "default": "python",
+                        "description": "目标编程语言；也接受 py/js/ts/golang 等别名"
                     }
                 },
                 "required": ["sessionId"],
@@ -452,6 +471,7 @@ pub fn execute_read_tool(
         "shownet_generate_code" => generate_request_code(state, arguments),
         "shownet_build_signature_harness" => build_signature_harness(state, arguments),
         "shownet_build_algorithm_replay" => build_algorithm_replay_tool(state, arguments),
+        "shownet_build_auto_crawler" => build_auto_crawler_tool(state, arguments),
         "shownet_decode_challenge_js" => decode_challenge_js_tool(state, arguments),
         "shownet_eval_scorecard" => eval_scorecard_tool(state, arguments),
         "shownet_list_js_debug_profiles" => {
@@ -561,6 +581,7 @@ pub fn execute_write_tool(
 ) -> Option<Result<Value, String>> {
     let result = match name {
         "shownet_export_analysis_artifacts" => export_analysis_artifacts(state, arguments),
+        "shownet_export_auto_crawler" => export_auto_crawler_tool(state, arguments),
         "shownet_export_evaluation_package" => export_evaluation_package_tool(state, arguments),
         "shownet_run_autonomous_analysis" => run_autonomous_analysis_tool(state, arguments),
         "shownet_seed_web_risk_fixture" => {
@@ -1082,6 +1103,27 @@ pub fn extra_write_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         ),
+        tool(
+            "shownet_export_auto_crawler",
+            "将自动爬虫包（client 源码 + CAPTURE_SHAPE + 分析/测试文档 + VALIDATION_REPORT）导出到磁盘",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": { "type": "string" },
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "javascript", "typescript", "go", "rust", "java", "csharp", "c++", "c", "zig"],
+                        "default": "python"
+                    },
+                    "outputDir": {
+                        "type": "string",
+                        "description": "可选绝对目录；省略则写入 ShowNet 数据目录 exports/auto-crawler/"
+                    }
+                },
+                "required": ["sessionId"],
+                "additionalProperties": false
+            }),
+        ),
     ];
     for definition in &mut definitions {
         definition.access = "write".to_string();
@@ -1236,6 +1278,52 @@ fn build_algorithm_replay_tool(state: &AppState, arguments: &Value) -> Result<Va
     let package = algorithm_replay::build_algorithm_replay(&state.storage, &session_id, language)?;
     // Keep tool payload bounded: omit full report text duplication when huge by summarizing files.
     let mut value = serde_json::to_value(&package).map_err(|error| error.to_string())?;
+    truncate_large_file_contents(&mut value, "shownet_export_analysis_artifacts");
+    Ok(value)
+}
+
+fn build_auto_crawler_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {
+    let session_id = required_string(arguments, "sessionId")?;
+    let language = arguments
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("python");
+    let package = auto_crawler::build_auto_crawler(&state.storage, &session_id, language)?;
+    let mut value = serde_json::to_value(&package).map_err(|error| error.to_string())?;
+    truncate_large_file_contents(&mut value, "shownet_export_auto_crawler");
+    Ok(value)
+}
+
+fn export_auto_crawler_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {
+    let session_id = required_string(arguments, "sessionId")?;
+    let language = arguments
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("python");
+    let output_dir = arguments
+        .get("outputDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(path) = output_dir.as_ref() {
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("outputDir 不能包含 ..".to_string());
+        }
+    }
+    let exported = auto_crawler::export_auto_crawler(
+        &state.storage,
+        &session_id,
+        language,
+        output_dir.as_deref(),
+    )?;
+    serde_json::to_value(exported).map_err(|error| error.to_string())
+}
+
+fn truncate_large_file_contents(value: &mut Value, export_tool: &str) {
     if let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) {
         for file in files.iter_mut() {
             let bytes = file.get("bytes").and_then(Value::as_u64).unwrap_or(0);
@@ -1248,7 +1336,7 @@ fn build_algorithm_replay_tool(state: &AppState, arguments: &Value) -> Result<Va
                         .map(|(index, _)| index)
                         .unwrap_or(text.len());
                     *content = json!(format!(
-                        "{}\n\n/* truncated in tool response; use shownet_export_analysis_artifacts to write full files */",
+                        "{}\n\n/* truncated in tool response; use {export_tool} to write full files */",
                         &text[..end]
                     ));
                 }
@@ -1256,7 +1344,6 @@ fn build_algorithm_replay_tool(state: &AppState, arguments: &Value) -> Result<Va
             }
         }
     }
-    Ok(value)
 }
 
 fn export_analysis_artifacts(state: &AppState, arguments: &Value) -> Result<Value, String> {

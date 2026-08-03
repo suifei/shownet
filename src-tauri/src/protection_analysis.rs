@@ -515,6 +515,27 @@ fn request_signals(request: &RequestRecord) -> Vec<String> {
     );
     add_signal(
         &mut signals,
+        "PerimeterX / HUMAN",
+        &lower,
+        &[
+            "perimeterx",
+            "humansecurity",
+            "px-cdn",
+            "pxchk",
+            "px-client",
+            "px-captcha",
+            "_px3",
+            "_pxvid",
+            "_pxhd",
+            "pxcts",
+            "ecdata",
+            "client.perimeterx",
+            "captcha.px-cdn",
+            "/api/v2/collector",
+        ],
+    );
+    add_signal(
+        &mut signals,
         "business API signature",
         &lower,
         &[

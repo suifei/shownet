@@ -137,6 +137,33 @@ export const builtInSkillPreview: SkillDefinition[] = [
     ["ALGORITHM_SPEC", "多语言重播实现", "分析报告", "校验清单", "导出目录"],
   ),
   skill(
+    "auto-crawler",
+    "自动爬虫代码生成",
+    "1.0.0",
+    "工程落地",
+    "从抓包分析生成多语言、依赖尽量少的客户端源码：JA3/JA4 保真标签、代理 env、算法还原模式、离线对照抓包校验与测试文档",
+    "crypto/auto 在检测到动态防护、签名参数、Hook 或加密代码时与算法重播一并启用",
+    [
+      "shownet_get_report",
+      "shownet_analyze_dynamic_protection",
+      "shownet_build_algorithm_replay",
+      "shownet_build_auto_crawler",
+      "shownet_export_auto_crawler",
+      "shownet_export_analysis_artifacts",
+      "shownet_get_tls_fingerprints",
+      "shownet_get_hooks",
+    ],
+    ["读取会话与防护 schema", "生成多语言爬虫客户端", "离线对照抓包校验", "导出爬虫包"],
+    [
+      "生成 client_crawler 源码（py/js/ts/go/rust 等）",
+      "诚实标注 JA3/JA4 与出站 TLS 保真，不宣称完整 impersonate",
+      "代理仅 SHOWNET_PROXY / HTTPS_PROXY 等 env",
+      "算法模式按证据标注；禁止嵌入密钥/token",
+      "输出 CRAWLER_ANALYSIS / TEST_STATUS / VALIDATION_REPORT",
+    ],
+    ["client_crawler.*", "CAPTURE_SHAPE.json", "CRAWLER_ANALYSIS.md", "TEST_STATUS.md", "导出目录"],
+  ),
+  skill(
     "web-risk-lab",
     "Web 风控研究 Lab",
     "1.0.0",
@@ -289,6 +316,8 @@ export function buildPreviewSkillPlan(mode: AnalysisMode, requests: RequestListI
   ) {
     selected.add("algorithm-replay");
     reasons.push("检测到可工程化的动态算法/签名/Hook 证据，启用算法重播编程");
+    selected.add("auto-crawler");
+    reasons.push("启用自动爬虫代码生成：多语言客户端 + JA3/代理/算法模式 + 离线对照抓包校验");
   }
   if (
     (mode === "auto" || mode === "crypto") &&

@@ -2,6 +2,7 @@ mod agent_tools;
 mod algorithm_reconstruction;
 mod algorithm_replay;
 mod analysis;
+mod auto_crawler;
 mod analysis_graph;
 mod analysis_pipeline;
 mod android_setup;
@@ -25,6 +26,7 @@ mod mcp;
 mod mirror;
 mod models;
 mod protection_analysis;
+mod px_analysis;
 mod proxy;
 mod proxy_terminal;
 mod request_collections;
@@ -34,8 +36,11 @@ mod signature_adapter;
 mod skills;
 mod storage;
 mod system_proxy;
+mod tls_clienthello_catalog;
+mod tls_clienthello_reference;
 mod tls_fingerprint;
 mod tls_interception;
+mod tls_impersonate;
 mod tls_outbound;
 mod updates;
 mod web_risk_lab;
@@ -2138,6 +2143,36 @@ fn export_algorithm_replay_package(
 }
 
 #[tauri::command]
+fn build_auto_crawler_package(
+    session_id: String,
+    language: String,
+    state: State<'_, AppState>,
+) -> Result<auto_crawler::AutoCrawlerPackage, String> {
+    auto_crawler::build_auto_crawler(&state.storage, session_id.trim(), language.trim())
+}
+
+#[tauri::command]
+fn export_auto_crawler_package(
+    session_id: String,
+    language: String,
+    output_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<auto_crawler::AutoCrawlerExportResult, String> {
+    let directory = match output_dir {
+        Some(path) if !path.trim().is_empty() => {
+            Some(validate_output_directory(path.trim().to_string())?)
+        }
+        _ => None,
+    };
+    auto_crawler::export_auto_crawler(
+        &state.storage,
+        session_id.trim(),
+        language.trim(),
+        directory.as_deref(),
+    )
+}
+
+#[tauri::command]
 fn export_evaluation_package(
     session_id: String,
     analysis_id: Option<String>,
@@ -2169,14 +2204,141 @@ fn get_outbound_tls_profile() -> Result<Value, String> {
 
 #[tauri::command]
 fn set_outbound_tls_profile(profile: String, state: State<'_, AppState>) -> Result<Value, String> {
-    let parsed = tls_outbound::OutboundTlsProfile::parse(&profile);
-    tls_outbound::set_global_profile(parsed);
-    // Persist for next launch.
-    let payload = json!({ "profile": parsed.as_str() });
+    // Accept versioned catalog ids (chrome150) or coarse family names.
+    let preset_id = match tls_clienthello_catalog::resolve_preset_id(&profile) {
+        Ok(id) => id,
+        Err(_) => {
+            let parsed = tls_outbound::OutboundTlsProfile::parse(&profile);
+            match parsed {
+                tls_outbound::OutboundTlsProfile::Default => "default",
+                tls_outbound::OutboundTlsProfile::ChromeLike => "chrome150",
+                tls_outbound::OutboundTlsProfile::FirefoxLike => "firefox136",
+                tls_outbound::OutboundTlsProfile::SafariIosLike => "safari-ios18",
+            }
+        }
+    };
+    tls_outbound::set_active_preset(preset_id)?;
+    let mut payload = state
+        .storage
+        .load_app_setting_json("outbound_tls")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("presetId".into(), json!(preset_id));
+        obj.insert("profile".into(), json!(tls_outbound::global_profile().as_str()));
+        obj.insert(
+            "autoFromInbound".into(),
+            json!(tls_outbound::auto_from_inbound()),
+        );
+    } else {
+        payload = json!({
+            "presetId": preset_id,
+            "profile": tls_outbound::global_profile().as_str(),
+            "autoFromInbound": tls_outbound::auto_from_inbound(),
+        });
+    }
     state
         .storage
         .save_app_setting_json("outbound_tls", &payload)?;
     Ok(tls_outbound::status_json())
+}
+
+#[tauri::command]
+fn list_clienthello_presets() -> Result<Value, String> {
+    serde_json::to_value(tls_clienthello_catalog::list_presets()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_outbound_tls_auto_from_inbound(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    tls_outbound::set_auto_from_inbound(enabled);
+    let mut payload = state
+        .storage
+        .load_app_setting_json("outbound_tls")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("autoFromInbound".into(), json!(enabled));
+    }
+    state
+        .storage
+        .save_app_setting_json("outbound_tls", &payload)?;
+    Ok(tls_outbound::status_json())
+}
+
+#[tauri::command]
+fn set_outbound_tls_impersonate(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    // Honesty: without a real BoringSSL/curl-impersonate stack this cannot enable
+    // browser JA3. Persist the request for future wiring, but active_engine stays rustls.
+    let _ = enabled;
+    tls_impersonate::set_impersonate_requested(false);
+    let mut payload = state
+        .storage
+        .load_app_setting_json("outbound_tls")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("impersonate".into(), json!(false));
+        obj.insert(
+            "impersonateNote".into(),
+            json!("Real browser JA3 stack not linked; MITM uses profile-differentiated rustls only."),
+        );
+    }
+    state
+        .storage
+        .save_app_setting_json("outbound_tls", &payload)?;
+    Ok(tls_outbound::status_json())
+}
+
+#[tauri::command]
+fn get_px_settings() -> Result<Value, String> {
+    Ok(px_analysis::settings_json())
+}
+
+#[tauri::command]
+fn set_px_settings(
+    decrypt_enabled: Option<bool>,
+    intercept_ec_data: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if let Some(v) = decrypt_enabled {
+        px_analysis::set_px_decrypt_enabled(v);
+    }
+    if let Some(v) = intercept_ec_data {
+        px_analysis::set_px_intercept_ec_data(v);
+    }
+    let payload = px_analysis::settings_json();
+    state.storage.save_app_setting_json("px_console", &payload)?;
+    Ok(payload)
+}
+
+#[tauri::command]
+fn list_px_evidence(
+    session_id: String,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<px_analysis::PxEvidenceItem>, String> {
+    px_analysis::list_session_evidence(
+        &state.storage,
+        session_id.trim(),
+        limit.unwrap_or(200) as usize,
+    )
+}
+
+#[tauri::command]
+fn decode_px_payload(
+    request_id: String,
+    state: State<'_, AppState>,
+) -> Result<px_analysis::PxDecodeResult, String> {
+    px_analysis::decode_request_payload(&state.storage, request_id.trim())
 }
 
 #[tauri::command]
@@ -3341,10 +3503,30 @@ pub fn run() {
                 .ensure_mcp_server_settings()
                 .map_err(std::io::Error::other)?;
             if let Ok(Some(value)) = storage.load_app_setting_json("outbound_tls") {
-                if let Some(profile) = value.get("profile").and_then(|v| v.as_str()) {
-                    tls_outbound::set_global_profile(tls_outbound::OutboundTlsProfile::parse(
-                        profile,
-                    ));
+                if let Some(preset_id) = value.get("presetId").and_then(|v| v.as_str()) {
+                    let _ = tls_outbound::set_active_preset(preset_id);
+                } else if let Some(profile) = value.get("profile").and_then(|v| v.as_str()) {
+                    if let Ok(id) = tls_clienthello_catalog::resolve_preset_id(profile) {
+                        let _ = tls_outbound::set_active_preset(id);
+                    } else {
+                        tls_outbound::set_global_profile(
+                            tls_outbound::OutboundTlsProfile::parse(profile),
+                        );
+                    }
+                }
+                if let Some(auto) = value.get("autoFromInbound").and_then(|v| v.as_bool()) {
+                    tls_outbound::set_auto_from_inbound(auto);
+                }
+                // Never enable fake impersonate engine from persisted flag without a real stack.
+                let _ = value.get("impersonate");
+                tls_impersonate::set_impersonate_requested(false);
+            }
+            if let Ok(Some(value)) = storage.load_app_setting_json("px_console") {
+                if let Some(v) = value.get("decryptEnabled").and_then(|v| v.as_bool()) {
+                    px_analysis::set_px_decrypt_enabled(v);
+                }
+                if let Some(v) = value.get("interceptEcData").and_then(|v| v.as_bool()) {
+                    px_analysis::set_px_intercept_ec_data(v);
                 }
             }
             let system_proxy_recovery_error = restore_system_proxy_record(&storage).err();
@@ -3517,9 +3699,18 @@ pub fn run() {
             import_session_file,
             build_algorithm_replay_package,
             export_algorithm_replay_package,
+            build_auto_crawler_package,
+            export_auto_crawler_package,
             export_evaluation_package,
             get_outbound_tls_profile,
             set_outbound_tls_profile,
+            list_clienthello_presets,
+            set_outbound_tls_auto_from_inbound,
+            set_outbound_tls_impersonate,
+            get_px_settings,
+            set_px_settings,
+            list_px_evidence,
+            decode_px_payload,
             run_autonomous_session_analysis,
             eval_analysis_scorecard,
             generate_request_code,

@@ -620,6 +620,28 @@ pub(crate) fn tool_definitions(allow_writes: bool) -> Vec<ToolDefinition> {
                 "write",
             ),
             definition(
+                "shownet_export_auto_crawler",
+                "将自动爬虫包（多语言 client 源码 + CAPTURE_SHAPE + 分析/测试文档 + 离线校验报告）导出落盘",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "sessionId": { "type": "string" },
+                        "language": {
+                            "type": "string",
+                            "enum": ["python", "javascript", "typescript", "go", "rust", "java", "csharp", "c++", "c", "zig"],
+                            "default": "python"
+                        },
+                        "outputDir": {
+                            "type": "string",
+                            "description": "可选绝对目录；省略则写入 ShowNet 数据目录 exports/auto-crawler/"
+                        }
+                    },
+                    "required": ["sessionId"],
+                    "additionalProperties": false
+                }),
+                "write",
+            ),
+            definition(
                 "shownet_export_evaluation_package",
                 "一键导出评估包：evidenceHeader / protocolSchemas / fidelity / scorecard L0-L2 / 分析报告",
                 json!({
@@ -1036,6 +1058,7 @@ mod tests {
         for write_only in [
             "shownet_run_analysis",
             "shownet_export_analysis_artifacts",
+            "shownet_export_auto_crawler",
             "shownet_run_autonomous_analysis",
             "shownet_create_session",
             "shownet_delete_session",

@@ -9615,6 +9615,7 @@ mod tests {
                 profile: "client-pass-through".to_string(),
                 ja3: None,
                 note: "tunnel".to_string(),
+                ..Default::default()
             },
             http2: None,
         });

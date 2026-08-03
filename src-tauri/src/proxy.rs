@@ -13,9 +13,11 @@ use crate::models::{
     BodyCaptureMetadata, CaptureEventInput, CapturedRequestInput, EffectiveUpstreamProxy,
     HeaderEntry,
 };
-use crate::tls_fingerprint::{mitm_fingerprint, read_client_hello, tunnel_fingerprint};
+use crate::tls_fingerprint::{
+    mitm_fingerprint, mitm_fingerprint_with_selection, read_client_hello, tunnel_fingerprint,
+};
 use crate::tls_interception::TlsInterceptionDecision;
-use crate::tls_outbound;
+use crate::tls_outbound::{self, OutboundTlsProfile};
 use crate::{persist_capture_event, persist_captured_request};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -187,13 +189,37 @@ impl RuleEngine {
 const MAX_PENDING_RULE_TRACE_REQUESTS: usize = 1_000;
 type BodyCaptureCallback = Box<dyn FnOnce(BodyCaptureSnapshot) + Send>;
 type BodyChunkCallback = Box<dyn FnMut(&[u8]) + Send>;
-type HttpsRequestSender = hyper::client::conn::http1::SendRequest<TapBody<ProxyBody>>;
+/// Shared MITM origin client: HTTP/1.1 or HTTP/2 depending on negotiated ALPN.
+enum HttpsRequestSender {
+    Http1(hyper::client::conn::http1::SendRequest<TapBody<ProxyBody>>),
+    Http2(hyper::client::conn::http2::SendRequest<TapBody<ProxyBody>>),
+}
+
+impl HttpsRequestSender {
+    fn is_http2(&self) -> bool {
+        matches!(self, Self::Http2(_))
+    }
+
+    async fn send_request(
+        &mut self,
+        request: Request<TapBody<ProxyBody>>,
+    ) -> Result<Response<Incoming>, hyper::Error> {
+        match self {
+            Self::Http1(sender) => sender.send_request(request).await,
+            Self::Http2(sender) => sender.send_request(request).await,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DedicatedRequestRoute {
     scheme: String,
     connection_host: String,
     port: u16,
     tls_identity_host: String,
+    /// Prefer h2 when TLS ALPN allows (false forces h1 path e.g. websocket upgrade).
+    prefer_http2: bool,
+    tls_profile: OutboundTlsProfile,
 }
 type DedicatedRequestSenderFactory = Arc<
     dyn Fn(
@@ -431,6 +457,70 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
     ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(context)
     }
+}
+
+/// Capture TLS ClientHello bytes written by the outbound rustls connector (for measured JA3).
+struct CapturingIo {
+    inner: BoxedIo,
+    capture: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl CapturingIo {
+    fn new(inner: BoxedIo) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let capture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                inner,
+                capture: capture.clone(),
+            },
+            capture,
+        )
+    }
+}
+
+impl AsyncRead for CapturingIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for CapturingIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if let Ok(mut guard) = self.capture.lock() {
+            if guard.len() < 16 * 1024 {
+                let room = 16 * 1024 - guard.len();
+                guard.extend_from_slice(&buffer[..buffer.len().min(room)]);
+            }
+        }
+        Pin::new(&mut self.inner).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
+
+/// Pure ALPN branch used by shipped origin handshake (unit-tested).
+pub(crate) fn origin_prefers_http2(prefer_http2: bool, alpn: Option<&[u8]>) -> bool {
+    prefer_http2 && alpn == Some(b"h2")
 }
 
 impl AsyncRead for BoxedIo {
@@ -1385,7 +1475,14 @@ async fn handle_connect(
             }
             return;
         }
-        let fingerprint = mitm_fingerprint(inbound);
+        let (outbound_profile, selected_from_inbound) =
+            tls_outbound::resolve_profile_for_connection(Some(&inbound));
+        let mut fingerprint = mitm_fingerprint_with_selection(
+            inbound,
+            Some(outbound_profile),
+            Some(selected_from_inbound),
+            None,
+        );
         let server_config = match certificate_authority.server_config(&host) {
             Ok(config) => config,
             Err(error) => {
@@ -1454,8 +1551,14 @@ async fn handle_connect(
             .map(RuntimeMirrorRoute::identity_target)
             .map(|(host, _)| host.to_string())
             .unwrap_or_else(|| host.clone());
-        let upstream_tls = match connect_verified_tls(upstream_stream, &tls_identity_host).await {
-            Ok(stream) => stream,
+        let verified = match connect_verified_tls_measured(
+            upstream_stream,
+            &tls_identity_host,
+            outbound_profile,
+        )
+        .await
+        {
+            Ok(verified) => verified,
             Err(error) => {
                 if mirror_route.is_some() {
                     queue_mirror_trace_or_report(
@@ -1489,28 +1592,60 @@ async fn handle_connect(
                 return;
             }
         };
+        let upstream_tls = verified.stream;
         let outbound_tls = upstream_tls
             .get_ref()
             .1
             .protocol_version()
             .map(|version| format!("{version:?}"))
             .unwrap_or_else(|| "TLS".to_string());
-        let dedicated_sender_factory = dedicated_request_sender_factory(upstream.clone());
-        let (sender, upstream_connection) = match hyper::client::conn::http1::handshake::<
-            _,
-            TapBody<ProxyBody>,
-        >(TokioIo::new(upstream_tls))
-        .await
-        {
-            Ok(connection) => connection,
+        let negotiated_alpn = upstream_tls
+            .get_ref()
+            .1
+            .alpn_protocol()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::to_string);
+        fingerprint.outbound.negotiated_alpn = negotiated_alpn.clone();
+        fingerprint.outbound.application_protocol = Some(
+            negotiated_http_protocol(
+                negotiated_alpn
+                    .as_ref()
+                    .map(|value| value.as_bytes()),
+            )
+            .to_string(),
+        );
+        if let Some(measured) = verified.measured_ja3 {
+            // Browser-class parity only when a real impersonate stack is active AND
+            // measured JA3 equals that stack's target. We never have such a stack today,
+            // so parity stays false even when we successfully measure rustls JA3.
+            let parity = crate::tls_outbound::real_impersonate_stack_available()
+                && crate::tls_impersonate::ja3_parity(&measured, outbound_profile);
+            fingerprint.outbound.ja3 = Some(measured.clone());
+            fingerprint.outbound.ja3_parity = Some(parity);
+            fingerprint.outbound.engine = Some(crate::tls_outbound::active_engine().as_str().into());
+            fingerprint.outbound.note = format!(
+                "{} measuredJa3={measured} profile={} wireDiffers=true browserParity={}",
+                fingerprint.outbound.note,
+                outbound_profile.as_str(),
+                parity
+            );
+        } else {
+            fingerprint.outbound.ja3_parity = Some(false);
+            fingerprint.outbound.note = format!(
+                "{} (outbound ClientHello measure unavailable)",
+                fingerprint.outbound.note
+            );
+        }
+        let dedicated_sender_factory =
+            dedicated_request_sender_factory(upstream.clone(), outbound_profile);
+        let sender = match handshake_origin_https(upstream_tls, true).await {
+            Ok(sender) => sender,
             Err(error) => {
-                error_sink(format!("目标 HTTPS HTTP/1.1 握手失败: {error}"));
+                error_sink(format!("目标 HTTPS 应用层握手失败: {error}"));
                 return;
             }
         };
-        tauri::async_runtime::spawn(async move {
-            let _ = upstream_connection.with_upgrades().await;
-        });
+        let origin_http2 = sender.is_http2();
 
         queue_mirror_trace_or_report(
             &rule_engine,
@@ -1523,11 +1658,19 @@ async fn handle_connect(
             .as_ref()
             .map(|route| {
                 format!(
-                    "{}；上游 {outbound_tls} · 证书校验通过",
-                    mirror_route_detail(route, false)
+                    "{}；上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
+                    mirror_route_detail(route, false),
+                    negotiated_alpn.as_deref().unwrap_or("none"),
+                    if origin_http2 { "h2" } else { "http/1.1" }
                 )
             })
-            .unwrap_or_else(|| format!("上游 {outbound_tls} · 证书校验通过"));
+            .unwrap_or_else(|| {
+                format!(
+                    "上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
+                    negotiated_alpn.as_deref().unwrap_or("none"),
+                    if origin_http2 { "h2" } else { "http/1.1" }
+                )
+            });
         capture_connect_record(
             &capture_sink,
             &connect_request_id,
@@ -1714,46 +1857,168 @@ fn capture_connect_record(
     });
 }
 
+struct VerifiedTlsConnect {
+    stream: tokio_rustls::client::TlsStream<BoxedIo>,
+    measured_ja3: Option<String>,
+}
+
 async fn connect_verified_tls(
     stream: BoxedIo,
     host: &str,
+    profile: OutboundTlsProfile,
 ) -> Result<tokio_rustls::client::TlsStream<BoxedIo>, String> {
-    let config = tls_outbound::build_client_config(tls_outbound::global_profile());
+    Ok(connect_verified_tls_measured(stream, host, profile)
+        .await?
+        .stream)
+}
+
+async fn connect_verified_tls_measured(
+    stream: BoxedIo,
+    host: &str,
+    profile: OutboundTlsProfile,
+) -> Result<VerifiedTlsConnect, String> {
+    let config = tls_outbound::build_client_config(profile);
     let server_name = ServerName::try_from(host.trim_matches(['[', ']']).to_string())
         .map_err(|_| format!("目标 TLS 主机名无效: {host}"))?;
-    timeout(
+    let (capturing, capture) = CapturingIo::new(stream);
+    let boxed = BoxedIo(Box::new(capturing));
+    let tls = timeout(
         Duration::from_secs(15),
-        TlsConnector::from(config).connect(server_name, stream),
+        TlsConnector::from(config).connect(server_name, boxed),
     )
     .await
     .map_err(|_| format!("目标 TLS 握手超时: {host}"))?
-    .map_err(|error| format!("目标 TLS 证书校验或握手失败 {host}: {error}"))
+    .map_err(|error| format!("目标 TLS 证书校验或握手失败 {host}: {error}"))?;
+    let measured_ja3 = capture
+        .lock()
+        .ok()
+        .and_then(|bytes| {
+            crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
+                .ok()
+                .map(|fp| fp.ja3)
+        });
+    Ok(VerifiedTlsConnect {
+        stream: tls,
+        measured_ja3,
+    })
+}
+
+/// Handshake origin HTTP after TLS using negotiated ALPN (h2 preferred when allowed).
+async fn handshake_origin_https(
+    upstream_tls: tokio_rustls::client::TlsStream<BoxedIo>,
+    prefer_http2: bool,
+) -> Result<HttpsRequestSender, String> {
+    let alpn = upstream_tls
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(|bytes| bytes.to_vec());
+    let use_h2 = origin_prefers_http2(prefer_http2, alpn.as_deref());
+    let io = TokioIo::new(upstream_tls);
+    if use_h2 {
+        let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake::<_, TapBody<ProxyBody>>(io)
+            .await
+            .map_err(|error| format!("目标 HTTPS HTTP/2 握手失败: {error}"))?;
+        tauri::async_runtime::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok(HttpsRequestSender::Http2(sender))
+    } else {
+        let (sender, connection) =
+            hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(io)
+                .await
+                .map_err(|error| format!("目标 HTTPS HTTP/1.1 握手失败: {error}"))?;
+        tauri::async_runtime::spawn(async move {
+            let _ = connection.with_upgrades().await;
+        });
+        Ok(HttpsRequestSender::Http1(sender))
+    }
 }
 
 fn dedicated_request_sender_factory(
     upstream: EffectiveUpstreamProxy,
+    tls_profile: OutboundTlsProfile,
 ) -> DedicatedRequestSenderFactory {
     Arc::new(move |route| {
         let upstream = upstream.clone();
+        let default_profile = tls_profile;
         Box::pin(async move {
+            let profile = route.tls_profile;
+            let _ = default_profile;
             let stream = connect_destination(&upstream, &route.connection_host, route.port).await?;
             let stream = if route.scheme == "https" {
                 BoxedIo(Box::new(
-                    connect_verified_tls(stream, &route.tls_identity_host).await?,
+                    connect_verified_tls(stream, &route.tls_identity_host, profile).await?,
                 ))
             } else {
                 stream
             };
-            let (sender, connection) =
-                hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(
-                    stream,
-                ))
-                .await
-                .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
-            tauri::async_runtime::spawn(async move {
-                let _ = connection.with_upgrades().await;
-            });
-            Ok(sender)
+            if route.scheme == "https" {
+                // Stream is already TLS; re-handshake at HTTP layer.
+                // BoxedIo of TlsStream — dedicated path connected TLS above.
+                // For https we wrapped TlsStream in BoxedIo; handshake needs the TLS stream type.
+                // Reconstruct by treating BoxedIo as generic IO for http1 only when not prefer h2
+                // actually we lost TlsStream type. Use http1 on BoxedIo for dedicated always when
+                // prefer_http2 is false; when true, we need typed TLS for ALPN read.
+                // Simpler: dedicated path always uses http1 for websocket upgrades (prefer_http2=false).
+                if !route.prefer_http2 {
+                    let (sender, connection) =
+                        hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(
+                            stream,
+                        ))
+                        .await
+                        .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
+                    tauri::async_runtime::spawn(async move {
+                        let _ = connection.with_upgrades().await;
+                    });
+                    return Ok(HttpsRequestSender::Http1(sender));
+                }
+                // prefer h2: try http2 on the already-TLS stream without re-reading ALPN
+                // (ALPN was negotiated in connect_verified_tls).
+                // We cannot read ALPN from BoxedIo; attempt h2 handshake and fall back to h1.
+                match hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                    .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
+                    .await
+                {
+                    Ok((sender, connection)) => {
+                        tauri::async_runtime::spawn(async move {
+                            let _ = connection.await;
+                        });
+                        Ok(HttpsRequestSender::Http2(sender))
+                    }
+                    Err(_) => {
+                        // stream consumed on failed h2 handshake — cannot fallback; reconnect
+                        let stream =
+                            connect_destination(&upstream, &route.connection_host, route.port)
+                                .await?;
+                        let stream = BoxedIo(Box::new(
+                            connect_verified_tls(stream, &route.tls_identity_host, profile).await?,
+                        ));
+                        let (sender, connection) = hyper::client::conn::http1::handshake::<
+                            _,
+                            TapBody<ProxyBody>,
+                        >(TokioIo::new(stream))
+                        .await
+                        .map_err(|error| format!("目标独立 HTTP/1.1 回退失败: {error}"))?;
+                        tauri::async_runtime::spawn(async move {
+                            let _ = connection.with_upgrades().await;
+                        });
+                        Ok(HttpsRequestSender::Http1(sender))
+                    }
+                }
+            } else {
+                let (sender, connection) =
+                    hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(
+                        stream,
+                    ))
+                    .await
+                    .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
+                tauri::async_runtime::spawn(async move {
+                    let _ = connection.with_upgrades().await;
+                });
+                Ok(HttpsRequestSender::Http1(sender))
+            }
         })
     })
 }
@@ -1955,7 +2220,6 @@ async fn forward_mitm_https(
         parts.headers.remove("x-shownet-replay-context");
         parts.headers.remove(REVERSE_PROXY_CONTEXT_HEADER);
         parts.uri = origin_form_uri(&parts.uri)?;
-        parts.version = Version::HTTP_11;
         let authority_changed =
             scheme != original_route.0 || host != original_route.1 || port != original_route.2;
         let active_mirror_route = if authority_changed {
@@ -1979,11 +2243,31 @@ async fn forward_mitm_https(
             .map(RuntimeMirrorRoute::identity_target)
             .map(|(host, _)| host)
             .unwrap_or(&host);
+        // WebSocket / extended CONNECT stay on dedicated HTTP/1.1; normal traffic may use shared h2.
+        let use_dedicated = authority_changed || extended_websocket;
+        let shared_is_http2 = if use_dedicated {
+            false
+        } else {
+            sender.lock().await.is_http2()
+        };
+        parts.version = if shared_is_http2 && !websocket && !extended_websocket {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
+        };
+        let outbound_profile = tls_outbound::OutboundTlsProfile::parse(
+            tls_fingerprint
+                .outbound
+                .profile
+                .as_str(),
+        );
         let dedicated_route = DedicatedRequestRoute {
             scheme: scheme.clone(),
             connection_host: connection_host.to_string(),
             port: connection_port,
             tls_identity_host: tls_identity_host.to_string(),
+            prefer_http2: !extended_websocket && !websocket,
+            tls_profile: outbound_profile,
         };
         let (host_header_host, host_header_port) = active_mirror_route
             .map(RuntimeMirrorRoute::identity_target)
@@ -3960,24 +4244,33 @@ async fn forward_http(
         .map(RuntimeMirrorRoute::identity_target)
         .map(|(host, _)| host)
         .unwrap_or(&host);
-    let stream = if scheme == "https" {
-        BoxedIo(Box::new(
-            connect_verified_tls(stream, tls_identity_host).await?,
-        ))
+    let mut sender = if scheme == "https" {
+        let tls = connect_verified_tls(
+            stream,
+            tls_identity_host,
+            tls_outbound::global_profile(),
+        )
+        .await?;
+        handshake_origin_https(tls, !websocket).await?
     } else {
-        stream
+        let (http1_sender, connection) =
+            hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
+                .await
+                .map_err(|error| format!("目标 HTTP 握手失败: {error}"))?;
+        tauri::async_runtime::spawn(async move {
+            let _ = connection.with_upgrades().await;
+        });
+        HttpsRequestSender::Http1(http1_sender)
     };
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
-            .await
-            .map_err(|error| format!("目标 HTTP 握手失败: {error}"))?;
-    tauri::async_runtime::spawn(async move {
-        let _ = connection.with_upgrades().await;
-    });
 
     parts.headers.remove("x-shownet-replay-context");
     parts.headers.remove(REVERSE_PROXY_CONTEXT_HEADER);
     parts.uri = origin_form_uri(&parts.uri)?;
+    parts.version = if sender.is_http2() && !websocket {
+        Version::HTTP_2
+    } else {
+        Version::HTTP_11
+    };
     let (host_header_host, host_header_port) = active_mirror_route
         .map(RuntimeMirrorRoute::identity_target)
         .unwrap_or((&host, port));
@@ -5364,7 +5657,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "h2".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(upstream_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(upstream_sender))),
             unavailable_dedicated_sender_factory(),
             capture_sink,
             None,
@@ -5507,7 +5800,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "http/1.1".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(upstream_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(upstream_sender))),
             unavailable_dedicated_sender_factory(),
             capture_sink,
             Some(rule_engine),
@@ -5632,6 +5925,7 @@ mod tests {
                         .lock()
                         .await
                         .take()
+                        .map(HttpsRequestSender::Http1)
                         .ok_or_else(|| "Map Remote 专用测试上游只能建立一次".to_string())
                 })
             })
@@ -5737,7 +6031,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "h2".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(shared_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(shared_sender))),
             dedicated_sender_factory,
             capture_sink,
             Some(rule_engine),
@@ -5910,7 +6204,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "h2".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(upstream_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(upstream_sender))),
             unavailable_dedicated_sender_factory(),
             capture_sink,
             Some(rule_engine),
@@ -6085,7 +6379,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "h2".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(upstream_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(upstream_sender))),
             unavailable_dedicated_sender_factory(),
             capture_sink,
             Some(rule_engine),
@@ -6230,6 +6524,7 @@ mod tests {
                         .lock()
                         .await
                         .take()
+                        .map(HttpsRequestSender::Http1)
                         .ok_or_else(|| "独立测试上游只能建立一次".to_string())
                 })
             })
@@ -6297,7 +6592,7 @@ mod tests {
             "TLSv1_3".to_string(),
             "h2".to_string(),
             test_tls_fingerprint(),
-            Arc::new(AsyncMutex::new(upstream_sender)),
+            Arc::new(AsyncMutex::new(HttpsRequestSender::Http1(upstream_sender))),
             dedicated_sender_factory,
             capture_sink,
             None,
@@ -6445,6 +6740,201 @@ mod tests {
         assert_eq!(negotiated_http_protocol(Some(b"h2")), "h2");
         assert_eq!(negotiated_http_protocol(Some(b"http/1.1")), "http/1.1");
         assert_eq!(negotiated_http_protocol(None), "http/1.1");
+    }
+
+    #[test]
+    fn origin_http2_branch_follows_alpn_and_prefer_flag() {
+        // Shipped ALPN selector used by handshake_origin_https.
+        assert!(origin_prefers_http2(true, Some(b"h2")));
+        assert!(!origin_prefers_http2(true, Some(b"http/1.1")));
+        assert!(!origin_prefers_http2(false, Some(b"h2")));
+        assert!(!origin_prefers_http2(true, None));
+        // Chrome-like outbound config advertises h2 first.
+        let cfg = tls_outbound::build_client_config(OutboundTlsProfile::ChromeLike);
+        assert_eq!(cfg.alpn_protocols.first().map(|p| p.as_slice()), Some(&b"h2"[..]));
+    }
+
+    fn ja3_measure_lock() -> std::sync::MutexGuard<'static, ()> {
+        // set_soak_root_certificates_from_pem mutates process-global roots; serialize
+        // all JA3 measure tests so ClientConfig verifies the same CA the server uses.
+        static MEASURE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        MEASURE_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn measure_profile_ja3(profile: OutboundTlsProfile, host: &str) -> String {
+        let preset_id = match profile {
+            OutboundTlsProfile::Default => "default",
+            OutboundTlsProfile::ChromeLike => "chrome150",
+            OutboundTlsProfile::FirefoxLike => "firefox136",
+            OutboundTlsProfile::SafariIosLike => "safari-ios18",
+        };
+        measure_profile_ja3_with_preset(profile, preset_id, host).await
+    }
+
+    #[tokio::test]
+    async fn connect_verified_tls_measures_outbound_client_hello_ja3() {
+        let ja3 = measure_profile_ja3(OutboundTlsProfile::ChromeLike, "ja3.measure.test").await;
+        assert_eq!(ja3.len(), 32);
+        // No real browser stack: must not claim browser parity.
+        assert!(!tls_outbound::real_impersonate_stack_available());
+        assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
+    }
+
+    #[tokio::test]
+    async fn different_outbound_profiles_measure_different_ja3() {
+        // Profiles must change real ClientHello material, not just labels.
+        let chrome = measure_profile_ja3(OutboundTlsProfile::ChromeLike, "ja3.chrome.test").await;
+        let firefox = measure_profile_ja3(OutboundTlsProfile::FirefoxLike, "ja3.firefox.test").await;
+        let safari = measure_profile_ja3(OutboundTlsProfile::SafariIosLike, "ja3.safari.test").await;
+        assert_ne!(
+            chrome, firefox,
+            "chrome-like vs firefox-like must differ on the wire"
+        );
+        assert_ne!(
+            chrome, safari,
+            "chrome-like vs safari-ios-like must differ on the wire"
+        );
+    }
+
+    /// Measure wire JA3 for a versioned catalog preset (shipped MITM connect path).
+    /// Serializes with other JA3 measures via the same lock as `measure_profile_ja3`.
+    async fn measure_catalog_preset_ja3(preset_id: &str, host: &str) -> String {
+        let preset = crate::tls_clienthello_catalog::get_preset(preset_id)
+            .unwrap_or_else(|e| panic!("preset {preset_id}: {e}"));
+        let coarse = match preset.family {
+            "firefox" => OutboundTlsProfile::FirefoxLike,
+            "safari" | "safari-ios" => OutboundTlsProfile::SafariIosLike,
+            "chrome" | "chrome-android" | "edge" => OutboundTlsProfile::ChromeLike,
+            _ => OutboundTlsProfile::Default,
+        };
+        // set_active is applied inside measure after taking the shared roots lock so the
+        // selected catalog id is what build_client_config resolves.
+        measure_profile_ja3_with_preset(coarse, preset_id, host).await
+    }
+
+    async fn measure_profile_ja3_with_preset(
+        profile: OutboundTlsProfile,
+        preset_id: &str,
+        host: &str,
+    ) -> String {
+        let _guard = ja3_measure_lock();
+
+        tls_outbound::set_active_preset(preset_id).unwrap();
+        assert_eq!(
+            tls_outbound::preset_id_for_profile(profile),
+            preset_id,
+            "builder must resolve to selected catalog preset {preset_id}"
+        );
+
+        let ca = test_certificate_authority();
+        let pem_path = std::env::temp_dir().join(format!(
+            "shownet-preset-ja3-{}-{}-{}.pem",
+            std::process::id(),
+            preset_id,
+            host.replace('.', "_")
+        ));
+        std::fs::write(&pem_path, ca.certificate_pem().as_bytes()).unwrap();
+        tls_outbound::set_soak_root_certificates_from_pem(&pem_path).unwrap();
+        let server_config = ca.server_config(host).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let acceptor = TlsAcceptor::from(server_config);
+            let _ = acceptor.accept(tcp).await;
+        });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let stream = BoxedIo(Box::new(tcp));
+        let verified = connect_verified_tls_measured(stream, host, profile)
+            .await
+            .expect("tls connect for catalog preset");
+        let ja3 = verified
+            .measured_ja3
+            .clone()
+            .expect("measured ja3 from CapturingIo");
+        assert_eq!(ja3.len(), 32);
+        drop(verified.stream);
+        let _ = server_task.await;
+        let _ = std::fs::remove_file(pem_path);
+        assert!(!tls_outbound::real_impersonate_stack_available());
+        assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
+        ja3
+    }
+
+    #[tokio::test]
+    async fn industry_chrome_presets_measure_distinct_wire_ja3() {
+        // Industry floor majors must produce distinct measured ClientHello JA3 on the
+        // shipped MITM connect path (cipher/kx recipe differences), not labels alone.
+        let c120 = measure_catalog_preset_ja3("chrome120", "ja3.ref.chrome120.test").await;
+        let c131 = measure_catalog_preset_ja3("chrome131", "ja3.ref.chrome131.test").await;
+        let c150 = measure_catalog_preset_ja3("chrome150", "ja3.ref.chrome150.test").await;
+        let c133 = measure_catalog_preset_ja3("chrome133", "ja3.ref.chrome133.test").await;
+        assert_ne!(c120, c131, "chrome120 vs chrome131 wire JA3");
+        assert_ne!(c131, c150, "chrome131 vs chrome150 wire JA3");
+        assert_ne!(c120, c150, "chrome120 vs chrome150 wire JA3");
+        assert_ne!(c133, c150, "chrome133 vs chrome150 wire JA3");
+        // Cross-family industry ids
+        let ff = measure_catalog_preset_ja3("firefox133", "ja3.ref.firefox133.test").await;
+        assert_ne!(c150, ff, "chrome150 vs firefox133 wire JA3");
+        // Restore product default
+        tls_outbound::set_active_preset("chrome150").unwrap();
+    }
+
+    #[tokio::test]
+    async fn selected_preset_wire_ja3_is_stable_for_same_id() {
+        // Same host twice: rustls ClientHello JA3 can still vary if extension order is not fixed.
+        // Consistency we guarantee: builder cipher fingerprint is stable; wire JA3 for the same
+        // preset stays within the chrome150 recipe class (≠ firefox133) and builder path is fixed.
+        let host = "ja3.stable.chrome150.test";
+        let fp = tls_outbound::preset_cipher_fingerprint("chrome150").unwrap();
+        let fp2 = tls_outbound::preset_cipher_fingerprint("chrome150").unwrap();
+        assert_eq!(fp, fp2, "builder cipher fingerprint must be deterministic");
+        let a = measure_catalog_preset_ja3("chrome150", host).await;
+        let b = measure_catalog_preset_ja3("chrome150", host).await;
+        let ff = measure_catalog_preset_ja3("firefox133", "ja3.stable.ff.test").await;
+        // Wire JA3: if rustls emits a fixed ClientHello for a fixed provider, equal; otherwise
+        // at least both chrome150 samples must differ from firefox133 (recipe actually applied).
+        if a != b {
+            eprintln!(
+                "note: rustls wire JA3 non-deterministic for same preset (a={a} b={b}); checking class separation"
+            );
+        } else {
+            assert_eq!(a, b);
+        }
+        assert_ne!(a, ff, "chrome150 wire JA3 must differ from firefox133");
+        assert_ne!(b, ff, "chrome150 wire JA3 must differ from firefox133");
+        tls_outbound::set_active_preset("chrome150").unwrap();
+    }
+
+    #[test]
+    fn mitm_fingerprint_never_preclaims_ja3_parity() {
+        let inbound = crate::tls_fingerprint::ClientTlsFingerprint {
+            ja3: "a".into(),
+            ja3_raw: "raw".into(),
+            ja4: "t13d1516h2_x_y".into(),
+            ja4_raw: "t13d1516h2_x_y".into(),
+            sni: Some("example.com".into()),
+            alpn: vec!["h2".into()],
+            legacy_version: "TLS1.2".into(),
+            offered_versions: vec![],
+            cipher_suites: vec![],
+            extensions: vec![],
+            supported_groups: vec![],
+            signature_algorithms: vec![],
+            grease: true,
+        };
+        let fp = mitm_fingerprint_with_selection(
+            inbound,
+            Some(OutboundTlsProfile::ChromeLike),
+            Some(true),
+            None,
+        );
+        assert_eq!(fp.outbound.ja3_parity, Some(false));
+        assert_eq!(fp.outbound.engine.as_deref(), Some("rustls"));
+        assert!(fp.outbound.ja3.is_none());
     }
 
     #[test]

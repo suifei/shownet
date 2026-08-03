@@ -1809,7 +1809,17 @@ fn analysis_messages(
     } else {
         ""
     };
-    let dynamic_contract = format!("{dynamic_contract}{replay_contract}{lab_contract}");
+    let crawler_contract = if plan
+        .selected_skill_ids
+        .iter()
+        .any(|skill_id| skill_id == "auto-crawler")
+    {
+        "\n\n自动爬虫代码生成要求：在算法还原之后调用 shownet_build_auto_crawler（默认 python 或用户语言）生成依赖尽量少的 client 源码包，并在可写时调用 shownet_export_auto_crawler 落盘。包内必须含 CAPTURE_SHAPE.json、CRAWLER_ANALYSIS.md、TEST_STATUS.md、VALIDATION_REPORT.json 与 client_crawler。诚实标注入站 JA3/JA4 与出站 TLS 保真（不宣称完整浏览器 impersonate）；代理仅 SHOWNET_PROXY/HTTPS_PROXY 等 env；算法模式按证据写 reconstructed/partial/trace/sandbox/wasm/jsvmp；密钥/token 禁止嵌入。报告附测试情况与离线 validate-against-capture 状态。"
+    } else {
+        ""
+    };
+    let dynamic_contract =
+        format!("{dynamic_contract}{replay_contract}{lab_contract}{crawler_contract}");
     Ok(vec![
         json!({
             "role": "system",

@@ -1,4 +1,4 @@
-export type ViewId = "traffic" | "analysis" | "browser" | "lab" | "skills" | "settings";
+export type ViewId = "traffic" | "analysis" | "browser" | "lab" | "skills" | "settings" | "advanced";
 
 export type SourceType =
   | "browser"
@@ -79,10 +79,16 @@ export interface TlsFingerprintRecord {
   captureMode: "tunnel" | "mitm";
   inbound: ClientTlsFingerprint;
   outbound: {
-    mode: "pass-through" | "independent";
+    mode: "pass-through" | "independent" | "mapped-from-inbound" | string;
     profile: string;
     ja3?: string;
     note: string;
+    fidelityLabel?: string;
+    engine?: string;
+    negotiatedAlpn?: string;
+    selectedFromInbound?: boolean;
+    ja3Parity?: boolean;
+    applicationProtocol?: string;
   };
   http2?: Http2Fingerprint;
 }
@@ -728,12 +734,63 @@ export interface EvaluationExportResult {
   allFullCredit?: boolean;
 }
 
+export interface ClientHelloPresetInfo {
+  id: string;
+  family: string;
+  majorVersion: number;
+  label: string;
+  note: string;
+  alpn?: string[];
+  documentedJa3?: string | null;
+  recipeFingerprint?: string;
+  claimsFullBrowserJa3?: boolean;
+}
+
 export interface OutboundTlsProfileStatus {
   profile: string;
+  /** Active versioned ClientHello catalog preset id (e.g. chrome150). */
+  presetId?: string;
+  preset?: ClientHelloPresetInfo | null;
+  presets?: ClientHelloPresetInfo[];
   fidelityLabel: string;
   note: string;
+  browserFamily?: string;
+  browserMajorVersion?: number;
+  engine?: string;
+  autoFromInbound?: boolean;
+  impersonateRequested?: boolean;
   ja3Parity: boolean;
   supportsFullBrowserJa3: boolean;
+  realImpersonateStackAvailable?: boolean;
+  targetJa3?: string | null;
+  targetJa3Label?: string | null;
+  /** All preset ids (versioned catalog). */
+  profiles?: string[];
+  profileCipherFingerprint?: string;
+  recipeFingerprint?: string;
+}
+
+export interface PxSettings {
+  decryptEnabled: boolean;
+  interceptEcData: boolean;
+}
+
+export interface PxEvidenceItem {
+  requestId: string;
+  method: string;
+  host: string;
+  path: string;
+  markers: string[];
+  hasEcData: boolean;
+  cookieHints: string[];
+}
+
+export interface PxDecodeResult {
+  requestId: string;
+  status: string;
+  summary: string;
+  fields: Record<string, unknown>;
+  notes: string[];
 }
 
 export interface AnalysisActivity {

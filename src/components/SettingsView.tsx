@@ -1318,10 +1318,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 </span>
               </div>
               <div className="upstream-proxy-heading" style={{ marginTop: 12 }}>
-                <div className="upstream-mode-control" aria-label="出站 TLS 档位">
+                <div className="upstream-mode-control" aria-label="出站 TLS 粗档位">
                   {([
                     ["default", "默认 rustls"],
                     ["chrome-like", "Chrome-like"],
+                    ["firefox-like", "Firefox-like"],
+                    ["safari-ios-like", "Safari/iOS-like"],
                   ] as Array<[string, string]>).map(([profile, label]) => (
                     <button
                       key={profile}
@@ -1333,7 +1335,9 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                           try {
                             const status = await invoke<OutboundTlsProfileStatus>("set_outbound_tls_profile", { profile });
                             setOutboundTls(status);
-                            onNotify(`出站 TLS 已切换为 ${status.profile}（${status.fidelityLabel}）`);
+                            onNotify(
+                              `出站 TLS 已切换为 ${status.presetId ?? status.profile}（${status.fidelityLabel}）`,
+                            );
                           } catch (error) {
                             onNotify(`切换出站 TLS 失败：${String(error)}`);
                           } finally {
@@ -1347,11 +1351,81 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   ))}
                 </div>
               </div>
+              <label className="settings-text-field" style={{ marginTop: 12 }}>
+                <span>ClientHello 版本预置（浏览器 · 大版本）</span>
+                <select
+                  disabled={savingOutboundTls}
+                  value={outboundTls?.presetId ?? "chrome150"}
+                  onChange={(event) => {
+                    const presetId = event.target.value;
+                    void (async () => {
+                      setSavingOutboundTls(true);
+                      try {
+                        const status = await invoke<OutboundTlsProfileStatus>("set_outbound_tls_profile", {
+                          profile: presetId,
+                        });
+                        setOutboundTls(status);
+                        onNotify(
+                          `ClientHello 预置 → ${status.presetId ?? presetId} · ${status.browserFamily ?? ""} ${status.browserMajorVersion ?? ""}`,
+                        );
+                      } catch (error) {
+                        onNotify(`切换 ClientHello 预置失败：${String(error)}`);
+                      } finally {
+                        setSavingOutboundTls(false);
+                      }
+                    })();
+                  }}
+                >
+                  {(outboundTls?.presets ?? []).length > 0
+                    ? (outboundTls?.presets ?? []).map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label} ({preset.id}) · {preset.family}
+                          {preset.majorVersion > 0 ? ` v${preset.majorVersion}` : ""}
+                        </option>
+                      ))
+                    : (outboundTls?.profiles ?? ["default", "chrome150", "firefox136", "safari-ios18"]).map(
+                        (id) => (
+                          <option key={id} value={id}>
+                            {id}
+                          </option>
+                        ),
+                      )}
+                </select>
+              </label>
               {outboundTls && (
                 <small style={{ display: "block", marginTop: 8, opacity: 0.8 }}>
-                  {outboundTls.note} · JA3 全量对齐：{outboundTls.supportsFullBrowserJa3 ? "是" : "否（标签化保真）"}
+                  当前: <code>{outboundTls.presetId ?? outboundTls.profile}</code>
+                  {outboundTls.browserFamily
+                    ? ` · ${outboundTls.browserFamily}${outboundTls.browserMajorVersion ? ` ${outboundTls.browserMajorVersion}` : ""}`
+                    : ""}{" "}
+                  · {outboundTls.note} · engine={outboundTls.engine ?? "rustls"} · 浏览器 JA3
+                  全量对齐：
+                  {outboundTls.supportsFullBrowserJa3 && outboundTls.ja3Parity
+                    ? "是"
+                    : "否（rustls 配方差异化；非 BoringSSL/curl-impersonate）"}
                 </small>
               )}
+              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(outboundTls?.autoFromInbound)}
+                  onChange={(event) => {
+                    void (async () => {
+                      try {
+                        const status = await invoke<OutboundTlsProfileStatus>(
+                          "set_outbound_tls_auto_from_inbound",
+                          { enabled: event.target.checked },
+                        );
+                        setOutboundTls(status);
+                        onNotify(`入站自动选档：${event.target.checked ? "开" : "关"}`);
+                      } catch (error) {
+                        onNotify(String(error));
+                      }
+                    })();
+                  }}
+                />
+                根据入站 JA3/JA4 自动选择出站 ClientHello 预置（改变 rustls 密码套件/ALPN 顺序）
+              </label>
               <div className="settings-field-row">
                 <label><span>代理主机</span><input disabled={upstream.mode === "direct"} value={upstream.host} onChange={(event) => setUpstream((current) => ({ ...current, host: event.target.value }))} placeholder="proxy.example.com" /></label>
                 <label><span>端口</span><input disabled={upstream.mode === "direct"} type="number" min="1" max="65535" value={upstream.port} onChange={(event) => setUpstream((current) => ({ ...current, port: Number(event.target.value) || 0 }))} /></label>

@@ -35,13 +35,25 @@ pub struct ClientTlsFingerprint {
     pub grease: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundTlsFingerprint {
     pub mode: String,
     pub profile: String,
     pub ja3: Option<String>,
     pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiated_alpn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_from_inbound: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ja3_parity: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_protocol: Option<String>,
 }
 
 pub struct ClientHelloRead {
@@ -124,14 +136,54 @@ where
 }
 
 pub fn mitm_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord {
+    mitm_fingerprint_with_selection(inbound, None, None, None)
+}
+
+/// Build MITM fingerprint using the resolved outbound profile and optional negotiated ALPN/app protocol.
+pub fn mitm_fingerprint_with_selection(
+    inbound: ClientTlsFingerprint,
+    profile: Option<crate::tls_outbound::OutboundTlsProfile>,
+    selected_from_inbound: Option<bool>,
+    negotiated_alpn: Option<String>,
+) -> TlsFingerprintRecord {
+    let (resolved, from_inbound) = match profile {
+        Some(p) => (p, selected_from_inbound.unwrap_or(false)),
+        None => crate::tls_outbound::resolve_profile_for_connection(Some(&inbound)),
+    };
+    let engine = crate::tls_outbound::active_engine();
+    let app_protocol = negotiated_alpn
+        .as_deref()
+        .map(|alpn| {
+            if alpn.eq_ignore_ascii_case("h2") {
+                "h2".to_string()
+            } else {
+                "http/1.1".to_string()
+            }
+        });
     TlsFingerprintRecord {
         capture_mode: "mitm".to_string(),
         inbound,
         outbound: OutboundTlsFingerprint {
-            mode: "independent".to_string(),
-            profile: "rustls-default-http1".to_string(),
+            mode: if from_inbound {
+                "mapped-from-inbound".to_string()
+            } else {
+                "independent".to_string()
+            },
+            profile: resolved.as_str().to_string(),
+            // Measured after connect_verified_tls_measured; never pre-filled.
             ja3: None,
-            note: "入站 ClientHello 仅用于客户端指纹分析；目标站看到的是 ShowNet 独立 rustls 出站握手。".to_string(),
+            note: format!(
+                "{} 入站 ClientHello 用于分析与档位选择；目标站看到的是 ShowNet 出站握手（engine={}）。parity 仅在实测 JA3 与浏览器目标一致时为真。",
+                resolved.note(),
+                engine.as_str()
+            ),
+            fidelity_label: Some(resolved.fidelity_label().to_string()),
+            engine: Some(engine.as_str().to_string()),
+            negotiated_alpn,
+            selected_from_inbound: Some(from_inbound),
+            // Never pre-claim parity before measured ClientHello (always false/None until measure).
+            ja3_parity: Some(false),
+            application_protocol: app_protocol,
         },
         http2: None,
     }
@@ -148,9 +200,47 @@ pub fn tunnel_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord
             ja3: Some(client_ja3),
             note: "目标站收到客户端原始 ClientHello；ShowNet 不终止 TLS，因此无法读取请求正文。"
                 .to_string(),
+            fidelity_label: Some("pass-through-client-ja3".into()),
+            engine: Some("pass-through".into()),
+            negotiated_alpn: None,
+            selected_from_inbound: Some(false),
+            ja3_parity: Some(true),
+            application_protocol: None,
         },
         http2: None,
     }
+}
+
+/// Parse a TLS handshake ClientHello message (type 1, without record layer).
+pub fn fingerprint_client_hello_handshake(message: &[u8]) -> Result<ClientTlsFingerprint, String> {
+    parse_client_hello(message)
+}
+
+/// Parse ClientHello from one or more TLS records (content type 22).
+pub fn fingerprint_client_hello_wire(records: &[u8]) -> Result<ClientTlsFingerprint, String> {
+    let mut handshake = Vec::new();
+    let mut offset = 0usize;
+    while offset + 5 <= records.len() {
+        let content_type = records[offset];
+        let record_len = u16::from_be_bytes([records[offset + 3], records[offset + 4]]) as usize;
+        offset += 5;
+        if offset + record_len > records.len() {
+            break;
+        }
+        if content_type == 22 {
+            handshake.extend_from_slice(&records[offset..offset + record_len]);
+        }
+        offset += record_len;
+        if handshake.len() >= 4 && handshake[0] == 1 {
+            let hello_len = ((handshake[1] as usize) << 16)
+                | ((handshake[2] as usize) << 8)
+                | handshake[3] as usize;
+            if handshake.len() >= hello_len + 4 {
+                return parse_client_hello(&handshake[..hello_len + 4]);
+            }
+        }
+    }
+    Err("wire bytes 中未找到完整 ClientHello".into())
 }
 
 fn parse_client_hello(message: &[u8]) -> Result<ClientTlsFingerprint, String> {

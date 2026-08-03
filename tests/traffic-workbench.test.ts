@@ -118,7 +118,8 @@ describe("request lab navigation", () => {
     ]);
 
     assert.match(app, /primaryNavigationGroups/);
-    assert.match(app, /label: "请求工具", views: \["lab"\]/);
+    // Lab remains first-class under 请求工具; advanced MITM console may share the group.
+    assert.match(app, /label: "请求工具", views: \["lab"(?:,\s*"advanced")?\]/);
     assert.match(app, /activeView === "lab"/);
     assert.match(app, /activeView === "lab" \? "is-workbench-hidden"/);
     assert.match(traffic, /createFromSelection: selectedRequests\.length === 1/);

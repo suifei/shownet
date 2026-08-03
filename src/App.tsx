@@ -47,6 +47,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import shownetAppIcon from "./assets/shownet-app-icon.png";
 import { isShownetSessionPath } from "./browserDrag";
 import { clientAccessModeSummary } from "./clientAccess";
+import { AdvancedConsoleView } from "./components/AdvancedConsoleView";
 import { AnalysisView } from "./components/AnalysisView";
 import { BrowserView } from "./components/BrowserView";
 import { RequestWorkbench, type WorkbenchMode } from "./components/RequestWorkbench";
@@ -132,6 +133,7 @@ const viewMeta: Record<ViewId, { label: string; title: string; icon: typeof Netw
   traffic: { label: "流量", title: "实时流量", icon: Network },
   browser: { label: "浏览器", title: "内嵌浏览器", icon: Browser },
   lab: { label: "实验室", title: "请求实验室", icon: FlaskConical },
+  advanced: { label: "高级", title: "MITM 高级控制台", icon: ShieldCheck },
   analysis: { label: "AI 分析", title: "AI 智能分析", icon: Sparkles },
   skills: { label: "能力", title: "Skill 与 MCP", icon: Braces },
   settings: { label: "设置", title: "抓包与系统设置", icon: Settings },
@@ -139,7 +141,7 @@ const viewMeta: Record<ViewId, { label: string; title: string; icon: typeof Netw
 
 const primaryNavigationGroups: Array<{ label: string; views: ViewId[] }> = [
   { label: "抓包", views: ["traffic", "browser"] },
-  { label: "请求工具", views: ["lab"] },
+  { label: "请求工具", views: ["lab", "advanced"] },
   { label: "智能能力", views: ["analysis", "skills"] },
 ];
 
@@ -1405,6 +1407,31 @@ function App() {
                 setEvidenceRequestId(requestId);
                 setActiveView("traffic");
               }}
+            />
+          )}
+          {activeView === "advanced" && (
+            <AdvancedConsoleView
+              sessionId={activeSession.id}
+              requests={requests}
+              hookCount={requestListPage?.hookCount ?? requests.filter((request) => request.hasHook).length}
+              runtime={runtime}
+              onOpenTraffic={() => setActiveView("traffic")}
+              onOpenBrowser={() => setActiveView("browser")}
+              onOpenRules={() => {
+                setWorkbenchLaunch({
+                  id: Date.now(),
+                  mode: "rules",
+                  sessionId: activeSession.id,
+                  selected: [],
+                  createFromSelection: false,
+                });
+                setActiveView("lab");
+              }}
+              onOpenSettings={() => {
+                setSettingsTab("capture");
+                setActiveView("settings");
+              }}
+              onNotify={setToast}
             />
           )}
           {activeView === "analysis" && <AnalysisView sessionId={activeSession.id} requests={requests} initialRequestIds={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.requestIds : undefined} scopeRequestId={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.id : undefined} onScopeConsumed={() => setAnalysisRequestScope(null)} onOpenEvidenceRequest={(requestId) => { setEvidenceRequestId(requestId); setActiveView("traffic"); }} onConfigureAi={() => { setSettingsTab("ai"); setActiveView("settings"); }} onNotify={setToast} autoRunId={analysisAutoRun?.sessionId === activeSession.id ? analysisAutoRun.id : undefined} onAutoRunConsumed={() => setAnalysisAutoRun(null)} />}
