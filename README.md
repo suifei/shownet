@@ -209,10 +209,6 @@ npm run check:release -- --require-agent-target aarch64-apple-darwin
 
 当前桌面里程碑已覆盖：会话与请求持久化、MITM HTTPS/H2、Root CA 与设备引导、系统代理恢复、内嵌浏览器与 Hook、AST 加密代码提取、两阶段 AI 分析、Skill/MCP/Agent sidecar、算法重放与多语言代码导出、版本化出站 TLS 预置与高级控制台等。TUN、商店级签名安装包与完整物理机矩阵仍为后续项。
 
-## 参考
-
-模块边界与两阶段分析思路参考了 [`Mouseww/anything-analyzer`](https://github.com/Mouseww/anything-analyzer)，并适配为 Tauri 后端与多源 Session 模型。
-
 ## License
 
 Copyright (C) 2026 ShowNet contributors.
