@@ -108,16 +108,21 @@ impl ClientHelloProbe {
 mod tests {
     use super::*;
     use crate::tls_outbound;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use tokio_rustls::rustls::pki_types::ServerName;
     use tokio_rustls::TlsConnector;
 
     /// Preset selection is process-global; serialise tests that move it.
-    fn preset_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    ///
+    /// tokio's mutex rather than std's: the guard is deliberately held across
+    /// awaits (the whole capture must be serialised, not just the preset write),
+    /// and a std guard held across an await point is a deadlock waiting to happen
+    /// on a multi-threaded runtime.
+    async fn preset_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .await
     }
 
     /// Drive one outbound handshake at the probe using a catalog preset and
@@ -146,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn captures_and_parses_a_real_client_hello() {
-        let _guard = preset_lock();
+        let _guard = preset_lock().await;
         let captured = capture_preset("chrome150", "probe.chrome150.test").await;
 
         assert_eq!(captured.fingerprint.ja3.len(), 32, "ja3 is an md5 digest");
@@ -178,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn golden_json_matches_the_parsed_fingerprint() {
-        let _guard = preset_lock();
+        let _guard = preset_lock().await;
         let captured = capture_preset("chrome150", "probe.golden.test").await;
         let golden = captured.to_golden_json();
 
@@ -198,7 +203,7 @@ mod tests {
     /// must be distinguishable through it, otherwise it cannot gate anything.
     #[tokio::test]
     async fn distinguishes_presets_that_differ_on_the_wire() {
-        let _guard = preset_lock();
+        let _guard = preset_lock().await;
         let c120 = capture_preset("chrome120", "probe.c120.test").await;
         let c150 = capture_preset("chrome150", "probe.c150.test").await;
         assert_ne!(
@@ -211,7 +216,7 @@ mod tests {
     /// freshly measured fingerprint must not satisfy the gate on its own.
     #[tokio::test]
     async fn a_capture_alone_does_not_align_a_preset() {
-        let _guard = preset_lock();
+        let _guard = preset_lock().await;
         let captured = capture_preset("chrome150", "probe.gate.test").await;
         assert_eq!(
             crate::tls_golden::evaluate("chrome150", &captured.fingerprint.ja3),
