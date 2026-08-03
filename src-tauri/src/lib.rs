@@ -39,6 +39,7 @@ mod system_proxy;
 mod tls_clienthello_catalog;
 mod tls_clienthello_reference;
 mod tls_fingerprint;
+mod tls_golden;
 mod tls_interception;
 mod tls_impersonate;
 mod tls_outbound;

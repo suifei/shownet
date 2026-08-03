@@ -474,6 +474,7 @@ pub fn status_json() -> serde_json::Value {
                 .map(str::to_string)
         })
         .flatten();
+    let golden = crate::tls_golden::status_json(&preset_id);
     serde_json::json!({
         "profile": profile.as_str(),
         "presetId": preset_id,
@@ -491,6 +492,16 @@ pub fn status_json() -> serde_json::Value {
         "impersonateRequested": crate::tls_impersonate::impersonate_requested(),
         "impersonateUnavailableReason": impersonate_unavailable_reason(),
         "documentedJa3": documented_ja3,
+        // Alignment ladder. Reports what has actually been *measured* against a
+        // golden, which is independent of `ja3Parity` — parity additionally
+        // requires a real impersonate stack, so this stays informational until
+        // both a capture and a linked stack exist.
+        "alignmentLevel": golden["alignmentLevel"],
+        "alignmentClaim": golden["alignmentClaim"],
+        "goldenPlatform": golden["platform"],
+        "goldenStatus": golden["goldenStatus"],
+        "goldenSource": golden["goldenSource"],
+        "goldenCapturedAt": golden["goldenCapturedAt"],
         "h2Fingerprint": h2.map(|r| r.fingerprint()),
         "h2Settings": h2.map(|r| {
             r.settings_pairs()
@@ -616,6 +627,45 @@ mod tests {
         assert_eq!(status["supportsFullBrowserJa3"], false);
         assert_eq!(status["engine"], "rustls");
         assert_eq!(status["realImpersonateStackAvailable"], false);
+    }
+
+    /// The alignment ladder must not become a second, softer way to claim parity.
+    /// With nothing captured, every preset reports `recipe` and parity stays false.
+    #[test]
+    fn alignment_level_stays_recipe_until_a_golden_is_captured() {
+        let _guard = preset_lock();
+        for preset in ["chrome150", "chrome149", "firefox136", "safari-ios18"] {
+            set_active_preset(preset).unwrap();
+            let status = status_json();
+            assert_eq!(
+                status["alignmentLevel"], "recipe",
+                "{preset} has no captured golden, so it may only claim recipe"
+            );
+            assert_eq!(status["ja3Parity"], false);
+            assert_eq!(status["supportsFullBrowserJa3"], false);
+            assert_eq!(
+                status["goldenPlatform"],
+                crate::tls_golden::current_platform()
+            );
+            assert!(
+                status["goldenCapturedAt"].is_null(),
+                "{preset} must not report a capture date before being captured"
+            );
+        }
+        set_active_preset("chrome150").unwrap();
+    }
+
+    /// Mobile presets have no golden on a desktop build, so they must report no
+    /// golden at all rather than silently borrowing the desktop capture.
+    #[test]
+    fn desktop_status_reports_no_golden_for_mobile_presets() {
+        let _guard = preset_lock();
+        set_active_preset("chrome-android150").unwrap();
+        let status = status_json();
+        assert_eq!(status["alignmentLevel"], "recipe");
+        assert!(status["goldenStatus"].is_null());
+        assert!(status["goldenSource"].is_null());
+        set_active_preset("chrome150").unwrap();
     }
 
     #[test]
