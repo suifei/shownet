@@ -96,6 +96,26 @@
   --blue: #339cff;
   --amber: #ff9f0a;
 
+  /* ---- iOS materials (vibrancy). Chrome layers are translucent and blur
+         what is behind them; the ambient wash on .app-shell is what they
+         actually refract, otherwise blur over flat black reads as grey. ---- */
+  --material-thin: rgba(28, 28, 30, 0.42);
+  --material-regular: rgba(26, 26, 29, 0.55);
+  --material-thick: rgba(22, 22, 24, 0.72);
+  --material-chrome: rgba(16, 16, 18, 0.55);
+  /* frosted micro-grain: real glass is not perfectly smooth */
+  --frost: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  --glass-blur: saturate(180%) blur(28px);
+  --glass-blur-strong: saturate(200%) blur(44px);
+
+  /* ---- depth ---- */
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.075);
+  --glass-edge-strong: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 42%);
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.42), 0 4px 12px -4px rgba(0, 0, 0, 0.5);
+  --elev-2: 0 2px 6px rgba(0, 0, 0, 0.44), 0 12px 32px -10px rgba(0, 0, 0, 0.62);
+  --elev-3: 0 8px 20px rgba(0, 0, 0, 0.5), 0 32px 72px -18px rgba(0, 0, 0, 0.72);
+
   --radius: 12px;
   --shadow-color: 0 0 0;
 }
@@ -8171,7 +8191,7 @@ h1 { letter-spacing: -0.024em; font-weight: 700; }
 .section-kicker {
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-subtle); /* --text-faint lands at 4.38:1 over the wash */
   font-weight: 600;
 }
 
@@ -8268,3 +8288,136 @@ input:focus, select:focus, textarea:focus {
 }
 
 code, pre, kbd { font-variant-ligatures: none; }
+
+/* ============================================================
+   Materials & depth
+   ============================================================ */
+
+/* Ambient wash. Without something behind them, translucent layers blur
+   flat black into flat grey — this is what the glass actually refracts. */
+.app-shell {
+  background:
+    radial-gradient(1180px 660px at 8% -14%, rgba(51, 156, 255, 0.30), transparent 62%),
+    radial-gradient(940px 600px at 98% 0%, rgba(191, 90, 242, 0.24), transparent 64%),
+    radial-gradient(860px 760px at 42% 116%, rgba(48, 209, 88, 0.14), transparent 62%),
+    radial-gradient(600px 420px at 72% 52%, rgba(255, 159, 10, 0.07), transparent 66%),
+    #000000;
+}
+
+/* Content shells go transparent so the wash reads through to the glass. */
+.workspace,
+.workspace__content,
+.sessions-panel > .session-list,
+.request-grid-shell,
+.request-grid-body { background: transparent; }
+
+/* Plain rows stay transparent so the pane beneath shows through; rows that
+   carry a state (.is-selected/.has-risk) are 2-class selectors and still win. */
+.request-grid-row { background: transparent; }
+
+/* --- chrome layers: translucent + blurred (WKWebView needs the prefix) --- */
+.nav-rail,
+.topbar,
+.sessions-panel,
+.request-grid-header,
+.request-grid-statusbar,
+.detail-tabs,
+.browser-toolbar,
+.proxy-mini-status {
+  background-color: var(--material-chrome);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+/* --- large content panes become glass so the wash reads as depth --- */
+.traffic-summary,
+.request-detail,
+.advanced-console-panel,
+.settings-panel {
+  background-color: var(--material-regular);
+  background-image: var(--frost), var(--sheen);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge), var(--elev-1);
+}
+
+/* grain on the chrome too, so every glass layer shares the same surface */
+.nav-rail,
+.topbar,
+.sessions-panel,
+.dialog,
+.command-palette {
+  background-image: var(--frost);
+}
+
+.topbar,
+.request-grid-header {
+  box-shadow: var(--glass-edge), 0 1px 0 0 rgba(0, 0, 0, 0.5);
+}
+
+/* --- floating surfaces: thicker material, real elevation, lit top edge --- */
+.dialog,
+.command-palette,
+.filter-builder-popover,
+.session-tools,
+.toast {
+  background-color: var(--material-thick);
+  -webkit-backdrop-filter: var(--glass-blur-strong);
+  backdrop-filter: var(--glass-blur-strong);
+  box-shadow: var(--glass-edge-strong), var(--elev-3);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+.filter-builder-popover,
+.session-tools,
+.toast { box-shadow: var(--glass-edge), var(--elev-2); }
+
+/* --- scrims blur the whole app behind the sheet --- */
+.modal-backdrop,
+.command-backdrop {
+  background-color: rgba(0, 0, 0, 0.42);
+  -webkit-backdrop-filter: saturate(140%) blur(18px);
+  backdrop-filter: saturate(140%) blur(18px);
+}
+
+/* --- raised content gets a top-lit sheen so cards read as solid objects --- */
+.session-item.is-active,
+.advanced-workflow-step,
+.certificate-status,
+.advanced-panel-guide,
+.recommended-service {
+  background-image: var(--sheen);
+  box-shadow: var(--glass-edge), var(--elev-1);
+}
+
+/* --- controls gain dimension: sheen + edge + lift --- */
+.primary-button,
+.secondary-button,
+.save-settings-button {
+  background-image: var(--sheen);
+  box-shadow: var(--glass-edge), var(--elev-1);
+}
+.primary-button:hover { box-shadow: var(--glass-edge-strong), var(--elev-2); }
+.primary-button:active,
+.secondary-button:active { box-shadow: none; transform: translateY(0.5px); }
+
+/* fields read as recessed rather than raised */
+input, select, textarea {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.34);
+}
+input:focus, select:focus, textarea:focus {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.34), 0 0 0 3px rgba(51, 156, 255, 0.32);
+}
+
+/* --- respect the OS accessibility setting --- */
+@media (prefers-reduced-transparency: reduce) {
+  .nav-rail, .topbar, .sessions-panel, .request-grid-header,
+  .request-grid-statusbar, .detail-tabs, .browser-toolbar, .proxy-mini-status,
+  .traffic-summary, .request-detail, .advanced-console-panel, .settings-panel,
+  .dialog, .command-palette, .filter-builder-popover, .session-tools, .toast {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--surface-panel);
+  }
+  .request-grid-row { background: var(--surface-panel); }
+  .app-shell { background: #000000; }
+}
