@@ -86,32 +86,38 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
   </tr>
 </table>
 
-## 推荐上手路径
+## 推荐上手路径（小白开箱）
 
-### 1. 自动装证书（要解 HTTPS 时）
+按顺序做即可；**第 1 步不装证书也能看到效果**。
 
-设置 → 抓包与 HTTPS → **安装 CA**；手机用设备引导扫码安装证书并设置代理。Android 可用「设备证书与代理」由电脑协助配置。
+### 1. 零配置：内嵌浏览器开始抓包（不必先装证书）
 
-### 2. 开抓并收集证据
-
-内嵌浏览器「开始抓包」，或系统 / 手动代理指向 ShowNet。在流量列表中过滤关键接口，打开详情看 Hook 与正文。
+打开应用 → **内嵌浏览器** → 点「**开始抓包**」→ 访问目标网页。  
+请求、响应与页面 Hook 会自动写入当前会话，流量列表立刻有内容可点。
 
 <img src="docs/assets/tutorial/07-browser-capturing.png" alt="内嵌浏览器开始抓包" width="920" />
 
 <img src="docs/assets/tutorial/03-request-detail.png" alt="请求详情与证据" width="920" />
 
+### 2. 需要解密 App / 系统 HTTPS 时：自动装证书
+
+设置 → 抓包与 HTTPS → **安装 CA**（写入本机信任库；失败可导出 DER/PEM 手动装）。  
+手机：开启私有局域网监听 → **扫码安装页** 下载证书并配置 Wi-Fi 代理。  
+Android 也可用「设备证书与代理」由电脑协助推送证书与代理（无需 Root；证书锁定 App 通常只能采元数据）。
+
 ### 3. AI 自动逆向
 
-「AI 分析」中选择 **JS 加密逆向** 或 API 逆向等模式，限定请求范围后启动。查看 Agent 阶段、Skill 与可回查报告。
+「**AI 分析**」中选择 **JS 加密逆向** 或 **API 逆向** 等模式，限定请求范围后启动。  
+查看 Agent 阶段、Skill 审计与可回查报告（结论可链回原始请求）。
 
 <img src="docs/assets/tutorial/04-ai-report.png" alt="AI 智能分析报告" width="920" />
 
 <img src="docs/assets/tutorial/06-agent-workflow.png" alt="Agent 工作阶段" width="920" />
 
-### 4. 自动生成代码
+### 4. 自动生成逆向 / 客户端代码
 
-- 从报告 **导出算法重放包**（逆向 / 签名链路代码）  
-- 或进入 **Request Lab** 生成接口客户端代码，并重放验证  
+- 从报告 **导出算法重放包**（签名 / 加密步骤的可运行模板）  
+- 或进入 **Request Lab** 生成多语言接口客户端代码，并重放验证  
 
 <img src="docs/assets/tutorial/05-request-lab.png" alt="请求实验室" width="920" />
 
