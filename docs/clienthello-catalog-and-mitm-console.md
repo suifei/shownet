@@ -40,6 +40,8 @@
 
 UI 与 status API 不得在 rustls-only 下声称「完整浏览器 JA3 对齐」。隧道透传（pass-through）模式下，目标站看到的是**客户端原始** ClientHello，与 MITM 出站配方是另一条路径。
 
+**后续计划（未实施）**：若要真正接近浏览器 JA3（BoringSSL / curl-impersonate、Android / iOS 矩阵与验收门禁），见 [plan-real-browser-ja3-impersonate.md](./plan-real-browser-ja3-impersonate.md)。
+
 ---
 
 ## 3. ClientHello 目录

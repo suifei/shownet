@@ -1,0 +1,351 @@
+# 计划：真正接近浏览器 JA3 / JA4（BoringSSL · curl-impersonate · Android / iOS）
+
+> **状态**：规划文档（未实施）  
+> **关联现状**：[clienthello-catalog-and-mitm-console.md](./clienthello-catalog-and-mitm-console.md)  
+> **代码锚点**：`tls_outbound.rs`、`tls_impersonate.rs`、`tls_fingerprint.rs`、`tls_clienthello_catalog.rs`  
+> **当前诚实边界**：出站引擎 = **rustls**；`ja3Parity` / `supportsFullBrowserJa3` **恒为 false**，直至本计划验收门禁通过。
+
+---
+
+## 1. 目标
+
+### 1.1 产品目标
+
+在 **MITM 出站**（代理 → 源站）路径上，让源站测得的 **JA3（及尽可能 JA4）** 与选定目标客户端 **实测对齐**，而不是仅 rustls 上的 cipher/kx/ALPN「配方标签」。
+
+覆盖对象（按优先级）：
+
+| 优先级 | 目标客户端 | 栈特征（概念） |
+|--------|------------|----------------|
+| P0 | Chrome 桌面（近 2–3 个大版本，如 149–151） | Chromium + **BoringSSL** |
+| P0 | 可选「跟随入站」：用入站指纹选最近预置 | 入站解析已有 |
+| P1 | Firefox 桌面近版本 | NSS（非 BoringSSL；需独立路径） |
+| P1 | Edge 桌面 | Chromium/BoringSSL 系，多与 Chrome 同源 |
+| P2 | **Chrome Android** 近版本 | Android Chromium + BoringSSL 分支/补丁 |
+| P2 | **Safari iOS** 近版本 | Apple **Network.framework / Secure Transport 演进** + 自有扩展集（**不是**桌面 Chrome BoringSSL） |
+| P3 | 其它：Safari macOS、Samsung Internet、系统 WebView | 个案采集 |
+
+### 1.2 非目标（本计划明确不做）
+
+- 宣称「任意 App 证书锁定可被绕过」。
+- 在 **未实测通过** 时把 UI/`status` 的 `ja3Parity` 设为 true。
+- 用手写假 ClientHello 字节冒充完整握手（无真实密钥协商）——只允许 **真实 TLS 栈** 出站。
+- 用目录里的 `documentedJa3` 字符串单独打开 parity（现有测试已禁止）。
+
+### 1.3 成功定义（可机检）
+
+对每个启用的预置 `presetId`：
+
+1. 在受控环境对 **回环捕获探针**（或已知 JA3 测量端）发起 MITM 出站握手。  
+2. 解析本端发出的 ClientHello，得到 `measured_ja3` / `measured_ja4`。  
+3. 与该预置的 **金标**（见 §4）比对：  
+   - **硬门禁（JA3）**：`measured_ja3 == golden_ja3` → 该预置可标 `ja3Parity=true`（且仅当引擎为真实 impersonate 栈）。  
+   - **软门禁（JA4）**：记录 `ja4Match`；允许分阶段：先 JA3 全对齐，再收敛 JA4（扩展顺序/ALPN/版本串更敏感）。  
+4. 全局 `supportsFullBrowserJa3`：至少 **一个** 桌面 Chrome 预置硬门禁通过且默认引擎可走该栈时，才可为 true。
+
+---
+
+## 2. 现状与差距
+
+### 2.1 今天有什么
+
+| 能力 | 状态 |
+|------|------|
+| 入站 JA3/JA4 解析与会话存储 | ✅ |
+| 版本化预置目录（chrome150 等） | ✅ rustls 配方 |
+| 入站 → 预置启发式选档 | ✅ 粗粒度 |
+| 出站可测不同 ClientHello 材料 | ✅ 但非浏览器位级 |
+| `tls_impersonate` 离线模板 / parity 谓词 | ✅ 仅测试数学，**未挂线** |
+| `real_impersonate_stack_available()` | ✅ 恒 false 直至真栈链接 |
+| Agent / UI 诚实字段 | ✅ 不宣称全量对齐 |
+
+### 2.2 真浏览器 ClientHello 通常还包含（rustls 配方不够）
+
+- 扩展 **类型顺序** 与 **长度**（JA3 对扩展列表哈希敏感）  
+- **GREASE** 值与插入位置  
+- 压缩方法、session id、cipher 列表与 **伪随机 GREASE cipher**  
+- **supported_versions / key_share / psk_key_exchange_modes** 形态  
+- **ALPN** 字节精确序列  
+- **padding / compress_certificate / application_settings (ALPS)** 等 Chromium 特色扩展  
+- 新版本：**ECH**、**ML-KEM / 后量子** 相关扩展与 group（随 Chrome 大版本变）  
+- HTTP/2 层（非 JA3，但风控常一起看）：SETTINGS、WINDOW_UPDATE、PRIORITY —— 产品已有 H2 recipe 绑定方向，真栈路径需一并验收
+
+### 2.3 概念分层（避免混谈）
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│  入站 ClientHello（浏览器/App → ShowNet）                 │
+│  → 已能采 JA3/JA4；隧道透传时源站直接看到它               │
+└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  出站 ClientHello（ShowNet → 源站）  ← 本计划主战场       │
+│  rustls 配方 ≈ 可区分标签                                 │
+│  BoringSSL/curl-impersonate ≈ 接近真浏览器               │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. 技术路线选型
+
+### 3.1 推荐总体架构：双引擎
+
+```text
+                    ┌──────────────────┐
+  presetId + policy │  tls_outbound    │
+                    │  engine router   │
+                    └────────┬─────────┘
+              rustls │       │ impersonate
+                     ▼       ▼
+              build_client   real stack connector
+              _config()      (feature-gated)
+                     │       │
+                     └───┬───┘
+                         ▼
+              measure ClientHello → JA3/JA4
+                         │
+              parity gate → status.ja3Parity
+```
+
+- **默认引擎**：保持 **rustls**（可移植、可维护、无原生链接负担）。  
+- **可选引擎**：`impersonate` / `boring`（Cargo feature，如现有讨论中的 `impersonate-boring`），仅在链接成功且门禁通过时启用。  
+- **UI**：高级控制台 / 设置中选预置；仅当 `supportsFullBrowserJa3` 或单预置 `ja3Parity` 为真时展示「浏览器级对齐」文案。
+
+### 3.2 候选栈对比
+
+| 方案 | 优点 | 缺点 | 建议 |
+|------|------|------|------|
+| **A. curl-impersonate 类**（lexiforest/curl-impersonate 等 fork，或封装库） | 浏览器配置表成熟；社区持续跟 Chrome 大版本 | C/Go 依赖、打包体积、与 Rust MITM 集成需 FFI/子进程 | **P0 优先调研**：子进程或静态链 libcurl-impersonate |
+| **B. 直接 BoringSSL + 自研/移植 ClientHello 构造** | 与 Chromium 同源；可控 | 工程量大；需跟 Chromium 版本同步补丁 | **P1 中长期**；Android/定制必备 |
+| **C. 基于 rquest / wreq / bogdanfinn tls-client 等现成客户端** | 快 | 多为「客户端库」而非代理内嵌；许可证与进程模型 | 可作 **金标对照** 与 **第一阶段 sidecar** |
+| **D. uTLS（Go）sidecar** | HelloChrome_xxx 丰富 | Go 运行时、双语言运维 | 可选 **对照服务**，不作为唯一生产路径 |
+| **E. 系统 API 出站**（macOS Secure Transport / Windows SChannel） | 像系统浏览器 | 难精细选「Chrome 150」；不可跨平台统一 | 仅辅助，不主路径 |
+
+**建议落地顺序：**
+
+1. **Phase 0**：金标采集与 CI 探针（不换栈）。  
+2. **Phase 1**：sidecar 或 FFI 接入 **curl-impersonate 类**，打通「出站一次握手 + 测 JA3」。  
+3. **Phase 2**：嵌入式 / 同进程 BoringSSL 路径（减少延迟与进程管理）。  
+4. **Phase 3**：Android / iOS 专用配置矩阵与金标。  
+5. **Phase 4**：入站跟随 + 自动选最近对齐预置；JA4 硬门禁。
+
+### 3.3 与现有 MITM 的衔接点
+
+今日出站在 `proxy` 路径：`connect_verified_tls_measured` + rustls `ClientConfig`。
+
+真栈接入时需替换的最小接口（建议）：
+
+```rust
+// 概念 API（非最终签名）
+trait OriginTlsConnector {
+    fn connect(&self, host: &str, sni: &str, preset_id: &str)
+        -> Result<(TlsStream, MeasuredClientHello), Error>;
+}
+```
+
+- `MeasuredClientHello`：原始 handshake 字节 + 解析后的 ja3/ja4，写入现有 `tls_fingerprint` 出站记录。  
+- 证书校验、上游代理（HTTP/SOCKS）、H2 协商：必须与现网路径行为一致或可配置降级。  
+- **失败回退**：impersonate 连接失败 → 明确错误或可选回退 rustls（回退时 **禁止** 仍报 ja3Parity=true）。
+
+---
+
+## 4. 金标（Golden）数据与版本矩阵
+
+### 4.1 金标从哪里来
+
+每个 `presetId` 维护：
+
+| 字段 | 说明 |
+|------|------|
+| `family` / `major` | 如 chrome / 150 |
+| `platform` | `desktop-linux` / `desktop-macos` / `desktop-windows` / `android` / `ios` |
+| `stack` | `chromium-boringssl` / `gecko-nss` / `apple-network` / … |
+| `stack_version` | 例如 Chromium 提交、BoringSSL 日期标签、iOS 系统版本 |
+| `golden_ja3` / `golden_ja3_raw` | 金标 |
+| `golden_ja4` / `golden_ja4_raw` | 金标（可后补） |
+| `source` | 采集方法：真实浏览器抓包 / curl-impersonate 自测 / 公开库 |
+| `captured_at` | ISO 日期 |
+| `notes` | GREASE 是否固定、是否含 ECH 等 |
+
+**采集方法（推荐）：**
+
+1. 真实浏览器访问受控 HTTPS，在 **浏览器侧** 或中间透明抓 **客户端→服务器** ClientHello（注意：不是 MITM 出站）。  
+2. 或对 `curl-impersonate --chrome150` 类工具自连接探针，解析其 ClientHello 作为 **工具金标**（需注明「对齐 curl-impersonate」还是「对齐真 Chrome」——二者可能仍有细微差）。  
+3. 产品验收默认以 **真浏览器抓包金标** 为准；工具金标仅作开发期代理。
+
+### 4.2 桌面 Chrome（BoringSSL）
+
+- Chromium 桌面使用 **BoringSSL**（随 Chromium 树内联，版本与 Chrome 大版本绑定，而非独立「BoringSSL 1.x」用户可见号）。  
+- 计划维护表（示例结构，数值以采集为准更新）：
+
+| presetId | 对齐对象 | 栈说明 | 金标状态 |
+|----------|----------|--------|----------|
+| chrome149 | Chrome 149 desktop | Chromium 149 + tree BoringSSL | 待采 |
+| chrome150 | Chrome 150 desktop | 同上 | 待采（产品默认目标） |
+| chrome151 | Chrome 151 desktop | 同上 | 待采 |
+
+每个大版本变更关注：cipher 列表、extension 顺序、key_share groups、是否默认 PQ、ALPS/ECH。
+
+### 4.3 Firefox（对照）
+
+- 栈为 **NSS**，不是 BoringSSL。  
+- 若做 `firefox136` 等位级对齐，需 **独立 connector**（或 curl-impersonate 的 firefox profile），不可复用 Chrome BoringSSL 配置硬套。
+
+### 4.4 Android（Chrome / WebView / 系统）
+
+Android 上「接近浏览器 JA3」至少分三类：
+
+| 类型 | 典型栈 | 计划要点 |
+|------|--------|----------|
+| **Chrome for Android** | Chromium + BoringSSL（与桌面同源族，但 **平台/ALPN/扩展可能不同**） | 单独 `chrome-android{NN}` 预置；金标必须用 **真机/模拟器 Chrome** 抓包，禁止直接复用 desktop chromeNN 金标 |
+| **Android System WebView** | 随设备更新的 Chromium 轨 | 版本碎片化严重；只对「明确版本 + 设备 API level」做可选预置 |
+| **OkHttp / 应用自建 TLS** | Conscrypt / BoringSSL / JSSE 不一 | **不属于浏览器 impersonate**；入站指纹记录即可，出站勿冒充「Chrome Android」除非用户显式选 App 类预置 |
+
+**BoringSSL 版本怎么记：**
+
+- 不追求单一 semver；记录：  
+  - `chromium_major`（如 131）  
+  - `chromium_full`（如 131.0.6778.x）  
+  - `boringssl_commit` 或 Chromium 树内 `third_party/boringssl` 修订（从对应 Chromium 源码树读取）  
+  - `android_api` / 设备架构（arm64）  
+- 金标按 **(chrome-android major × 采集环境)** 存档，避免「一个 android 预置打天下」。
+
+### 4.5 iOS（Safari / WebKit / Chrome iOS）
+
+| 类型 | 典型栈 | 计划要点 |
+|------|--------|----------|
+| **Safari iOS** | Apple **Network.framework**（历史 Secure Transport 演进），**不是** Chromium BoringSSL | 预置 `safari-ios{NN}`；金标来自真机 Safari；扩展集与 Chrome 差异大 |
+| **Chrome iOS** | 受 App Store 限制，TLS 往往走 **Apple 网络栈**，与桌面 Chrome **显著不同** | 单独家族 `chrome-ios`（若做）；**禁止**用 desktop chrome JA3 冒充 |
+| **App URLSession** | 系统栈 | 仅入站观测 |
+
+**版本记录：**
+
+- `ios_version`（如 18.2）  
+- `webkit_version` / CFNetwork 相关可见版本（以采集环境为准）  
+- 不写「BoringSSL x.y」除非实测确认该客户端链的是 BoringSSL（多数系统 HTTPS **不是**）。
+
+### 4.6 平台矩阵（验收用最小集）
+
+| 平台 | P0 预置 | P1 | 金标采集环境 |
+|------|---------|----|--------------|
+| macOS arm64 | chrome150 | firefox 近版本、safari 近版本 | 本机 Chrome/Firefox/Safari |
+| Windows x64 | chrome150 | edge 近版本 | CI 或开发机 |
+| Linux x64 | chrome150 | — | CI 探针 |
+| Android arm64 | chrome-android 近 1 个 major | WebView 可选 | 模拟器/真机 |
+| iOS arm64 | safari-ios 近 1 个 major | chrome-ios 研究 | 真机 |
+
+---
+
+## 5. 实施阶段
+
+### Phase 0 — 测量与门禁基建（1–2 周量级）
+
+- [ ] 固定 **JA3/JA4 探针**：本地 TLS 服务器只记录 ClientHello 并返回解析结果（可复用现有 `tls_fingerprint`）。  
+- [ ] 金标仓库目录建议：`docs/tls-golden/` 或 `src-tauri/testdata/tls-golden/*.json`。  
+- [ ] CI：对 **rustls 路径** 继续断言 `ja3Parity==false`；新增 `#[ignore]` 或 feature 测试位给真栈。  
+- [ ] 文档/UI：增加「对齐级别」枚举：`recipe` | `tool-matched` | `browser-matched`。
+
+### Phase 1 — curl-impersonate 类接入（MVP 真 JA3）
+
+- [ ] 选型：静态库 FFI vs 子进程（子进程更易先跑通）。  
+- [ ] 实现 `OriginTlsConnector` 的 impersonate 后端；预设映射 `chrome150` → 工具 profile 名。  
+- [ ] 出站测得 JA3 与 **工具金标** 对齐后，预置级 `ja3Parity` 可 true（标注 source=tool）。  
+- [ ] 打包：macOS/Windows/Linux 可选组件或 `feature = "impersonate"` 正式包变体。  
+- [ ] 失败、超时、证书错误路径与现网一致审计。
+
+### Phase 2 — 真浏览器金标 + 收紧
+
+- [ ] 用真实 Chrome 149/150/151 抓金标，替换/并列 tool 金标。  
+- [ ] 差一字节 diff 工具（扩展列表、GREASE 策略说明）。  
+- [ ] 仅 `browser-matched` 时，对外文案允许「接近 Chrome NNN JA3」。  
+- [ ] H2 SETTINGS 与真浏览器对照（可选第二门禁）。
+
+### Phase 3 — 嵌入 BoringSSL（可选强化）
+
+- [ ] 评估直接链接 BoringSSL（或 chromium boringssl）与证书校验、会话恢复。  
+- [ ] 将 Phase 1 的 profile 配置迁到自研/移植的 ClientHello 策略表。  
+- [ ] 减少子进程延迟，利于高并发 MITM。
+
+### Phase 4 — Android / iOS
+
+- [ ] Android：采集 Chrome Android 金标；新增 preset 与目录项；模拟器自动化。  
+- [ ] iOS：Safari 金标；明确 **非 BoringSSL** 文案；评估是否仅提供「系统栈出站」近似而非 JA3 位级。  
+- [ ] 入站自动选档：desktop vs mobile 分族，避免桌面 chrome150 误用于 iOS 入站。
+
+### Phase 5 — 产品化
+
+- [ ] 设置 / 高级控制台：引擎选择、对齐级别徽章、金标来源展示。  
+- [ ] Agent：`shownet_get_outbound_tls_status` 增加 `alignmentLevel`、`goldenSource`、`measuredJa3`。  
+- [ ] Auto-crawler 导出：诚实标签升级为「recipe / tool / browser」。  
+- [ ] 发布说明与默认引擎策略（默认仍可 rustls，专家模式开 impersonate）。
+
+---
+
+## 6. 模块改动清单（预期）
+
+| 模块 | 改动 |
+|------|------|
+| `tls_outbound.rs` | 引擎路由、`real_impersonate_stack_available` 真实现、status 字段扩展 |
+| `tls_impersonate.rs` | 从「离线模板」升级为「真栈适配 + 测量」；保留模板仅作单测 |
+| `tls_clienthello_catalog.rs` | 增加 `alignment`、`platform`、`golden_*`、Android/iOS 条目 |
+| `tls_clienthello_reference.rs` | 对照 curl-impersonate / uTLS / 真浏览器金标覆盖率 |
+| `tls_fingerprint.rs` | 出站测量写入与列表展示 |
+| `proxy.rs` | 出站 connect 换 connector |
+| 打包 / CI | feature、原生依赖、多平台 artifact |
+| UI | 对齐级别、失败提示、禁止虚假文案 |
+| 文档 | 本文 + 更新 clienthello 文档诚实边界表 |
+
+---
+
+## 7. 风险与合规
+
+| 风险 | 缓解 |
+|------|------|
+| 原生依赖导致构建失败 | feature 默认关；CI 矩阵分「纯 rustls」与「impersonate」 |
+| 体积膨胀 | 可选组件 / 按平台下载 | 
+| 版本漂移（Chrome 月更） | 金标日期 + major 跟踪；过期预置降级为 recipe |
+| 法律与 ToS | 工具用于授权测试与自身产品调试；文档不鼓励未授权绕过 |
+| 性能 | 连接池、会话复用、异步 FFI；压测 MITM 吞吐 |
+| 假阳性宣传 | **仅门禁通过写 parity**；代码审查禁止硬编码 true |
+
+---
+
+## 8. 决策记录（待评审）
+
+| # | 问题 | 倾向 |
+|---|------|------|
+| D1 | MVP 用子进程 curl-impersonate 还是同进程 FFI？ | 先 **子进程/sidecar** 换速度，再嵌库 |
+| D2 | 默认引擎是否改为 impersonate？ | **否**，默认 rustls；用户/专家模式开启 |
+| D3 | Android/iOS 是否承诺 JA3 位级？ | Android Chrome **努力位级**；iOS Safari **先金标再评估可行性**，可能只做「近似」 |
+| D4 | Firefox 是否进 P0？ | **否**，P1；避免与 BoringSSL 路径抢工期 |
+| D5 | `documentedJa3` 是否继续保留？ | 保留作参考，**永不单独驱动 parity** |
+
+---
+
+## 9. 里程碑验收清单（摘要）
+
+- [ ] Phase 0：探针 + 金标格式 + CI 诚实断言  
+- [ ] Phase 1：至少 1 个 desktop Chrome 预置 **tool-matched** JA3 通过  
+- [ ] Phase 2：同一预置 **browser-matched** JA3 通过；`supportsFullBrowserJa3` 策略文档化  
+- [ ] Phase 4：至少 1 个 `chrome-android*` 或明确「仅 desktop」范围声明  
+- [ ] 全文案 / Agent / auto-crawler 与 status API 一致  
+
+---
+
+## 10. 参考（实现时核对最新上游）
+
+- 本仓库：`tls_clienthello_reference.rs` 中的 industry id 映射与 curl-impersonate 条目  
+- Chromium / BoringSSL 树内版本（按目标 Chrome major 检出）  
+- curl-impersonate 及活跃 fork 的 browser profile 表  
+- bogdanfinn/tls-client、uTLS HelloChrome_*（对照而非唯一真理）  
+- Apple CFNetwork / iOS 版本发布说明（Safari 指纹变化）  
+
+---
+
+## 11. 修订
+
+| 日期 | 说明 |
+|------|------|
+| 2026-08-03 | 初稿：目标、双引擎、金标、桌面/Android/iOS、阶段与门禁 |
+
+**下一步（执行层）**：评审 D1–D5 → 开 Phase 0 探针与 `tls-golden` 目录 → 再立项 Phase 1 工程任务。
