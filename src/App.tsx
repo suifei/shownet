@@ -1431,6 +1431,7 @@ function App() {
                 setSettingsTab("capture");
                 setActiveView("settings");
               }}
+              onOpenAnalysis={() => setActiveView("analysis")}
               onNotify={setToast}
             />
           )}

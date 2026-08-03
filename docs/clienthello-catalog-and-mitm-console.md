@@ -11,10 +11,20 @@
 | **ClientHello 版本化目录** | 按浏览器家族 + 大版本维护出站 TLS 配方（cipher / kx / ALPN 顺序），产品默认 `chrome150` |
 | **出站 TLS 选择** | 设置页与高级控制台可选预置；选择驱动 MITM → origin 的真实 `ClientConfig`，而非仅改文案 |
 | **入站自动选档** | 可按入站 JA3/JA4 启发式映射到目录预置（粗粒度家族） |
-| **MITM 高级控制台** | 导航「请求工具 → 高级」：抓包状态、Hook、规则入口、指纹、PX×3、reCAPTCHA、配置 |
+| **MITM 高级控制台** | 导航「请求工具 → 高级」：阶段条（抓包→证据→分析→导出）、总览能力分工、Hook、规则入口、指纹、PX×3、reCAPTCHA、配置 |
 | **PX 控制台设置** | 解密开关、拦截 ecData；会话证据列表与结构解码（非无密钥硬破） |
+| **Agent 取证工具** | `shownet_get_tls_fingerprints`、`shownet_get_outbound_tls_status`、`shownet_list_px_evidence`、`shownet_decode_px_payload`（只读；分析阶段自动选用） |
 | **Auto-crawler** | Skill / 工具注册，可按会话证据生成多语言客户端包 |
 | **行业对照表** | 与 tls-client / uTLS / curl-impersonate / wreq 等公开目录做 **id/版本覆盖** 一致性核对（非位级 JA3 克隆） |
+
+### 1.1 最佳实践（小白路径）
+
+1. **抓包**：内嵌浏览器「开始抓包」可零证书上手；App HTTPS 再装 CA。需要时在高级控制台「配置」选 `chrome150` 等出站预置，按需开 PX 解密/拦截 ecData。  
+2. **证据**：流量列表点请求；回高级控制台看指纹、Hook、PX 证据。  
+3. **AI 分析**：有请求后进 AI 分析（加密/API 等）；Agent 会只读调用 TLS/PX 工具增强报告。  
+4. **导出**：报告确认后导出算法重放 / Request Lab 客户端代码。  
+
+能力阶段表以源码 `src/advancedConsoleCapabilities.ts` 为准（UI 总览与测试共用）。
 
 ---
 

@@ -6,9 +6,11 @@ use crate::challenge_decoder;
 use crate::crypto_code;
 use crate::interchange::generate_code;
 use crate::protection_analysis;
+use crate::px_analysis;
 use crate::scorecard;
 use crate::signature_adapter;
 use crate::skills;
+use crate::tls_outbound;
 use crate::web_risk_lab;
 use crate::AppState;
 use serde::Serialize;
@@ -102,11 +104,43 @@ pub fn read_tool_definitions() -> Vec<ToolDefinition> {
         ),
         tool(
             "shownet_get_tls_fingerprints",
-            "读取会话的入站 JA3/JA4、HTTP/2 SETTINGS/窗口/优先级特征与独立出站 TLS 说明",
+            "读取会话的入站 JA3/JA4、HTTP/2 SETTINGS/窗口/优先级特征与独立出站 TLS 说明（抓包后证据增强；分析取证只读）",
             json!({
                 "type": "object",
                 "properties": { "sessionId": { "type": "string" } },
                 "required": ["sessionId"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "shownet_get_outbound_tls_status",
+            "读取当前 MITM 出站 TLS 预置、engine、ja3Parity、supportsFullBrowserJa3 与诚实说明（rustls 配方，不宣称位级浏览器 JA3 全量对齐；分析取证只读）",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "shownet_list_px_evidence",
+            "列出会话中 PerimeterX/HUMAN/ecData 相关请求证据摘要（抓包后证据；结构线索，非无密钥硬破）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 200 }
+                },
+                "required": ["sessionId"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "shownet_decode_px_payload",
+            "对单条请求做 PerimeterX 相关载荷结构解码（字段形态解析，非无密钥硬破；分析取证只读）",
+            json!({
+                "type": "object",
+                "properties": { "requestId": { "type": "string" } },
+                "required": ["requestId"],
                 "additionalProperties": false
             }),
         ),
@@ -456,6 +490,9 @@ pub fn execute_read_tool(
         "shownet_get_websocket_frames" => get_websocket_frames(state, arguments),
         "shownet_get_sse_events" => get_sse_events(state, arguments),
         "shownet_get_tls_fingerprints" => get_tls_fingerprints(state, arguments),
+        "shownet_get_outbound_tls_status" => Ok(tls_outbound::status_json()),
+        "shownet_list_px_evidence" => list_px_evidence_tool(state, arguments),
+        "shownet_decode_px_payload" => decode_px_payload_tool(state, arguments),
         "shownet_analyze_dynamic_protection" => analyze_dynamic_protection(state, arguments),
         "shownet_get_report" => {
             let session_id = match required_string(arguments, "sessionId") {
@@ -1575,6 +1612,24 @@ fn get_hooks(state: &AppState, arguments: &Value) -> Result<Value, String> {
 fn get_tls_fingerprints(state: &AppState, arguments: &Value) -> Result<Value, String> {
     let session_id = required_string(arguments, "sessionId")?;
     crate::tls_fingerprint::list_session_tls_fingerprints(&state.storage, &session_id)
+}
+
+fn list_px_evidence_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {
+    let session_id = required_string(arguments, "sessionId")?;
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(200)
+        .clamp(1, 500);
+    let items = px_analysis::list_session_evidence(&state.storage, &session_id, limit)?;
+    serde_json::to_value(items).map_err(|error| error.to_string())
+}
+
+fn decode_px_payload_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {
+    let request_id = required_string(arguments, "requestId")?;
+    let decoded = px_analysis::decode_request_payload(&state.storage, &request_id)?;
+    serde_json::to_value(decoded).map_err(|error| error.to_string())
 }
 
 fn analyze_dynamic_protection(state: &AppState, arguments: &Value) -> Result<Value, String> {

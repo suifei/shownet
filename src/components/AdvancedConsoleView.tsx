@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  ArrowRight,
   Fingerprint,
   GitCompare,
   KeyRound,
+  LayoutDashboard,
   Network,
   RefreshCw,
   Settings2,
   Shield,
   Shuffle,
+  Sparkles,
   Workflow,
 } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import {
+  CAPABILITY_CATALOG,
+  CONSOLE_TAB_GUIDES,
+  WORKFLOW_STAGES,
+  honestyBanner,
+  suggestWorkflowStage,
+  tabGuide,
+  type ConsoleTabId,
+  type WorkflowPhaseId,
+} from "../advancedConsoleCapabilities";
 import type {
   BrowserHookEvent,
   OutboundTlsProfileStatus,
@@ -23,27 +36,31 @@ import type {
   TlsFingerprintRecord,
 } from "../types";
 
-type ConsoleTab =
-  | "capture"
-  | "hooks"
-  | "rules"
-  | "fingerprint"
-  | "px-replay"
-  | "px-compare"
-  | "px-tamper"
-  | "recaptcha"
-  | "config";
+const TAB_ICONS: Record<ConsoleTabId, typeof Network> = {
+  overview: LayoutDashboard,
+  capture: Network,
+  hooks: Workflow,
+  rules: Shuffle,
+  fingerprint: Fingerprint,
+  "px-replay": RefreshCw,
+  "px-compare": GitCompare,
+  "px-tamper": KeyRound,
+  recaptcha: Shield,
+  config: Settings2,
+};
 
-const tabs: Array<{ id: ConsoleTab; label: string; icon: typeof Network }> = [
-  { id: "capture", label: "数据包捕获", icon: Network },
-  { id: "hooks", label: "Hook管理", icon: Workflow },
-  { id: "rules", label: "替换规则", icon: Shuffle },
-  { id: "fingerprint", label: "指纹数据", icon: Fingerprint },
-  { id: "px-replay", label: "PX替换重放", icon: RefreshCw },
-  { id: "px-compare", label: "PX对比", icon: GitCompare },
-  { id: "px-tamper", label: "PX篡改", icon: KeyRound },
-  { id: "recaptcha", label: "reCAPTCHA", icon: Shield },
-  { id: "config", label: "配置", icon: Settings2 },
+/** Ordered tabs for the console nav (overview first). */
+const TAB_ORDER: ConsoleTabId[] = [
+  "overview",
+  "capture",
+  "hooks",
+  "rules",
+  "fingerprint",
+  "px-replay",
+  "px-compare",
+  "px-tamper",
+  "recaptcha",
+  "config",
 ];
 
 interface AdvancedConsoleViewProps {
@@ -55,6 +72,7 @@ interface AdvancedConsoleViewProps {
   onOpenBrowser: () => void;
   onOpenRules: () => void;
   onOpenSettings: () => void;
+  onOpenAnalysis?: () => void;
   onNotify: (message: string) => void;
 }
 
@@ -67,9 +85,10 @@ export function AdvancedConsoleView({
   onOpenBrowser,
   onOpenRules,
   onOpenSettings,
+  onOpenAnalysis,
   onNotify,
 }: AdvancedConsoleViewProps) {
-  const [tab, setTab] = useState<ConsoleTab>("capture");
+  const [tab, setTab] = useState<ConsoleTabId>("overview");
   const [pxSettings, setPxSettings] = useState<PxSettings>({ decryptEnabled: false, interceptEcData: false });
   const [outboundTls, setOutboundTls] = useState<OutboundTlsProfileStatus | null>(null);
   const [hooks, setHooks] = useState<BrowserHookEvent[]>([]);
@@ -83,6 +102,19 @@ export function AdvancedConsoleView({
 
   const packetCount = requests.length;
   const proxyPort = runtime?.proxyPort ?? 8888;
+  const activeHookCount = hookCount || hooks.length;
+  const guide = tabGuide(tab);
+
+  const suggestedPhase = useMemo(
+    () =>
+      suggestWorkflowStage({
+        requestCount: packetCount,
+        hookCount: activeHookCount,
+        fingerprintCount: fingerprints.length,
+        pxCount: pxEvidence.length,
+      }),
+    [packetCount, activeHookCount, fingerprints.length, pxEvidence.length],
+  );
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -186,29 +218,68 @@ export function AdvancedConsoleView({
     }
   };
 
+  const goPhase = (phase: WorkflowPhaseId) => {
+    const map: Record<WorkflowPhaseId, ConsoleTabId> = {
+      capture: "capture",
+      evidence: "fingerprint",
+      analysis: "overview",
+      export: "overview",
+    };
+    if (phase === "analysis" && onOpenAnalysis) {
+      onOpenAnalysis();
+      return;
+    }
+    if (phase === "export" && onOpenAnalysis) {
+      onOpenAnalysis();
+      return;
+    }
+    setTab(map[phase]);
+  };
+
   return (
     <div className="advanced-console">
       <header className="advanced-console-hero">
-        <div>
+        <div className="advanced-console-hero-main">
           <h2>
-            <Activity size={18} /> MITM Proxy · 高级管理控制台
+            <Activity size={18} aria-hidden /> MITM 高级控制台
           </h2>
-          <p>实时流量监控 · Hook 管理 · 动态替换规则 · 指纹 / PX / reCAPTCHA</p>
+          <p className="advanced-console-lead">
+            抓包配置与证据中枢：和<strong>流量</strong>、<strong>浏览器</strong>、<strong>设置</strong>、
+            <strong>AI 分析</strong>串联。按阶段使用，避免空会话上空调参数。
+          </p>
+          <p className="advanced-console-honesty" role="note">
+            {honestyBanner()}
+          </p>
         </div>
-        <div className="advanced-console-stats">
+        <div className="advanced-console-stats" aria-label="会话状态">
           <span>
-            代理端口: <strong>{proxyPort}</strong>
+            代理端口 <strong>{proxyPort}</strong>
           </span>
           <span>
-            捕获数据包: <strong>{packetCount}</strong>
+            请求 <strong>{packetCount}</strong>
           </span>
           <span>
-            活跃 Hook: <strong>{hookCount || hooks.length}</strong>
+            Hook <strong>{activeHookCount}</strong>
+          </span>
+          <span>
+            指纹 <strong>{fingerprints.length}</strong>
+          </span>
+          <span>
+            PX 证据 <strong>{pxEvidence.length}</strong>
+          </span>
+          <span>
+            出站预置{" "}
+            <strong>
+              <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "—"}</code>
+            </strong>
+          </span>
+          <span>
+            JA3 对等 <strong className={outboundTls?.ja3Parity ? "is-ok" : "is-warn"}>{outboundTls?.ja3Parity ? "是" : "否"}</strong>
           </span>
         </div>
         <div className="advanced-console-toggles">
           <label className={pxSettings.decryptEnabled ? "is-on" : ""}>
-            <span>PX解密</span>
+            <span>PX 解密</span>
             <input
               type="checkbox"
               checked={pxSettings.decryptEnabled}
@@ -218,7 +289,7 @@ export function AdvancedConsoleView({
             <em>{pxSettings.decryptEnabled ? "已启用" : "已禁用"}</em>
           </label>
           <label className={pxSettings.interceptEcData ? "is-on" : ""}>
-            <span>拦截ecData报文</span>
+            <span>拦截 ecData</span>
             <input
               type="checkbox"
               checked={pxSettings.interceptEcData}
@@ -230,63 +301,199 @@ export function AdvancedConsoleView({
         </div>
       </header>
 
+      <nav className="advanced-workflow" aria-label="推荐工作流：抓包 → 证据 → 分析 → 导出">
+        {WORKFLOW_STAGES.map((stage, index) => (
+          <button
+            key={stage.id}
+            type="button"
+            className={`advanced-workflow-step${suggestedPhase === stage.id ? " is-suggested" : ""}`}
+            onClick={() => goPhase(stage.id)}
+          >
+            <span className="advanced-workflow-num">{stage.step}</span>
+            <span className="advanced-workflow-body">
+              <strong>{stage.label}</strong>
+              <small>{stage.summary}</small>
+              <em>{stage.beginnerTip}</em>
+            </span>
+            {index < WORKFLOW_STAGES.length - 1 && (
+              <ArrowRight className="advanced-workflow-arrow" size={14} aria-hidden />
+            )}
+          </button>
+        ))}
+      </nav>
+
       <nav className="advanced-console-tabs" aria-label="高级控制台分区">
-        {tabs.map((item) => {
-          const Icon = item.icon;
+        {TAB_ORDER.map((id) => {
+          const meta = tabGuide(id);
+          const Icon = TAB_ICONS[id];
+          const badge =
+            id === "capture"
+              ? packetCount
+              : id === "hooks"
+                ? activeHookCount
+                : id === "fingerprint"
+                  ? fingerprints.length
+                  : id === "px-replay" || id === "px-compare" || id === "px-tamper"
+                    ? pxEvidence.length
+                    : id === "recaptcha"
+                      ? recaptchaHits.length
+                      : null;
           return (
             <button
-              key={item.id}
+              key={id}
               type="button"
-              className={tab === item.id ? "is-active" : ""}
-              onClick={() => setTab(item.id)}
+              className={tab === id ? "is-active" : ""}
+              data-phase={meta.phase}
+              onClick={() => setTab(id)}
             >
-              <Icon size={14} />
-              {item.label}
+              <Icon size={14} aria-hidden />
+              {meta.label}
+              {badge !== null && badge > 0 ? <span className="advanced-tab-badge">{badge}</span> : null}
             </button>
           );
         })}
       </nav>
 
       <section className="advanced-console-panel">
+        <div className="advanced-panel-guide" data-tab={tab}>
+          <div>
+            <span className="advanced-phase-pill" data-phase={guide.phase}>
+              {WORKFLOW_STAGES.find((s) => s.id === guide.phase)?.shortLabel ?? guide.phase}
+            </span>
+            <h3>{guide.label}</h3>
+          </div>
+          <dl className="advanced-guide-grid">
+            <div>
+              <dt>何时用</dt>
+              <dd>{guide.whenToUse}</dd>
+            </div>
+            <div>
+              <dt>最佳实践</dt>
+              <dd>{guide.bestPractice}</dd>
+            </div>
+            <div>
+              <dt>下一步</dt>
+              <dd>{guide.nextStep}</dd>
+            </div>
+          </dl>
+        </div>
+
+        {tab === "overview" && (
+          <div className="advanced-panel-card">
+            <h4>能力分工：抓包过程 vs AI 分析过程</h4>
+            <p className="hint">
+              下列能力与真实 IPC / MCP 工具一致；AI 默认只读取证，改出站预置与 PX 开关在控制台人工操作。
+            </p>
+            <div className="advanced-capability-columns">
+              <div>
+                <h5>
+                  <Network size={14} aria-hidden /> 抓包过程
+                </h5>
+                <ul className="advanced-capability-list">
+                  {CAPABILITY_CATALOG.filter((c) => c.phase === "capture" || c.phase === "both").map((c) => (
+                    <li key={c.id}>
+                      <strong>{c.name}</strong>
+                      <span>{c.when}</span>
+                      <code>{c.entryPoints.filter((p) => p.startsWith("shownet_") || !p.includes(":")).slice(0, 3).join(" · ")}</code>
+                      {c.honesty ? <em>{c.honesty}</em> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <h5>
+                  <Sparkles size={14} aria-hidden /> AI 分析过程
+                </h5>
+                <ul className="advanced-capability-list">
+                  {CAPABILITY_CATALOG.filter((c) => c.phase === "analysis" || c.phase === "both").map((c) => (
+                    <li key={c.id}>
+                      <strong>{c.name}</strong>
+                      <span>{c.when}</span>
+                      <code>{c.entryPoints.filter((p) => p.startsWith("shownet_")).join(" · ") || c.entryPoints.slice(0, 2).join(" · ")}</code>
+                      {c.honesty ? <em>{c.honesty}</em> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            <div className="advanced-quick-actions">
+              <button type="button" className="primary-button" onClick={onOpenBrowser}>
+                内嵌浏览器抓包
+              </button>
+              <button type="button" className="secondary-button" onClick={onOpenTraffic}>
+                打开流量
+              </button>
+              {onOpenAnalysis ? (
+                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+                  进入 AI 分析
+                </button>
+              ) : null}
+              <button type="button" className="secondary-button" onClick={() => setTab("config")}>
+                出站 TLS 配置
+              </button>
+            </div>
+          </div>
+        )}
+
         {tab === "capture" && (
           <div className="advanced-panel-card">
-            <h3>数据包捕获</h3>
-            <p>当前会话请求 {packetCount} 条。完整列表与报文检视在「流量」工作台。</p>
-            <button type="button" className="primary-button" onClick={onOpenTraffic}>
-              打开流量视图
-            </button>
-            <ul className="advanced-mini-list">
-              {requests.slice(0, 12).map((r) => (
-                <li key={r.id}>
-                  <code>{r.method}</code> {r.host}
-                  {r.path}
-                </li>
-              ))}
-            </ul>
+            <p>
+              当前会话请求 <strong>{packetCount}</strong> 条。完整列表与报文检视在「流量」工作台。
+            </p>
+            <div className="advanced-quick-actions">
+              <button type="button" className="primary-button" onClick={onOpenTraffic}>
+                打开流量视图
+              </button>
+              <button type="button" className="secondary-button" onClick={onOpenBrowser}>
+                内嵌浏览器
+              </button>
+            </div>
+            {packetCount === 0 ? (
+              <p className="advanced-empty">{guide.emptyHint}</p>
+            ) : (
+              <ul className="advanced-mini-list">
+                {requests.slice(0, 12).map((r) => (
+                  <li key={r.id}>
+                    <code>{r.method}</code> {r.host}
+                    {r.path}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
         {tab === "hooks" && (
           <div className="advanced-panel-card">
-            <h3>Hook 管理</h3>
-            <p>会话内浏览器 Hook 事件 {hooks.length} 条。</p>
-            <button type="button" className="primary-button" onClick={onOpenBrowser}>
-              打开浏览器 Hook 面板
-            </button>
-            <ul className="advanced-mini-list">
-              {hooks.slice(0, 20).map((h) => (
-                <li key={h.id}>
-                  <strong>{h.kind}</strong> {h.name} · {h.timestamp}
-                </li>
-              ))}
-              {hooks.length === 0 && <li>暂无 Hook；在浏览器注入 JS Hook 后刷新。</li>}
-            </ul>
+            <p>
+              会话内浏览器 Hook 事件 <strong>{hooks.length}</strong> 条（列表计数 {activeHookCount}）。
+            </p>
+            <div className="advanced-quick-actions">
+              <button type="button" className="primary-button" onClick={onOpenBrowser}>
+                打开浏览器 Hook 面板
+              </button>
+              {onOpenAnalysis ? (
+                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+                  用 AI 读 Hook / 加密
+                </button>
+              ) : null}
+            </div>
+            {hooks.length === 0 ? (
+              <p className="advanced-empty">{guide.emptyHint}</p>
+            ) : (
+              <ul className="advanced-mini-list">
+                {hooks.slice(0, 20).map((h) => (
+                  <li key={h.id}>
+                    <strong>{h.kind}</strong> {h.name} · {h.timestamp}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
         {tab === "rules" && (
           <div className="advanced-panel-card">
-            <h3>替换规则</h3>
             <p>通用重写 / 断点 / 镜像规则在请求实验室的规则工作台中编辑。</p>
             <button type="button" className="primary-button" onClick={onOpenRules}>
               打开替换规则工作台
@@ -299,96 +506,139 @@ export function AdvancedConsoleView({
 
         {tab === "fingerprint" && (
           <div className="advanced-panel-card">
-            <h3>指纹数据</h3>
-            <p>
-              出站引擎: <code>{outboundTls?.engine ?? "rustls"}</code> · 预置:{" "}
-              <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "default"}</code>
-              {outboundTls?.browserFamily
-                ? ` · ${outboundTls.browserFamily}${outboundTls.browserMajorVersion ? ` ${outboundTls.browserMajorVersion}` : ""}`
-                : ""}{" "}
-              · JA3 对等: <strong>{outboundTls?.ja3Parity ? "是" : "否"}</strong>
-            </p>
-            <p className="hint">{outboundTls?.note}</p>
-            <ul className="advanced-mini-list">
-              {fingerprints.slice(0, 15).map((fp, index) => (
-                <li key={`${fp.inbound.ja3}-${index}`}>
-                  入站 JA3 <code>{fp.inbound.ja3.slice(0, 16)}…</code> · 出站 {fp.outbound.profile} /{" "}
-                  {fp.outbound.applicationProtocol ?? fp.outbound.negotiatedAlpn ?? "—"} ·{" "}
-                  {fp.outbound.selectedFromInbound ? "入站映射" : fp.outbound.mode}
-                </li>
-              ))}
-              {fingerprints.length === 0 && <li>暂无 TLS 指纹记录（需 MITM 抓包）。</li>}
-            </ul>
+            <div className="advanced-tls-status">
+              <div>
+                <span>引擎</span>
+                <strong>
+                  <code>{outboundTls?.engine ?? "rustls"}</code>
+                </strong>
+              </div>
+              <div>
+                <span>预置</span>
+                <strong>
+                  <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "default"}</code>
+                </strong>
+              </div>
+              <div>
+                <span>浏览器标签</span>
+                <strong>
+                  {outboundTls?.browserFamily
+                    ? `${outboundTls.browserFamily} ${outboundTls.browserMajorVersion ?? ""}`
+                    : "—"}
+                </strong>
+              </div>
+              <div>
+                <span>ja3Parity</span>
+                <strong className={outboundTls?.ja3Parity ? "is-ok" : "is-warn"}>
+                  {String(outboundTls?.ja3Parity ?? false)}
+                </strong>
+              </div>
+              <div>
+                <span>supportsFullBrowserJa3</span>
+                <strong className="is-warn">{String(outboundTls?.supportsFullBrowserJa3 ?? false)}</strong>
+              </div>
+            </div>
+            <p className="hint">{outboundTls?.note ?? honestyBanner()}</p>
+            <div className="advanced-quick-actions">
+              <button type="button" className="secondary-button" onClick={() => setTab("config")}>
+                修改出站预置
+              </button>
+              {onOpenAnalysis ? (
+                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+                  AI 读取指纹（shownet_get_tls_fingerprints）
+                </button>
+              ) : null}
+            </div>
+            {fingerprints.length === 0 ? (
+              <p className="advanced-empty">{guide.emptyHint}</p>
+            ) : (
+              <ul className="advanced-mini-list">
+                {fingerprints.slice(0, 15).map((fp, index) => (
+                  <li key={`${fp.inbound.ja3}-${index}`}>
+                    入站 JA3 <code>{fp.inbound.ja3.slice(0, 16)}…</code> · 出站 {fp.outbound.profile} /{" "}
+                    {fp.outbound.applicationProtocol ?? fp.outbound.negotiatedAlpn ?? "—"} ·{" "}
+                    {fp.outbound.selectedFromInbound ? "入站映射" : fp.outbound.mode}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
         {(tab === "px-replay" || tab === "px-compare" || tab === "px-tamper") && (
           <div className="advanced-panel-card">
-            <h3>
-              {tab === "px-replay" && "PX 替换重放"}
-              {tab === "px-compare" && "PX 对比"}
-              {tab === "px-tamper" && "PX 篡改"}
-            </h3>
             <p>
-              检测到 PX/HUMAN 相关请求 <strong>{pxEvidence.length}</strong> 条。解码为结构解析，非无密钥硬破。
+              检测到 PX/HUMAN 相关请求 <strong>{pxEvidence.length}</strong> 条。
+              <span className="hint"> 解码为结构解析，非无密钥硬破。</span>
             </p>
-            <ul className="advanced-mini-list">
-              {pxEvidence.map((item) => (
-                <li key={item.requestId}>
-                  <button type="button" className="linkish" onClick={() => void runDecode(item.requestId)}>
-                    {item.method} {item.host}
-                    {item.path}
-                  </button>
-                  <small>{item.markers.join(", ")}</small>
-                  {tab === "px-compare" && (
-                    <span className="row-actions">
-                      <button type="button" onClick={() => setCompareA(item.requestId)}>
-                        A
-                      </button>
-                      <button type="button" onClick={() => setCompareB(item.requestId)}>
-                        B
-                      </button>
-                    </span>
-                  )}
-                  {tab === "px-tamper" && (
-                    <button type="button" onClick={onOpenRules}>
-                      生成改写规则
+            {pxEvidence.length === 0 ? (
+              <p className="advanced-empty">{guide.emptyHint}</p>
+            ) : (
+              <ul className="advanced-mini-list">
+                {pxEvidence.map((item) => (
+                  <li key={item.requestId}>
+                    <button type="button" className="linkish" onClick={() => void runDecode(item.requestId)}>
+                      {item.method} {item.host}
+                      {item.path}
                     </button>
-                  )}
-                </li>
-              ))}
-              {pxEvidence.length === 0 && <li>本会话未发现 PerimeterX / ecData 证据。</li>}
-            </ul>
+                    <small>{item.markers.join(", ")}</small>
+                    {tab === "px-compare" && (
+                      <span className="row-actions">
+                        <button type="button" onClick={() => setCompareA(item.requestId)}>
+                          A
+                        </button>
+                        <button type="button" onClick={() => setCompareB(item.requestId)}>
+                          B
+                        </button>
+                      </span>
+                    )}
+                    {tab === "px-tamper" && (
+                      <button type="button" onClick={onOpenRules}>
+                        生成改写规则
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
             {tab === "px-compare" && (
               <p>
-                对比: A=<code>{compareA ?? "—"}</code> B=<code>{compareB ?? "—"}</code>（在流量/实验室中打开两条请求做字段 diff）
+                对比: A=<code>{compareA ?? "—"}</code> B=<code>{compareB ?? "—"}</code>
+                （在流量/实验室中打开两条请求做字段 diff）
               </p>
             )}
             {decode && selectedPx === decode.requestId && (
-              <pre className="advanced-json">{JSON.stringify(decode, null, 2)}</pre>
+              <details className="advanced-details" open>
+                <summary>结构解码结果（可折叠）</summary>
+                <pre className="advanced-json">{JSON.stringify(decode, null, 2)}</pre>
+              </details>
             )}
           </div>
         )}
 
         {tab === "recaptcha" && (
           <div className="advanced-panel-card">
-            <h3>reCAPTCHA</h3>
-            <p>会话中疑似 reCAPTCHA 请求 {recaptchaHits.length} 条。完整解题走 Web 风控 Lab / 视觉验证码工具。</p>
-            <ul className="advanced-mini-list">
-              {recaptchaHits.slice(0, 20).map((r) => (
-                <li key={r.id}>
-                  {r.method} {r.host}
-                  {r.path}
-                </li>
-              ))}
-              {recaptchaHits.length === 0 && <li>未捕获 reCAPTCHA 资源。</li>}
-            </ul>
+            <p>
+              会话中疑似 reCAPTCHA 请求 <strong>{recaptchaHits.length}</strong> 条。完整解题走 Web 风控 Lab /
+              视觉验证码工具。
+            </p>
+            {recaptchaHits.length === 0 ? (
+              <p className="advanced-empty">{guide.emptyHint}</p>
+            ) : (
+              <ul className="advanced-mini-list">
+                {recaptchaHits.slice(0, 20).map((r) => (
+                  <li key={r.id}>
+                    {r.method} {r.host}
+                    {r.path}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
         {tab === "config" && (
           <div className="advanced-panel-card">
-            <h3>配置</h3>
             <div className="advanced-config-grid">
               <div>
                 <h4>出站 ClientHello 预置</h4>
@@ -398,15 +648,12 @@ export function AdvancedConsoleView({
                     ? ` · ${outboundTls.browserFamily} ${outboundTls.browserMajorVersion ?? ""}`
                     : ""}
                 </p>
-                <label className="checkbox-row" style={{ display: "block", marginBottom: 10 }}>
-                  <span style={{ display: "block", marginBottom: 4, fontSize: 12, opacity: 0.85 }}>
-                    版本化预置（family + major）
-                  </span>
+                <label className="checkbox-row advanced-select-block">
+                  <span>版本化预置（family + major）</span>
                   <select
                     disabled={saving}
                     value={outboundTls?.presetId ?? "chrome150"}
                     onChange={(e) => void setTlsProfile(e.target.value)}
-                    style={{ width: "100%", maxWidth: 420 }}
                   >
                     {(outboundTls?.presets ?? []).length > 0
                       ? (outboundTls?.presets ?? []).map((preset) => (
@@ -474,6 +721,7 @@ export function AdvancedConsoleView({
               </div>
               <div>
                 <h4>系统设置</h4>
+                <p className="hint">端口、Root CA 一键安装、HTTPS 拦截模式在设置页。</p>
                 <button type="button" className="primary-button" onClick={onOpenSettings}>
                   打开设置（端口 / CA / 拦截模式）
                 </button>
