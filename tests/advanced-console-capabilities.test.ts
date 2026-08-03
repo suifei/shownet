@@ -122,9 +122,14 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
     const slice = css.slice(consoleCssStart, consoleCssStart + 12_000);
     assert.match(slice, /--codex-accent/);
     assert.doesNotMatch(slice, /#5b6cff/);
+    assert.doesNotMatch(slice, /#8ea2ff/);
+    assert.match(slice, /\.advanced-mini-list \.linkish[^}]*var\(--codex-accent-ink\)/s);
     assert.match(slice, /\.advanced-workflow/);
     assert.match(slice, /\.advanced-empty/);
     assert.match(slice, /\.advanced-capability-columns/);
+    // brace balance of full stylesheet must not be left open/closed by Advanced Console edits
+    const full = css;
+    assert.equal(full.split("{").length, full.split("}").length, "styles.css brace imbalance");
   });
 
   it("App wires Advanced Console to analysis navigation", async () => {

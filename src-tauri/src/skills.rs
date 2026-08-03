@@ -821,14 +821,18 @@ mod tests {
             .find(|s| s.id == "dynamic-signature")
             .expect("dynamic-signature");
         assert!(
-            dyn_skill.version.starts_with("0.14"),
-            "version={}",
+            dyn_skill.version.starts_with("0.15"),
+            "dynamic-signature version should be 0.15.x for TLS/PX analysis tools, got {}",
             dyn_skill.version
         );
         for required in [
             "shownet_eval_scorecard",
             "shownet_decode_challenge_js",
             "shownet_analyze_dynamic_protection",
+            "shownet_get_tls_fingerprints",
+            "shownet_get_outbound_tls_status",
+            "shownet_list_px_evidence",
+            "shownet_decode_px_payload",
         ] {
             assert!(
                 dyn_skill.tools.iter().any(|t| t == required),

@@ -7977,7 +7977,7 @@ kbd {
   .advanced-workflow {
     grid-template-columns: 1fr;
   }
-}}
+}
 .checkbox-row {
   display: flex;
   gap: 8px;
@@ -7987,14 +7987,6 @@ kbd {
 .advanced-panel-card .hint {
   font-size: 12px;
   opacity: 0.7;
-}
-.advanced-mini-list .linkish {
-  background: none;
-  border: none;
-  color: #8ea2ff;
-  cursor: pointer;
-  padding: 0;
-  text-align: left;
 }
 .row-actions button {
   font-size: 11px;
