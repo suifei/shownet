@@ -337,7 +337,8 @@ const CATALOG: &[ClientHelloPreset] = &[
         family: "chrome",
         major_version: 131,
         label: "Chrome 131",
-        note: "Chrome 131 major snapshot recipe (uTLS HelloChrome_131 / tls-client chrome_131 era).",
+        note:
+            "Chrome 131 major snapshot recipe (uTLS HelloChrome_131 / tls-client chrome_131 era).",
         cipher: CipherRecipe::RotateThenSwaps {
             rotate: 1,
             swaps: &[(2, 4)],
@@ -660,7 +661,10 @@ pub fn preset_view(p: &ClientHelloPreset) -> ClientHelloPresetView {
         major_version: p.major_version,
         label: p.label.to_string(),
         note: p.note.to_string(),
-        alpn: alpn_list(p.alpn).into_iter().map(|s| s.to_string()).collect(),
+        alpn: alpn_list(p.alpn)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
         documented_ja3: documented,
         recipe_fingerprint: recipe_fingerprint(p),
         claims_full_browser_ja3: false,
@@ -744,11 +748,7 @@ pub fn resolve_preset_id(input: &str) -> Result<&'static str, String> {
 }
 
 /// Map inbound JA4/ALPN heuristics onto a versioned catalog preset id.
-pub fn select_preset_from_inbound(
-    ja4: &str,
-    alpn: &[String],
-    grease: bool,
-) -> &'static str {
+pub fn select_preset_from_inbound(ja4: &str, alpn: &[String], grease: bool) -> &'static str {
     let ja4 = ja4.to_ascii_lowercase();
     let has_h2 = alpn.iter().any(|p| p.eq_ignore_ascii_case("h2")) || ja4.contains("h2");
     if ja4.contains("firefox") {
@@ -860,8 +860,7 @@ mod tests {
         assert!(chrome_majors.contains(&149));
         assert!(chrome_majors.contains(&150));
         assert!(chrome_majors.len() >= 6);
-        let families: std::collections::BTreeSet<_> =
-            CATALOG.iter().map(|p| p.family).collect();
+        let families: std::collections::BTreeSet<_> = CATALOG.iter().map(|p| p.family).collect();
         assert!(families.contains("chrome"));
         assert!(families.contains("firefox"));
         assert!(families.contains("safari") || families.contains("safari-ios"));
@@ -914,8 +913,7 @@ mod tests {
         );
         assert_ne!(c150.settings_pairs(), ff.settings_pairs());
         assert_ne!(
-            c150.pseudo_header_order,
-            ff.pseudo_header_order,
+            c150.pseudo_header_order, ff.pseudo_header_order,
             "Chrome vs Firefox pseudo-header recipe order"
         );
         // Firefox uses method,path,authority,scheme
@@ -959,10 +957,7 @@ mod tests {
         // Also ensure cipher application actually reorders a list.
         let mut v = vec![1, 2, 3, 4, 5, 6];
         let original = v.clone();
-        apply_cipher_recipe(
-            &mut v,
-            get_preset("chrome120").unwrap().cipher,
-        );
+        apply_cipher_recipe(&mut v, get_preset("chrome120").unwrap().cipher);
         assert_ne!(v, original);
     }
 

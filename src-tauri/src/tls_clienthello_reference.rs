@@ -260,15 +260,17 @@ pub fn required_our_ids() -> BTreeSet<&'static str> {
 }
 
 /// Chrome majors that industry clients commonly version (floor for coverage).
-pub const INDUSTRY_CHROME_MAJORS_FLOOR: &[u16] =
-    &[120, 124, 131, 133, 144, 146, 149, 150];
+pub const INDUSTRY_CHROME_MAJORS_FLOOR: &[u16] = &[120, 124, 131, 133, 144, 146, 149, 150];
 
 /// Pairwise recipe fingerprints for a list of catalog ids (for wire/builder tests).
 pub fn recipe_fingerprints(ids: &[&str]) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for id in ids {
         let p = tls_clienthello_catalog::get_preset(id)?;
-        out.insert((*id).to_string(), tls_clienthello_catalog::recipe_fingerprint(p));
+        out.insert(
+            (*id).to_string(),
+            tls_clienthello_catalog::recipe_fingerprint(p),
+        );
     }
     Ok(out)
 }
@@ -356,7 +358,13 @@ mod tests {
     #[test]
     fn selection_builder_path_matches_industry_chrome_ids() {
         let _g = lock();
-        for id in ["chrome120", "chrome131", "chrome133", "chrome150", "chrome146"] {
+        for id in [
+            "chrome120",
+            "chrome131",
+            "chrome133",
+            "chrome150",
+            "chrome146",
+        ] {
             tls_outbound::set_active_preset(id).unwrap();
             assert_eq!(
                 preset_id_for_profile(OutboundTlsProfile::ChromeLike),
@@ -424,4 +432,3 @@ mod tests {
         assert!(report.required_ok);
     }
 }
-

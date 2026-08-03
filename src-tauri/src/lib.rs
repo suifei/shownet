@@ -2,10 +2,10 @@ mod agent_tools;
 mod algorithm_reconstruction;
 mod algorithm_replay;
 mod analysis;
-mod auto_crawler;
 mod analysis_graph;
 mod analysis_pipeline;
 mod android_setup;
+mod auto_crawler;
 mod breakpoints;
 mod browser;
 mod browser_bus;
@@ -26,9 +26,9 @@ mod mcp;
 mod mirror;
 mod models;
 mod protection_analysis;
-mod px_analysis;
 mod proxy;
 mod proxy_terminal;
+mod px_analysis;
 mod request_collections;
 mod request_replay;
 mod scorecard;
@@ -40,10 +40,10 @@ mod tls_clienthello_catalog;
 mod tls_clienthello_reference;
 mod tls_fingerprint;
 mod tls_golden;
-mod tls_interception;
-mod tls_probe;
 mod tls_impersonate;
+mod tls_interception;
 mod tls_outbound;
+mod tls_probe;
 mod updates;
 mod web_risk_lab;
 
@@ -2090,10 +2090,7 @@ fn list_browser_hooks(
 
 /// Advanced Console + agent shared: session-scoped TLS fingerprint rows + outbound status.
 #[tauri::command]
-fn get_tls_fingerprints(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
+fn get_tls_fingerprints(session_id: String, state: State<'_, AppState>) -> Result<Value, String> {
     tls_fingerprint::list_session_tls_fingerprints(&state.storage, &session_id)
 }
 
@@ -2237,7 +2234,10 @@ fn set_outbound_tls_profile(profile: String, state: State<'_, AppState>) -> Resu
         .unwrap_or_else(|| json!({}));
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("presetId".into(), json!(preset_id));
-        obj.insert("profile".into(), json!(tls_outbound::global_profile().as_str()));
+        obj.insert(
+            "profile".into(),
+            json!(tls_outbound::global_profile().as_str()),
+        );
         obj.insert(
             "autoFromInbound".into(),
             json!(tls_outbound::auto_from_inbound()),
@@ -2300,7 +2300,9 @@ fn set_outbound_tls_impersonate(
         obj.insert("impersonate".into(), json!(false));
         obj.insert(
             "impersonateNote".into(),
-            json!("Real browser JA3 stack not linked; MITM uses profile-differentiated rustls only."),
+            json!(
+                "Real browser JA3 stack not linked; MITM uses profile-differentiated rustls only."
+            ),
         );
     }
     state
@@ -2327,7 +2329,9 @@ fn set_px_settings(
         px_analysis::set_px_intercept_ec_data(v);
     }
     let payload = px_analysis::settings_json();
-    state.storage.save_app_setting_json("px_console", &payload)?;
+    state
+        .storage
+        .save_app_setting_json("px_console", &payload)?;
     Ok(payload)
 }
 
@@ -3520,9 +3524,9 @@ pub fn run() {
                     if let Ok(id) = tls_clienthello_catalog::resolve_preset_id(profile) {
                         let _ = tls_outbound::set_active_preset(id);
                     } else {
-                        tls_outbound::set_global_profile(
-                            tls_outbound::OutboundTlsProfile::parse(profile),
-                        );
+                        tls_outbound::set_global_profile(tls_outbound::OutboundTlsProfile::parse(
+                            profile,
+                        ));
                     }
                 }
                 if let Some(auto) = value.get("autoFromInbound").and_then(|v| v.as_bool()) {

@@ -80,7 +80,9 @@ pub fn build_profile_client_hello_handshake(
         OutboundTlsProfile::Default => (
             vec![0x1301_u16, 0x1302, 0x1303, 0xc02b, 0xc02f],
             vec![0x001d_u16, 0x0017],
-            vec![0x0000_u16, 0x000a, 0x000b, 0x000d, 0x0010, 0x002b, 0x002d, 0x0033],
+            vec![
+                0x0000_u16, 0x000a, 0x000b, 0x000d, 0x0010, 0x002b, 0x002d, 0x0033,
+            ],
             vec![0x0304_u16, 0x0303],
             vec![b"http/1.1".as_slice()],
         ),
@@ -274,7 +276,10 @@ mod tests {
     fn parity_true_only_when_measured_matches_target() {
         let target = profile_target_ja3(OutboundTlsProfile::ChromeLike).unwrap();
         assert!(ja3_parity(&target, OutboundTlsProfile::ChromeLike));
-        assert!(!ja3_parity("deadbeefdeadbeefdeadbeefdeadbeef", OutboundTlsProfile::ChromeLike));
+        assert!(!ja3_parity(
+            "deadbeefdeadbeefdeadbeefdeadbeef",
+            OutboundTlsProfile::ChromeLike
+        ));
     }
 
     #[test]
@@ -285,6 +290,9 @@ mod tests {
         record.extend_from_slice(&(hello.len() as u16).to_be_bytes());
         record.extend_from_slice(&hello);
         let fp = tls_fingerprint::fingerprint_client_hello_wire(&record).unwrap();
-        assert_eq!(fp.ja3, profile_target_ja3(OutboundTlsProfile::ChromeLike).unwrap());
+        assert_eq!(
+            fp.ja3,
+            profile_target_ja3(OutboundTlsProfile::ChromeLike).unwrap()
+        );
     }
 }

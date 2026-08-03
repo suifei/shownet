@@ -1607,12 +1607,8 @@ async fn handle_connect(
             .map(str::to_string);
         fingerprint.outbound.negotiated_alpn = negotiated_alpn.clone();
         fingerprint.outbound.application_protocol = Some(
-            negotiated_http_protocol(
-                negotiated_alpn
-                    .as_ref()
-                    .map(|value| value.as_bytes()),
-            )
-            .to_string(),
+            negotiated_http_protocol(negotiated_alpn.as_ref().map(|value| value.as_bytes()))
+                .to_string(),
         );
         if let Some(measured) = verified.measured_ja3 {
             // Parity needs both halves: a real impersonate stack must be active, and
@@ -1627,7 +1623,8 @@ async fn handle_connect(
                 crate::tls_outbound::real_impersonate_stack_available() && alignment.is_matched();
             fingerprint.outbound.ja3 = Some(measured.clone());
             fingerprint.outbound.ja3_parity = Some(parity);
-            fingerprint.outbound.engine = Some(crate::tls_outbound::active_engine().as_str().into());
+            fingerprint.outbound.engine =
+                Some(crate::tls_outbound::active_engine().as_str().into());
             fingerprint.outbound.note = format!(
                 "{} measuredJa3={measured} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
                 fingerprint.outbound.note,
@@ -1895,14 +1892,11 @@ async fn connect_verified_tls_measured(
     .await
     .map_err(|_| format!("目标 TLS 握手超时: {host}"))?
     .map_err(|error| format!("目标 TLS 证书校验或握手失败 {host}: {error}"))?;
-    let measured_ja3 = capture
-        .lock()
-        .ok()
-        .and_then(|bytes| {
-            crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
-                .ok()
-                .map(|fp| fp.ja3)
-        });
+    let measured_ja3 = capture.lock().ok().and_then(|bytes| {
+        crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
+            .ok()
+            .map(|fp| fp.ja3)
+    });
     Ok(VerifiedTlsConnect {
         stream: tls,
         measured_ja3,
@@ -1975,12 +1969,12 @@ fn dedicated_request_sender_factory(
                 // prefer_http2 is false; when true, we need typed TLS for ALPN read.
                 // Simpler: dedicated path always uses http1 for websocket upgrades (prefer_http2=false).
                 if !route.prefer_http2 {
-                    let (sender, connection) =
-                        hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(
-                            stream,
-                        ))
-                        .await
-                        .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
+                    let (sender, connection) = hyper::client::conn::http1::handshake::<
+                        _,
+                        TapBody<ProxyBody>,
+                    >(TokioIo::new(stream))
+                    .await
+                    .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
                     tauri::async_runtime::spawn(async move {
                         let _ = connection.with_upgrades().await;
                     });
@@ -2025,12 +2019,12 @@ fn dedicated_request_sender_factory(
                     }
                 }
             } else {
-                let (sender, connection) =
-                    hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(
-                        stream,
-                    ))
-                    .await
-                    .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
+                let (sender, connection) = hyper::client::conn::http1::handshake::<
+                    _,
+                    TapBody<ProxyBody>,
+                >(TokioIo::new(stream))
+                .await
+                .map_err(|error| format!("目标独立 HTTP 连接握手失败: {error}"))?;
                 tauri::async_runtime::spawn(async move {
                     let _ = connection.with_upgrades().await;
                 });
@@ -2272,12 +2266,8 @@ async fn forward_mitm_https(
         } else {
             Version::HTTP_11
         };
-        let outbound_profile = tls_outbound::OutboundTlsProfile::parse(
-            tls_fingerprint
-                .outbound
-                .profile
-                .as_str(),
-        );
+        let outbound_profile =
+            tls_outbound::OutboundTlsProfile::parse(tls_fingerprint.outbound.profile.as_str());
         let dedicated_route = DedicatedRequestRoute {
             scheme: scheme.clone(),
             connection_host: connection_host.to_string(),
@@ -4262,12 +4252,8 @@ async fn forward_http(
         .map(|(host, _)| host)
         .unwrap_or(&host);
     let mut sender = if scheme == "https" {
-        let tls = connect_verified_tls(
-            stream,
-            tls_identity_host,
-            tls_outbound::global_profile(),
-        )
-        .await?;
+        let tls =
+            connect_verified_tls(stream, tls_identity_host, tls_outbound::global_profile()).await?;
         handshake_origin_https(tls, !websocket).await?
     } else {
         let (http1_sender, connection) =
@@ -6768,7 +6754,10 @@ mod tests {
         assert!(!origin_prefers_http2(true, None));
         // Chrome-like outbound config advertises h2 first.
         let cfg = tls_outbound::build_client_config(OutboundTlsProfile::ChromeLike);
-        assert_eq!(cfg.alpn_protocols.first().map(|p| p.as_slice()), Some(&b"h2"[..]));
+        assert_eq!(
+            cfg.alpn_protocols.first().map(|p| p.as_slice()),
+            Some(&b"h2"[..])
+        );
     }
 
     fn ja3_measure_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -6804,8 +6793,10 @@ mod tests {
     async fn different_outbound_profiles_measure_different_ja3() {
         // Profiles must change real ClientHello material, not just labels.
         let chrome = measure_profile_ja3(OutboundTlsProfile::ChromeLike, "ja3.chrome.test").await;
-        let firefox = measure_profile_ja3(OutboundTlsProfile::FirefoxLike, "ja3.firefox.test").await;
-        let safari = measure_profile_ja3(OutboundTlsProfile::SafariIosLike, "ja3.safari.test").await;
+        let firefox =
+            measure_profile_ja3(OutboundTlsProfile::FirefoxLike, "ja3.firefox.test").await;
+        let safari =
+            measure_profile_ja3(OutboundTlsProfile::SafariIosLike, "ja3.safari.test").await;
         assert_ne!(
             chrome, firefox,
             "chrome-like vs firefox-like must differ on the wire"

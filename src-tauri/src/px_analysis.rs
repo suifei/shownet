@@ -217,22 +217,23 @@ pub fn decode_request_payload(
             "decoded"
         };
         let mut fields = value;
-        if let Some(ec) = fields.get("ecData").cloned().or_else(|| fields.get("ecdata").cloned()) {
+        if let Some(ec) = fields
+            .get("ecData")
+            .cloned()
+            .or_else(|| fields.get("ecdata").cloned())
+        {
             if let Some(s) = ec.as_str() {
-                notes.push(format!("ecData length={} (opaque unless keys available)", s.len()));
+                notes.push(format!(
+                    "ecData length={} (opaque unless keys available)",
+                    s.len()
+                ));
                 // Try base64 envelope only
                 if let Ok(bytes) = STANDARD.decode(s) {
                     notes.push(format!("ecData base64-decodes to {} bytes", bytes.len()));
                     if px_decrypt_enabled() {
                         fields.as_object_mut().map(|obj| {
-                            obj.insert(
-                                "ecDataBase64Length".into(),
-                                json!(bytes.len()),
-                            );
-                            obj.insert(
-                                "ecDataPreviewHex".into(),
-                                json!(hex_preview(&bytes, 32)),
-                            );
+                            obj.insert("ecDataBase64Length".into(), json!(bytes.len()));
+                            obj.insert("ecDataPreviewHex".into(), json!(hex_preview(&bytes, 32)));
                         });
                     }
                 }
@@ -261,7 +262,12 @@ pub fn decode_request_payload(
         let has_ec = map.keys().any(|k| k.eq_ignore_ascii_case("ecdata"));
         return Ok(PxDecodeResult {
             request_id: request_id.to_string(),
-            status: if has_ec { "encrypted_opaque" } else { "decoded" }.into(),
+            status: if has_ec {
+                "encrypted_opaque"
+            } else {
+                "decoded"
+            }
+            .into(),
             summary: "Parsed form body keys".into(),
             fields: Value::Object(map),
             notes,

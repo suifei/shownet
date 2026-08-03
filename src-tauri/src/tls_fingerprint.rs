@@ -153,15 +153,13 @@ pub fn mitm_fingerprint_with_selection(
         None => crate::tls_outbound::resolve_profile_for_connection(Some(&inbound)),
     };
     let engine = crate::tls_outbound::active_engine();
-    let app_protocol = negotiated_alpn
-        .as_deref()
-        .map(|alpn| {
-            if alpn.eq_ignore_ascii_case("h2") {
-                "h2".to_string()
-            } else {
-                "http/1.1".to_string()
-            }
-        });
+    let app_protocol = negotiated_alpn.as_deref().map(|alpn| {
+        if alpn.eq_ignore_ascii_case("h2") {
+            "h2".to_string()
+        } else {
+            "http/1.1".to_string()
+        }
+    });
     TlsFingerprintRecord {
         capture_mode: "mitm".to_string(),
         inbound,
@@ -217,10 +215,7 @@ pub fn tunnel_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord
 ///
 /// Returns `{ inboundFingerprints: [...], outbound: status, boundaryNote }` matching
 /// the Advanced Console / agent tool contract.
-pub fn list_session_tls_fingerprints(
-    storage: &Storage,
-    session_id: &str,
-) -> Result<Value, String> {
+pub fn list_session_tls_fingerprints(storage: &Storage, session_id: &str) -> Result<Value, String> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return Err("sessionId 不能为空".into());

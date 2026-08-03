@@ -4,9 +4,13 @@
   "version": "0.1.0",
   "license": "GPL-3.0-only",
   "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
+    "test": "node --experimental-strip-types --test \"tests/*.test.ts\"",
     "preview": "vite preview",
     "icons:generate": "node scripts/generate-app-icons.mjs",
     "icons:verify": "node scripts/verify-app-icons.mjs",
@@ -60,6 +64,7 @@
     "@types/react": "https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz",
     "@types/react-dom": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz",
     "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9",
     "vite": "5.4.21"
   }
 }

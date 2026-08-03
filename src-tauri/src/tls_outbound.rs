@@ -284,11 +284,8 @@ pub fn resolve_profile_for_connection(
 ) -> (OutboundTlsProfile, bool) {
     if auto_from_inbound() {
         if let Some(fp) = inbound {
-            let preset_id = tls_clienthello_catalog::select_preset_from_inbound(
-                &fp.ja4,
-                &fp.alpn,
-                fp.grease,
-            );
+            let preset_id =
+                tls_clienthello_catalog::select_preset_from_inbound(&fp.ja4, &fp.alpn, fp.grease);
             let _ = tls_clienthello_catalog::set_active_preset_id(preset_id);
             return (select_profile_from_inbound(fp), true);
         }
@@ -302,11 +299,8 @@ pub fn resolve_preset_for_connection(
 ) -> (&'static ClientHelloPreset, bool) {
     if auto_from_inbound() {
         if let Some(fp) = inbound {
-            let id = tls_clienthello_catalog::select_preset_from_inbound(
-                &fp.ja4,
-                &fp.alpn,
-                fp.grease,
-            );
+            let id =
+                tls_clienthello_catalog::select_preset_from_inbound(&fp.ja4, &fp.alpn, fp.grease);
             if let Ok(p) = set_active_preset(id) {
                 return (p, true);
             }
@@ -465,9 +459,7 @@ pub fn build_client_config_for_preset(preset_id: &str) -> Result<Arc<ClientConfi
     let builder = ClientConfig::builder_with_provider(provider.into())
         .with_safe_default_protocol_versions()
         .map_err(|e| format!("rustls protocol versions: {e}"))?;
-    let mut config = builder
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut config = builder.with_root_certificates(roots).with_no_client_auth();
     config.alpn_protocols = match preset.alpn {
         AlpnRecipe::H2Http11 => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         AlpnRecipe::Http11Only => vec![b"http/1.1".to_vec()],
@@ -618,8 +610,11 @@ mod tests {
 
     #[test]
     fn selects_chrome_like_from_ja4_h2() {
-        let inbound =
-            sample_inbound("t13d1516h2_8daaf6152771_806a8c22fdea", &["h2", "http/1.1"], true);
+        let inbound = sample_inbound(
+            "t13d1516h2_8daaf6152771_806a8c22fdea",
+            &["h2", "http/1.1"],
+            true,
+        );
         assert_eq!(
             select_profile_from_inbound(&inbound),
             OutboundTlsProfile::ChromeLike
@@ -778,7 +773,10 @@ mod tests {
         let _guard = preset_lock();
         set_active_preset("chrome149").unwrap();
         // Shipped resolve path must follow selection (not hard-coded chrome150).
-        assert_eq!(preset_id_for_profile(OutboundTlsProfile::ChromeLike), "chrome149");
+        assert_eq!(
+            preset_id_for_profile(OutboundTlsProfile::ChromeLike),
+            "chrome149"
+        );
         let fp_a = builder_cipher_fingerprint_for_profile(OutboundTlsProfile::ChromeLike);
         let cfg_a = build_client_config(OutboundTlsProfile::ChromeLike);
         assert_eq!(
@@ -786,14 +784,20 @@ mod tests {
             preset_cipher_fingerprint("chrome149").unwrap(),
             "builder path must wire chrome149 provider material"
         );
-        assert!(cfg_a.enable_sni, "origin ClientConfig must keep SNI enabled");
+        assert!(
+            cfg_a.enable_sni,
+            "origin ClientConfig must keep SNI enabled"
+        );
         assert_eq!(
             cfg_a.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
 
         set_active_preset("chrome150").unwrap();
-        assert_eq!(preset_id_for_profile(OutboundTlsProfile::ChromeLike), "chrome150");
+        assert_eq!(
+            preset_id_for_profile(OutboundTlsProfile::ChromeLike),
+            "chrome150"
+        );
         let fp_b = builder_cipher_fingerprint_for_profile(OutboundTlsProfile::ChromeLike);
         let cfg_b = build_client_config(OutboundTlsProfile::ChromeLike);
         assert_eq!(
@@ -821,7 +825,10 @@ mod tests {
         set_active_preset("chrome150").unwrap();
         assert_eq!(active_preset_id(), "chrome150");
         assert_eq!(global_profile(), OutboundTlsProfile::ChromeLike);
-        assert_eq!(preset_id_for_profile(OutboundTlsProfile::ChromeLike), "chrome150");
+        assert_eq!(
+            preset_id_for_profile(OutboundTlsProfile::ChromeLike),
+            "chrome150"
+        );
         let status = status_json();
         assert_eq!(status["presetId"], "chrome150");
         assert_eq!(status["browserFamily"], "chrome");

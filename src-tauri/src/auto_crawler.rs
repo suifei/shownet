@@ -101,10 +101,7 @@ pub fn build_auto_crawler_for_report(
     report_id: Option<&str>,
 ) -> Result<AutoCrawlerPackage, String> {
     let replay = algorithm_replay::build_algorithm_replay_for_report(
-        storage,
-        session_id,
-        language,
-        report_id,
+        storage, session_id, language, report_id,
     )?;
     let language = replay.language.clone();
     let protection = protection_analysis::analyze_session(storage, session_id)?;
@@ -140,13 +137,7 @@ pub fn build_auto_crawler_for_report(
     ));
 
     // Client simulator with proxy + TLS fidelity notes (dependency-light).
-    let client_source = render_client_source(
-        &language,
-        &replay,
-        &shape,
-        &fidelity,
-        &proxy_env,
-    )?;
+    let client_source = render_client_source(&language, &replay, &shape, &fidelity, &proxy_env)?;
     let client_name = client_filename(&language);
     files.push(make_file(
         &client_name,
@@ -186,8 +177,7 @@ pub fn build_auto_crawler_for_report(
         });
     }
 
-    let validation_json =
-        serde_json::to_string_pretty(&validation).map_err(|e| e.to_string())?;
+    let validation_json = serde_json::to_string_pretty(&validation).map_err(|e| e.to_string())?;
     files.push(make_file(
         "VALIDATION_REPORT.json",
         "validation-report",
@@ -265,8 +255,7 @@ pub fn export_auto_crawler(
                 )
             }),
     };
-    std::fs::create_dir_all(&directory)
-        .map_err(|e| format!("create crawler export dir: {e}"))?;
+    std::fs::create_dir_all(&directory).map_err(|e| format!("create crawler export dir: {e}"))?;
 
     let mut written = Vec::new();
     let mut bytes_written = 0usize;
@@ -402,7 +391,9 @@ pub fn validate_package_against_capture(
                     id: "capture_shape_file_aligned".into(),
                     passed: missing_headers.is_empty()
                         && missing_body_keys.is_empty()
-                        && !shape_mismatches.iter().any(|m| m.starts_with("CAPTURE_SHAPE")),
+                        && !shape_mismatches
+                            .iter()
+                            .any(|m| m.starts_with("CAPTURE_SHAPE")),
                     detail: format!(
                         "headers_missing={} body_missing={}",
                         missing_headers.len(),
@@ -697,7 +688,12 @@ fn build_capture_shape(
             let lower = header.name.to_ascii_lowercase();
             if matches!(
                 lower.as_str(),
-                "cookie" | "authorization" | "x-signature" | "x-aws-waf-token" | "content-type" | "user-agent"
+                "cookie"
+                    | "authorization"
+                    | "x-signature"
+                    | "x-aws-waf-token"
+                    | "content-type"
+                    | "user-agent"
             ) {
                 header_names.insert(header.name.clone());
             }
@@ -712,7 +708,9 @@ fn build_capture_shape(
             }
         }
         if let Some(fp) = &request.tls_fingerprint {
-            let text = serde_json::to_string(fp).unwrap_or_default().to_ascii_lowercase();
+            let text = serde_json::to_string(fp)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             if text.contains("ja3") {
                 ja3 = true;
             }
@@ -781,7 +779,10 @@ fn build_fidelity_block(protection: &Value, requests: &[RequestRecord]) -> Value
             }
         }
     }
-    let capture_fidelity = protection.get("captureFidelity").cloned().unwrap_or(json!({}));
+    let capture_fidelity = protection
+        .get("captureFidelity")
+        .cloned()
+        .unwrap_or(json!({}));
     json!({
         "inbound": {
             "ja3Samples": ja3_samples,
@@ -817,8 +818,14 @@ fn render_client_source(
     proxy_env: &Value,
 ) -> Result<String, String> {
     let hosts = shape.endpoint_hosts.join(", ");
-    let pow = shape.pow_challenge_type.clone().unwrap_or_else(|| "unknown".into());
-    let signal = shape.signal_identifier.clone().unwrap_or_else(|| "unknown".into());
+    let pow = shape
+        .pow_challenge_type
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
+    let signal = shape
+        .signal_identifier
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
     let fidelity_pretty = serde_json::to_string_pretty(fidelity).unwrap_or_else(|_| "{}".into());
     let proxy_pretty = serde_json::to_string_pretty(proxy_env).unwrap_or_else(|_| "{}".into());
     let headers = shape.required_header_names.join(", ");
@@ -998,7 +1005,13 @@ if __name__ == "__main__":
             },
         ),
         "javascript" | "typescript" | "go" | "rust" | "java" | "csharp" | "c++" | "c" | "zig" => {
-            render_native_client(language, replay, shape, fidelity_pretty.as_str(), proxy_pretty.as_str())
+            render_native_client(
+                language,
+                replay,
+                shape,
+                fidelity_pretty.as_str(),
+                proxy_pretty.as_str(),
+            )
         }
         other => {
             return Err(format!(
@@ -1938,7 +1951,10 @@ fn scan_secret_leaks(files: &[ReplayFile], requests: &[RequestRecord]) -> Vec<St
                 suspects.insert(token);
             }
         }
-        for part in request.response_body.split(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '-' && c != '_') {
+        for part in request
+            .response_body
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '-' && c != '_')
+        {
             if part.len() > 40 && part.contains(':') {
                 suspects.insert(part.to_string());
             }
@@ -2107,8 +2123,14 @@ mod tests {
             package.files.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
         assert!(package.files.iter().any(|f| f.name == "CAPTURE_SHAPE.json"));
-        assert!(package.files.iter().any(|f| f.name == "VALIDATION_REPORT.json"));
-        assert!(package.files.iter().any(|f| f.name == "CRAWLER_ANALYSIS.md"));
+        assert!(package
+            .files
+            .iter()
+            .any(|f| f.name == "VALIDATION_REPORT.json"));
+        assert!(package
+            .files
+            .iter()
+            .any(|f| f.name == "CRAWLER_ANALYSIS.md"));
         assert!(package.files.iter().any(|f| f.name == "TEST_STATUS.md"));
         assert!(package.validation.ok, "{:?}", package.validation);
         assert_eq!(package.validation.status, "shape_aligned");
@@ -2119,9 +2141,13 @@ mod tests {
             .unwrap();
         assert!(client.content.contains("SHOWNET_PROXY") || client.content.contains("proxy"));
         assert!(client.content.contains("validate_against_capture"));
-        assert!(client.content.contains("claimsFullBrowserJa3") || client.content.contains("False"));
+        assert!(
+            client.content.contains("claimsFullBrowserJa3") || client.content.contains("False")
+        );
         // no fixture token
-        assert!(!client.content.contains("2e1254cf-d58d-4c53-8afb-08be29b8d202:AAoA"));
+        assert!(!client
+            .content
+            .contains("2e1254cf-d58d-4c53-8afb-08be29b8d202:AAoA"));
     }
 
     #[test]
@@ -2131,9 +2157,19 @@ mod tests {
         for lang in ["python", "javascript", "go", "java"] {
             let package = build_auto_crawler(&storage, &sid, lang).expect("build");
             assert_eq!(package.language, lang);
-            assert!(package.files.iter().any(|f| f.role == "auto-crawler-client"));
-            assert!(package.files.iter().any(|f| f.name == "CRAWLER_ANALYSIS.md"));
-            assert!(package.validation.ok, "lang={lang} {:?}", package.validation);
+            assert!(package
+                .files
+                .iter()
+                .any(|f| f.role == "auto-crawler-client"));
+            assert!(package
+                .files
+                .iter()
+                .any(|f| f.name == "CRAWLER_ANALYSIS.md"));
+            assert!(
+                package.validation.ok,
+                "lang={lang} {:?}",
+                package.validation
+            );
             let client = package
                 .files
                 .iter()
@@ -2145,14 +2181,24 @@ mod tests {
                     "lang={lang} must not ship Python skeleton"
                 );
                 assert!(
-                    !client.content.contains("from __future__ import annotations"),
+                    !client
+                        .content
+                        .contains("from __future__ import annotations"),
                     "lang={lang} must not ship Python skeleton"
                 );
             }
             match lang {
-                "java" => assert!(client.name.ends_with(".java") && client.content.contains("class ClientCrawler")),
-                "go" => assert!(client.name.ends_with(".go") && client.content.contains("package main")),
-                "javascript" => assert!(client.name.ends_with(".js") && client.content.contains("function validateAgainstCapture")),
+                "java" => assert!(
+                    client.name.ends_with(".java")
+                        && client.content.contains("class ClientCrawler")
+                ),
+                "go" => {
+                    assert!(client.name.ends_with(".go") && client.content.contains("package main"))
+                }
+                "javascript" => assert!(
+                    client.name.ends_with(".js")
+                        && client.content.contains("function validateAgainstCapture")
+                ),
                 _ => {}
             }
         }
@@ -2197,9 +2243,10 @@ mod tests {
         let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
         let package = build_auto_crawler(&storage, &sid, "python").expect("build");
         let replay = algorithm_replay::build_algorithm_replay(&storage, &sid, "python").unwrap();
-        let report = validate_with_mutated_shape(&replay, &package.capture_shape, &package.files, |shape| {
-            shape.pow_challenge_type = Some("DefinitelyWrongPoW".into());
-        });
+        let report =
+            validate_with_mutated_shape(&replay, &package.capture_shape, &package.files, |shape| {
+                shape.pow_challenge_type = Some("DefinitelyWrongPoW".into());
+            });
         assert!(!report.ok, "{report:?}");
         assert_eq!(report.status, "mismatch");
     }
@@ -2220,7 +2267,8 @@ mod tests {
             shape_file.bytes = content.len();
         }
         let mut shape = package.capture_shape.clone();
-        shape.required_header_names = vec!["x-must-be-present-from-capture".into(), "user-agent".into()];
+        shape.required_header_names =
+            vec!["x-must-be-present-from-capture".into(), "user-agent".into()];
         let report = validate_package_against_capture(&replay, &shape, &files);
         assert!(!report.ok, "{report:?}");
         assert!(
@@ -2242,8 +2290,7 @@ mod tests {
             .unwrap();
         // Contract: missingHeaders must flip ok to False (not soft-pass).
         assert!(
-            client.content.contains("if missing_headers:")
-                && client.content.contains("ok = False"),
+            client.content.contains("if missing_headers:") && client.content.contains("ok = False"),
             "python client must fail offline validation on missing headers"
         );
         assert!(
@@ -2322,16 +2369,24 @@ mod tests {
             return;
         };
         let language = std::env::var("SHOWNET_LIVE_LANGUAGE").unwrap_or_else(|_| "python".into());
-        let export_dir = std::env::var("SHOWNET_LIVE_EXPORT_DIR").ok().map(PathBuf::from);
+        let export_dir = std::env::var("SHOWNET_LIVE_EXPORT_DIR")
+            .ok()
+            .map(PathBuf::from);
         let storage = Storage::open(Path::new(&db)).expect("open live db");
         let package =
             build_auto_crawler(&storage, &session_id, &language).expect("build live crawler");
         assert!(
-            package.files.iter().any(|f| f.role == "auto-crawler-client"),
+            package
+                .files
+                .iter()
+                .any(|f| f.role == "auto-crawler-client"),
             "missing client"
         );
         assert!(package.files.iter().any(|f| f.name == "CAPTURE_SHAPE.json"));
-        assert!(package.files.iter().any(|f| f.name == "VALIDATION_REPORT.json"));
+        assert!(package
+            .files
+            .iter()
+            .any(|f| f.name == "VALIDATION_REPORT.json"));
         // Must not embed long aws-waf token-like colon blobs from capture into client.
         let client = package
             .files
@@ -2340,13 +2395,8 @@ mod tests {
             .unwrap();
         assert!(!client.content.contains(":AAoA"));
         if let Some(parent) = export_dir.as_deref() {
-            let exported = export_auto_crawler(
-                &storage,
-                &session_id,
-                &language,
-                Some(parent),
-            )
-            .expect("export live");
+            let exported = export_auto_crawler(&storage, &session_id, &language, Some(parent))
+                .expect("export live");
             assert!(Path::new(&exported.directory).exists());
             if let Ok(summary_path) = std::env::var("SHOWNET_LIVE_SUMMARY") {
                 let body = format!(

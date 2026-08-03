@@ -9644,11 +9644,8 @@ mod tests {
         assert_eq!(fingerprint.http2.unwrap().settings[0].value, 4096);
 
         // Shipped Advanced Console / Tauri command path: list_session_tls_fingerprints.
-        let listed = crate::tls_fingerprint::list_session_tls_fingerprints(
-            &storage,
-            &session.id,
-        )
-        .expect("list session fingerprints");
+        let listed = crate::tls_fingerprint::list_session_tls_fingerprints(&storage, &session.id)
+            .expect("list session fingerprints");
         let rows = listed["inboundFingerprints"]
             .as_array()
             .expect("inboundFingerprints array");
