@@ -160,13 +160,16 @@ pub fn impersonate_unavailable_reason() -> &'static str {
     if real_impersonate_stack_available() {
         return "";
     }
-    if cfg!(feature = "impersonate-boring") {
-        return "impersonate-boring feature compiled in, but no linked BoringSSL/curl-impersonate connector is registered; MITM uses rustls";
-    }
+    // Env diagnostics first: they describe an explicit operator action and stay
+    // reachable in both lanes. Gating them behind the feature check would make
+    // the more specific message unreachable exactly where it is most useful.
     if std::env::var_os("SHOWNET_IMPERSONATE_LIB").is_some()
         || std::env::var_os("SHOWNET_IMPERSONATE_ENABLE").is_some()
     {
         return "impersonate env set but this build has no linked BoringSSL/curl-impersonate MITM path";
+    }
+    if cfg!(feature = "impersonate-boring") {
+        return "impersonate-boring feature compiled in, but no linked BoringSSL/curl-impersonate connector is registered; MITM uses rustls";
     }
     "no linked BoringSSL/curl-impersonate (or equivalent) stack in this build; MITM uses rustls"
 }

@@ -1615,18 +1615,24 @@ async fn handle_connect(
             .to_string(),
         );
         if let Some(measured) = verified.measured_ja3 {
-            // Browser-class parity only when a real impersonate stack is active AND
-            // measured JA3 equals that stack's target. We never have such a stack today,
-            // so parity stays false even when we successfully measure rustls JA3.
-            let parity = crate::tls_outbound::real_impersonate_stack_available()
-                && crate::tls_impersonate::ja3_parity(&measured, outbound_profile);
+            // Parity needs both halves: a real impersonate stack must be active, and
+            // the measured ClientHello must match a golden captured from the target
+            // client. The comparand is the golden store rather than
+            // tls_impersonate::profile_target_ja3 — that target is a hand-assembled
+            // offline template no real TLS stack emits, so comparing against it made
+            // parity false by collision-improbability rather than by contract.
+            let preset_id = crate::tls_outbound::preset_id_for_profile(outbound_profile);
+            let alignment = crate::tls_golden::evaluate(&preset_id, &measured);
+            let parity =
+                crate::tls_outbound::real_impersonate_stack_available() && alignment.is_matched();
             fingerprint.outbound.ja3 = Some(measured.clone());
             fingerprint.outbound.ja3_parity = Some(parity);
             fingerprint.outbound.engine = Some(crate::tls_outbound::active_engine().as_str().into());
             fingerprint.outbound.note = format!(
-                "{} measuredJa3={measured} profile={} wireDiffers=true browserParity={}",
+                "{} measuredJa3={measured} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
                 fingerprint.outbound.note,
                 outbound_profile.as_str(),
+                alignment.as_str(),
                 parity
             );
         } else {

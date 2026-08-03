@@ -45,6 +45,12 @@ jobs:
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      # Impersonate lane: compiles the engine router in, links no connector.
+      # Both lanes must agree that no real stack is present, so the honesty
+      # assertions stay enforced rather than being switched off where a real
+      # stack would eventually live. --no-default-features keeps the lane honest
+      # if `default` ever gains members.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
       - run: npm run test:rust:network
       - run: npm run tauri -- build --debug --no-bundle
 
