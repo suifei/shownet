@@ -7,7 +7,11 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function readUtf8(relativePath: string): Promise<string> {
-  return readFile(join(root, relativePath), "utf8");
+  const raw = await readFile(join(root, relativePath), "utf8");
+  // Normalise line endings so assertions that anchor on "\n" hold regardless of
+  // how the file was checked out. .gitattributes pins LF, but a working tree
+  // configured before that lands would still carry CRLF.
+  return raw.replace(/\r\n/g, "\n");
 }
 
 async function assertNonEmptyFile(relativePath: string, minBytes = 1024): Promise<number> {

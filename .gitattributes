@@ -1,0 +1,22 @@
+# Normalise line endings to LF in the working tree on every platform.
+#
+# Roughly sixteen tests in tests/ assert against the raw text of source files
+# (.tsx, .css, .rs, .md, .srt). Under git's default autocrlf on Windows those
+# files check out with CRLF, and any assertion that anchors on "\n" stops
+# matching — which is exactly how the tutorial SRT test failed on
+# windows-latest while passing on macos-14.
+#
+# There are no .bat/.cmd/.ps1 files in this repo, so nothing needs CRLF.
+* text=auto eol=lf
+
+# Binary assets: never touch, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.mp4 binary
+*.zip binary
+*.dmg binary
+*.exe binary
+*.pdf binary
