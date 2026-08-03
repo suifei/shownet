@@ -99,7 +99,7 @@ export function AdvancedConsoleView({
           invoke<PxEvidenceItem[]>("list_px_evidence", { sessionId, limit: 200 }),
           invoke<{
             inboundFingerprints?: Array<{ fingerprint: TlsFingerprintRecord }>;
-          }>("get_tls_fingerprints", { sessionId }).catch(() => ({ inboundFingerprints: [] })),
+          }>("get_tls_fingerprints", { sessionId }),
         ]);
         setHooks(hookList);
         setPxEvidence(evidence);

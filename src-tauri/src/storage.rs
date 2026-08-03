@@ -9642,6 +9642,21 @@ mod tests {
         assert_eq!(fingerprint.inbound.sni.as_deref(), Some("api.example.test"));
         assert_eq!(fingerprint.outbound.mode, "pass-through");
         assert_eq!(fingerprint.http2.unwrap().settings[0].value, 4096);
+
+        // Shipped Advanced Console / Tauri command path: list_session_tls_fingerprints.
+        let listed = crate::tls_fingerprint::list_session_tls_fingerprints(
+            &storage,
+            &session.id,
+        )
+        .expect("list session fingerprints");
+        let rows = listed["inboundFingerprints"]
+            .as_array()
+            .expect("inboundFingerprints array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["requestId"], stored.id);
+        assert_eq!(rows[0]["fingerprint"]["inbound"]["ja3"], "ja3-hash");
+        assert!(listed["outbound"]["ja3Parity"].as_bool() == Some(false));
+        assert!(listed["boundaryNote"].as_str().unwrap().contains("Inbound"));
     }
 
     #[test]

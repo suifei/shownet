@@ -1574,27 +1574,7 @@ fn get_hooks(state: &AppState, arguments: &Value) -> Result<Value, String> {
 
 fn get_tls_fingerprints(state: &AppState, arguments: &Value) -> Result<Value, String> {
     let session_id = required_string(arguments, "sessionId")?;
-    let fingerprints = state
-        .storage
-        .list_requests(&session_id, Some(10_000), Some(0))?
-        .into_iter()
-        .filter_map(|request| {
-            request.tls_fingerprint.map(|fingerprint| {
-                json!({
-                    "requestId": request.id,
-                    "order": request.order,
-                    "host": request.host,
-                    "path": request.path,
-                    "fingerprint": fingerprint,
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "inboundFingerprints": fingerprints,
-        "outbound": crate::tls_outbound::status_json(),
-        "boundaryNote": "Inbound JA3/JA4 is browser-side; outbound MITM profile is independent and labeled under outbound.fidelityLabel.",
-    }))
+    crate::tls_fingerprint::list_session_tls_fingerprints(&state.storage, &session_id)
 }
 
 fn analyze_dynamic_protection(state: &AppState, arguments: &Value) -> Result<Value, String> {

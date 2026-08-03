@@ -2086,6 +2086,15 @@ fn list_browser_hooks(
     state.storage.list_browser_hooks(&session_id, limit)
 }
 
+/// Advanced Console + agent shared: session-scoped TLS fingerprint rows + outbound status.
+#[tauri::command]
+fn get_tls_fingerprints(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    tls_fingerprint::list_session_tls_fingerprints(&state.storage, &session_id)
+}
+
 #[tauri::command]
 fn export_session_file(
     session_id: String,
@@ -3695,6 +3704,7 @@ pub fn run() {
             get_browser_hook_script,
             record_browser_hook,
             list_browser_hooks,
+            get_tls_fingerprints,
             export_session_file,
             import_session_file,
             build_algorithm_replay_package,

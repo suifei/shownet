@@ -1,6 +1,8 @@
 use crate::http2_fingerprint::Http2Fingerprint;
+use crate::storage::Storage;
 use md5::Md5;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -209,6 +211,40 @@ pub fn tunnel_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord
         },
         http2: None,
     }
+}
+
+/// List stored TLS fingerprints for a session (UI + agent tool shared path).
+///
+/// Returns `{ inboundFingerprints: [...], outbound: status, boundaryNote }` matching
+/// the Advanced Console / agent tool contract.
+pub fn list_session_tls_fingerprints(
+    storage: &Storage,
+    session_id: &str,
+) -> Result<Value, String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err("sessionId 不能为空".into());
+    }
+    let fingerprints = storage
+        .list_requests(session_id, Some(10_000), Some(0))?
+        .into_iter()
+        .filter_map(|request| {
+            request.tls_fingerprint.map(|fingerprint| {
+                json!({
+                    "requestId": request.id,
+                    "order": request.order,
+                    "host": request.host,
+                    "path": request.path,
+                    "fingerprint": fingerprint,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "inboundFingerprints": fingerprints,
+        "outbound": crate::tls_outbound::status_json(),
+        "boundaryNote": "Inbound JA3/JA4 is browser-side; outbound MITM profile is independent and labeled under outbound.fidelityLabel.",
+    }))
 }
 
 /// Parse a TLS handshake ClientHello message (type 1, without record layer).
