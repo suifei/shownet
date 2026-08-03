@@ -1153,6 +1153,17 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// A path as it appears *inside* a serialised JSON document.
+    ///
+    /// Windows temp paths contain backslashes, which serde escapes to `\\`, so
+    /// searching the serialised snapshot for the raw `to_string_lossy()` form
+    /// never matches there. Encoding the needle the same way the haystack was
+    /// encoded makes the assertion hold on both platforms.
+    fn json_encoded(path: &std::path::Path) -> String {
+        let quoted = serde_json::to_string(path.to_string_lossy().as_ref()).unwrap();
+        quoted.trim_matches('"').to_string()
+    }
+
     fn draft(url: &str) -> RequestDraft {
         RequestDraft {
             id: "draft-test".to_string(),
@@ -1651,7 +1662,7 @@ mod tests {
             .any(|window| window == [0, 1, 2, 255]));
         let snapshot = serde_json::to_string(&prepared.snapshot).unwrap();
         assert!(snapshot.contains("multipart-secret"));
-        assert!(snapshot.contains(path.to_string_lossy().as_ref()));
+        assert!(snapshot.contains(&json_encoded(&path)));
         assert!(snapshot.contains("sample.bin"));
         let _ = std::fs::remove_file(path);
     }
@@ -1674,7 +1685,7 @@ mod tests {
             header.name.eq_ignore_ascii_case("content-type") && header.value == "application/custom"
         }));
         let snapshot = serde_json::to_string(&prepared.snapshot).unwrap();
-        assert!(snapshot.contains(path.to_string_lossy().as_ref()));
+        assert!(snapshot.contains(&json_encoded(&path)));
         assert!(snapshot.contains("payload.bin"));
         assert!(snapshot.contains("CQgHBg=="));
         let _ = std::fs::remove_file(path);
