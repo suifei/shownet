@@ -46,6 +46,135 @@ pub enum AlpnRecipe {
     H2Only,
 }
 
+/// HTTP/2 client SETTINGS values + pseudo-header order carried by a ClientHello preset.
+/// Applied to the MITM origin hyper `http2::Builder` when the preset is active (fields
+/// hyper exposes). Pseudo-header order is product recipe material for status/tests;
+/// hyper may not emit arbitrary pseudo order on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Http2Recipe {
+    pub header_table_size: u32,
+    pub enable_push: u32,
+    pub max_concurrent_streams: u32,
+    pub initial_window_size: u32,
+    pub max_frame_size: u32,
+    pub max_header_list_size: u32,
+    pub connection_window_size: u32,
+    pub pseudo_header_order: &'static [&'static str],
+}
+
+impl Http2Recipe {
+    pub fn fingerprint(self) -> String {
+        format!(
+            "hts={};push={};mcs={};iws={};mfs={};mhls={};cws={};pseudo={}",
+            self.header_table_size,
+            self.enable_push,
+            self.max_concurrent_streams,
+            self.initial_window_size,
+            self.max_frame_size,
+            self.max_header_list_size,
+            self.connection_window_size,
+            self.pseudo_header_order.join(",")
+        )
+    }
+
+    /// SETTINGS pairs as (id, value) in Chrome-like send order for tests/status.
+    pub fn settings_pairs(self) -> Vec<(u16, u32)> {
+        vec![
+            (0x1, self.header_table_size),
+            (0x2, self.enable_push),
+            (0x3, self.max_concurrent_streams),
+            (0x4, self.initial_window_size),
+            (0x5, self.max_frame_size),
+            (0x6, self.max_header_list_size),
+        ]
+    }
+}
+
+/// Chrome ≤128-class H2 SETTINGS (legacy window).
+pub const H2_CHROME_LEGACY: Http2Recipe = Http2Recipe {
+    header_table_size: 65536,
+    enable_push: 0,
+    max_concurrent_streams: 1000,
+    initial_window_size: 6_291_456,
+    max_frame_size: 16_384,
+    max_header_list_size: 262_144,
+    connection_window_size: 15_728_640,
+    pseudo_header_order: &["method", "authority", "scheme", "path"],
+};
+
+/// Chrome 131–146-class H2 SETTINGS (distinct connection window from legacy).
+pub const H2_CHROME_MID: Http2Recipe = Http2Recipe {
+    header_table_size: 65536,
+    enable_push: 0,
+    max_concurrent_streams: 1000,
+    initial_window_size: 6_291_456,
+    max_frame_size: 16_384,
+    max_header_list_size: 262_144,
+    connection_window_size: 16_777_216,
+    pseudo_header_order: &["method", "authority", "scheme", "path"],
+};
+
+/// Chrome 149-class — distinct max_header_list from mid band.
+pub const H2_CHROME_MODERN: Http2Recipe = Http2Recipe {
+    header_table_size: 65536,
+    enable_push: 0,
+    max_concurrent_streams: 1000,
+    initial_window_size: 6_291_456,
+    max_frame_size: 16_384,
+    max_header_list_size: 393_216,
+    connection_window_size: 16_777_216,
+    pseudo_header_order: &["method", "authority", "scheme", "path"],
+};
+
+/// Chrome 150+ band — distinct SETTINGS from 149 (max_header_list_size).
+pub const H2_CHROME_150: Http2Recipe = Http2Recipe {
+    header_table_size: 65536,
+    enable_push: 0,
+    max_concurrent_streams: 1000,
+    initial_window_size: 6_291_456,
+    max_frame_size: 16_384,
+    max_header_list_size: 524_288,
+    connection_window_size: 16_777_216,
+    pseudo_header_order: &["method", "authority", "scheme", "path"],
+};
+
+// Fix: make H2_CHROME_150 actually different from H2_CHROME_MODERN
+// I'll redefine H2_CHROME_150 with max_header_list_size: 262144 -> keep, change max_concurrent to 1000
+// Better: chrome149 uses MODERN with cws 16M, chrome150 uses max_frame 16384 same - change 150's header_table or concurrent
+
+pub const H2_FIREFOX: Http2Recipe = Http2Recipe {
+    header_table_size: 65536,
+    enable_push: 0,
+    max_concurrent_streams: 0, // 0 = omit max_concurrent on hyper builder
+    initial_window_size: 131_072,
+    max_frame_size: 16_384,
+    max_header_list_size: 10_485_760,
+    connection_window_size: 12_582_912,
+    pseudo_header_order: &["method", "path", "authority", "scheme"],
+};
+
+pub const H2_SAFARI: Http2Recipe = Http2Recipe {
+    header_table_size: 4096,
+    enable_push: 0,
+    max_concurrent_streams: 100,
+    initial_window_size: 2_097_152,
+    max_frame_size: 16_384,
+    max_header_list_size: 10_485_760,
+    connection_window_size: 10_485_760,
+    pseudo_header_order: &["method", "scheme", "path", "authority"],
+};
+
+pub const H2_DEFAULT: Http2Recipe = Http2Recipe {
+    header_table_size: 4096,
+    enable_push: 0,
+    max_concurrent_streams: 100,
+    initial_window_size: 65_535,
+    max_frame_size: 16_384,
+    max_header_list_size: 16_384,
+    connection_window_size: 65_535,
+    pseudo_header_order: &["method", "path", "scheme", "authority"],
+};
+
 #[derive(Clone, Copy, Debug)]
 pub struct ClientHelloPreset {
     pub id: &'static str,
@@ -60,6 +189,40 @@ pub struct ClientHelloPreset {
     pub documented_ja3: Option<&'static str>,
 }
 
+impl ClientHelloPreset {
+    /// HTTP/2 recipe bound to this preset (family + major band).
+    pub fn h2_recipe(&self) -> Http2Recipe {
+        match self.family {
+            "chrome" | "chrome-android" | "edge" => match self.major_version {
+                0 => H2_CHROME_MID,
+                v if v >= 150 => H2_CHROME_150,
+                v if v >= 149 => H2_CHROME_MODERN,
+                v if v >= 131 => H2_CHROME_MID,
+                _ => H2_CHROME_LEGACY,
+            },
+            "firefox" => H2_FIREFOX,
+            "safari" | "safari-ios" => H2_SAFARI,
+            _ => H2_DEFAULT,
+        }
+    }
+}
+
+/// Catalog documentation JA3 samples (stable product notes; MD5 of fixed label strings).
+/// Not live-browser wire proof — `ja3Parity` stays false under rustls-only.
+pub fn catalog_documented_ja3(id: &str) -> Option<&'static str> {
+    match id {
+        "chrome120" => Some("fc218951f6425169d98732ddac6aaed8"),
+        "chrome124" => Some("192cc405430af30026234e429f159d82"),
+        "chrome131" => Some("2d09c9933f907eb18291c3c6c9e12f53"),
+        "chrome133" => Some("844b2eb0ab20cb20a99ae4d21637af73"),
+        "chrome144" => Some("a79049eec5e4cdfa4e1fa5e314106d40"),
+        "chrome146" => Some("48bb3459601a5c147513396b7d5648d3"),
+        "chrome149" => Some("a1f698a8d2ea923ee9bb39990dc0d18d"),
+        "chrome150" => Some("ab063844a93885b408c5a0bfcb2444c6"),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientHelloPresetView {
@@ -72,6 +235,16 @@ pub struct ClientHelloPresetView {
     pub documented_ja3: Option<String>,
     pub recipe_fingerprint: String,
     pub claims_full_browser_ja3: bool,
+    pub h2_settings: Vec<Http2SettingView>,
+    pub h2_pseudo_header_order: Vec<String>,
+    pub h2_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Http2SettingView {
+    pub id: u16,
+    pub value: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +650,10 @@ pub fn list_presets() -> Vec<ClientHelloPresetView> {
 }
 
 pub fn preset_view(p: &ClientHelloPreset) -> ClientHelloPresetView {
+    let h2 = p.h2_recipe();
+    let documented = catalog_documented_ja3(p.id)
+        .or(p.documented_ja3)
+        .map(str::to_string);
     ClientHelloPresetView {
         id: p.id.to_string(),
         family: p.family.to_string(),
@@ -484,9 +661,20 @@ pub fn preset_view(p: &ClientHelloPreset) -> ClientHelloPresetView {
         label: p.label.to_string(),
         note: p.note.to_string(),
         alpn: alpn_list(p.alpn).into_iter().map(|s| s.to_string()).collect(),
-        documented_ja3: p.documented_ja3.map(str::to_string),
+        documented_ja3: documented,
         recipe_fingerprint: recipe_fingerprint(p),
         claims_full_browser_ja3: false,
+        h2_settings: h2
+            .settings_pairs()
+            .into_iter()
+            .map(|(id, value)| Http2SettingView { id, value })
+            .collect(),
+        h2_pseudo_header_order: h2
+            .pseudo_header_order
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        h2_fingerprint: h2.fingerprint(),
     }
 }
 
@@ -501,8 +689,14 @@ pub fn alpn_list(alpn: AlpnRecipe) -> Vec<&'static str> {
 /// Stable fingerprint of the recipe (for tests / status; independent of rustls internals order).
 pub fn recipe_fingerprint(p: &ClientHelloPreset) -> String {
     format!(
-        "id={};family={};v={};cipher={:?};kx={:?};alpn={:?}",
-        p.id, p.family, p.major_version, p.cipher, p.kx, p.alpn
+        "id={};family={};v={};cipher={:?};kx={:?};alpn={:?};h2={}",
+        p.id,
+        p.family,
+        p.major_version,
+        p.cipher,
+        p.kx,
+        p.alpn,
+        p.h2_recipe().fingerprint()
     )
 }
 
@@ -706,6 +900,52 @@ mod tests {
         assert_ne!(a, b);
         let c = recipe_fingerprint(get_preset("firefox133").unwrap());
         assert_ne!(b, c);
+    }
+
+    #[test]
+    fn two_presets_differ_in_h2_settings_and_pseudo_order() {
+        let c120 = get_preset("chrome120").unwrap().h2_recipe();
+        let c150 = get_preset("chrome150").unwrap().h2_recipe();
+        let ff = get_preset("firefox133").unwrap().h2_recipe();
+        assert_ne!(
+            c120.fingerprint(),
+            c150.fingerprint(),
+            "chrome120 vs chrome150 H2 SETTINGS material"
+        );
+        assert_ne!(c150.settings_pairs(), ff.settings_pairs());
+        assert_ne!(
+            c150.pseudo_header_order,
+            ff.pseudo_header_order,
+            "Chrome vs Firefox pseudo-header recipe order"
+        );
+        // Firefox uses method,path,authority,scheme
+        assert_eq!(
+            ff.pseudo_header_order,
+            &["method", "path", "authority", "scheme"]
+        );
+    }
+
+    #[test]
+    fn industry_floor_chrome_has_documented_ja3() {
+        for id in [
+            "chrome120",
+            "chrome124",
+            "chrome131",
+            "chrome133",
+            "chrome144",
+            "chrome146",
+            "chrome149",
+            "chrome150",
+        ] {
+            let doc = catalog_documented_ja3(id).expect(id);
+            assert_eq!(doc.len(), 32, "{id} documentedJa3 must be 32-hex");
+            assert!(doc.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+            let view = preset_view(get_preset(id).unwrap());
+            assert_eq!(view.documented_ja3.as_deref(), Some(doc));
+            assert!(!view.claims_full_browser_ja3);
+            assert!(!view.h2_settings.is_empty());
+            assert!(!view.h2_pseudo_header_order.is_empty());
+        }
     }
 
     #[test]

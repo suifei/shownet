@@ -1916,7 +1916,13 @@ async fn handshake_origin_https(
     let use_h2 = origin_prefers_http2(prefer_http2, alpn.as_deref());
     let io = TokioIo::new(upstream_tls);
     if use_h2 {
-        let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+        // Active ClientHello catalog preset drives origin H2 SETTINGS (hyper-exposed fields).
+        tls_outbound::apply_http2_recipe_to_builder(
+            &mut builder,
+            tls_outbound::active_http2_recipe(),
+        );
+        let (sender, connection) = builder
             .handshake::<_, TapBody<ProxyBody>>(io)
             .await
             .map_err(|error| format!("目标 HTTPS HTTP/2 握手失败: {error}"))?;
@@ -1977,7 +1983,12 @@ fn dedicated_request_sender_factory(
                 // prefer h2: try http2 on the already-TLS stream without re-reading ALPN
                 // (ALPN was negotiated in connect_verified_tls).
                 // We cannot read ALPN from BoxedIo; attempt h2 handshake and fall back to h1.
-                match hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                let mut h2_builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+                tls_outbound::apply_http2_recipe_to_builder(
+                    &mut h2_builder,
+                    tls_outbound::active_http2_recipe(),
+                );
+                match h2_builder
                     .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
                     .await
                 {

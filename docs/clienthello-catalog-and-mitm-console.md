@@ -262,8 +262,24 @@ src-tauri/target/release/bundle/dmg/ShowNet_0.1.0_aarch64.dmg
 
 ---
 
-## 10. 后续（非本版验收）
+## 10. 已实现的后续能力
 
-- 接入真实 BoringSSL / curl-impersonate（或等价）后，才可将 `supportsFullBrowserJa3` / 实测 parity 按栈能力打开  
-- HTTP/2 SETTINGS / 伪头顺序与 ClientHello 预置绑定（参考 tls-client profile 形态）  
-- 将 `list_clienthello_presets` 与 status 中 `documentedJa3` 与公开样本库对齐（可选）  
+### 10.1 HTTP/2 与 ClientHello 预置绑定
+
+- 每个预置通过 `ClientHelloPreset::h2_recipe()` 绑定 HTTP/2 SETTINGS + 伪头顺序配方（Chrome 分 legacy/mid/149/150 带，Firefox / Safari 独立）。
+- MITM origin 路径 `handshake_origin_https`（及独立 h2 连接）调用 `tls_outbound::apply_http2_recipe_to_builder`，将 **hyper 可配置** 的 SETTINGS 写入 `http2::Builder`（header_table / stream&connection window / max_frame / max_header_list / max_concurrent）。
+- 伪头顺序写入 status / preset 视图（Chrome: method,authority,scheme,path；Firefox: method,path,authority,scheme）。hyper 不一定能按任意顺序发伪头——产品如实暴露配方，不宣称完整 Akamai H2 指纹。
+- status 字段：`h2Fingerprint`、`h2Settings`、`h2PseudoHeaderOrder`。
+
+### 10.2 documentedJa3
+
+- 行业底线 Chrome majors（120/124/131/133/144/146/149/150）经 `catalog_documented_ja3` 提供非空 32 位 hex **目录文档样本**（稳定产品备注，非 live 浏览器实测证明）。
+- `list_clienthello_presets` / `get_outbound_tls_profile` 的 `documentedJa3` 与 preset 视图同源。
+- **单独设置 documentedJa3 绝不会** 将 `ja3Parity` / `supportsFullBrowserJa3` 置 true（rustls-only）。
+
+### 10.3 Impersonate 类引擎路径
+
+- Cargo feature `impersonate-boring` 预留；默认构建 **未链接** BoringSSL/curl-impersonate。
+- `real_impersonate_stack_available()` 默认 false；`active_engine()` 仅在「真实栈可用 **且** impersonate 已请求」时为 Impersonate。
+- status：`impersonateRequested`、`impersonateUnavailableReason`（说明本构建无真实栈，MITM 仍用 rustls）。
+- 若环境日后接入真实栈：先打开 feature + FFI/子进程接线，再允许 `supportsFullBrowserJa3` 与实测 parity。

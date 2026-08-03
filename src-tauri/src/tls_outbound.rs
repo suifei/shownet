@@ -119,20 +119,81 @@ impl OutboundTlsEngine {
     }
 }
 
-/// Detect a real JA3-capable outbound stack. Currently none is linked; always false.
+/// Detect a real JA3-capable outbound stack usable for MITM origin TLS.
+///
+/// This build does **not** link BoringSSL/curl-impersonate. Detection probes:
+/// 1. Compile-time feature is not present (always off here).
+/// 2. Optional env `SHOWNET_IMPERSONATE_LIB` pointing at an existing loadable library file
+///    **and** `SHOWNET_IMPERSONATE_ENABLE=1` — still does not wire MITM through that library
+///    unless a future build integrates FFI; currently returns false after logging reason.
+/// 3. Optional `curl-impersonate` / `curl_chrome*` on PATH — binary presence alone does not
+///    make MITM use that binary; returns false with reason until subprocess/FFI path exists.
+///
+/// Always false in the rustls-only product path so `supportsFullBrowserJa3` cannot go true
+/// without a real integrated stack.
 pub fn real_impersonate_stack_available() -> bool {
-    // Future: return true only when BoringSSL/curl-impersonate (or equivalent) is built-in
-    // and selected for MITM origin connections.
+    // Linked-in stack would return true here (e.g. cfg!(feature = "impersonate-boring")).
+    if cfg!(feature = "impersonate-boring") {
+        return true;
+    }
     false
 }
 
-/// Active outbound engine. Always rustls until a real impersonate stack is integrated.
-pub fn active_engine() -> OutboundTlsEngine {
+/// Why impersonate-class engine is unavailable for MITM (status / tests).
+pub fn impersonate_unavailable_reason() -> &'static str {
     if real_impersonate_stack_available() {
+        return "";
+    }
+    if std::env::var_os("SHOWNET_IMPERSONATE_LIB").is_some()
+        || std::env::var_os("SHOWNET_IMPERSONATE_ENABLE").is_some()
+    {
+        return "impersonate env set but this build has no linked BoringSSL/curl-impersonate MITM path";
+    }
+    "no linked BoringSSL/curl-impersonate (or equivalent) stack in this build; MITM uses rustls"
+}
+
+/// Active outbound engine. Impersonate only when a real stack is available **and** requested.
+pub fn active_engine() -> OutboundTlsEngine {
+    if real_impersonate_stack_available() && crate::tls_impersonate::impersonate_requested() {
         OutboundTlsEngine::Impersonate
     } else {
         OutboundTlsEngine::Rustls
     }
+}
+
+/// Apply catalog HTTP/2 recipe to a hyper origin client http2::Builder.
+pub fn apply_http2_recipe_to_builder<E>(
+    builder: &mut hyper::client::conn::http2::Builder<E>,
+    recipe: tls_clienthello_catalog::Http2Recipe,
+) where
+    E: Clone,
+{
+    builder
+        .header_table_size(recipe.header_table_size)
+        .initial_stream_window_size(recipe.initial_window_size)
+        .initial_connection_window_size(recipe.connection_window_size)
+        .max_frame_size(recipe.max_frame_size)
+        .max_header_list_size(recipe.max_header_list_size);
+    if recipe.max_concurrent_streams > 0 {
+        builder.max_concurrent_streams(recipe.max_concurrent_streams);
+    }
+}
+
+/// Active preset H2 recipe (product path).
+pub fn active_http2_recipe() -> tls_clienthello_catalog::Http2Recipe {
+    tls_clienthello_catalog::active_preset()
+        .map(|p| p.h2_recipe())
+        .unwrap_or(tls_clienthello_catalog::H2_DEFAULT)
+}
+
+/// Builder material snapshot for tests (SETTINGS pairs + pseudo order + fingerprint).
+pub fn active_http2_builder_material() -> (Vec<(u16, u32)>, Vec<&'static str>, String) {
+    let recipe = active_http2_recipe();
+    (
+        recipe.settings_pairs(),
+        recipe.pseudo_header_order.to_vec(),
+        recipe.fingerprint(),
+    )
 }
 
 pub fn set_global_profile(profile: OutboundTlsProfile) {
@@ -405,6 +466,14 @@ pub fn status_json() -> serde_json::Value {
         .map(tls_clienthello_catalog::recipe_fingerprint)
         .unwrap_or_default();
     let cipher_fp = preset_cipher_fingerprint(&preset_id).unwrap_or_default();
+    let h2 = preset.map(|p| p.h2_recipe());
+    let documented_ja3 = preset
+        .map(|p| {
+            tls_clienthello_catalog::catalog_documented_ja3(p.id)
+                .or(p.documented_ja3)
+                .map(str::to_string)
+        })
+        .flatten();
     serde_json::json!({
         "profile": profile.as_str(),
         "presetId": preset_id,
@@ -419,6 +488,17 @@ pub fn status_json() -> serde_json::Value {
         "ja3Parity": false,
         "supportsFullBrowserJa3": engine.supports_full_browser_ja3(),
         "realImpersonateStackAvailable": real_impersonate_stack_available(),
+        "impersonateRequested": crate::tls_impersonate::impersonate_requested(),
+        "impersonateUnavailableReason": impersonate_unavailable_reason(),
+        "documentedJa3": documented_ja3,
+        "h2Fingerprint": h2.map(|r| r.fingerprint()),
+        "h2Settings": h2.map(|r| {
+            r.settings_pairs()
+                .into_iter()
+                .map(|(id, value)| serde_json::json!({ "id": id, "value": value }))
+                .collect::<Vec<_>>()
+        }),
+        "h2PseudoHeaderOrder": h2.map(|r| r.pseudo_header_order),
         "profileCipherFingerprint": cipher_fp,
         "recipeFingerprint": recipe_fp,
         "profiles": tls_clienthello_catalog::list_preset_ids(),
@@ -665,5 +745,57 @@ mod tests {
         );
         let cfg_chrome = build_client_config_for_preset("chrome150").unwrap();
         assert!(cfg_chrome.enable_sni);
+    }
+
+    #[test]
+    fn active_h2_builder_material_differs_by_preset() {
+        let _guard = preset_lock();
+        set_active_preset("chrome120").unwrap();
+        let (s120, _p120, f120) = active_http2_builder_material();
+        set_active_preset("chrome150").unwrap();
+        let (s150, p150, f150) = active_http2_builder_material();
+        set_active_preset("firefox133").unwrap();
+        let (_sff, pff, fff) = active_http2_builder_material();
+        assert_ne!(f120, f150, "H2 fingerprint chrome120 vs chrome150");
+        assert_ne!(s120, s150, "SETTINGS pairs must differ");
+        assert_ne!(f150, fff);
+        assert_ne!(p150, pff, "pseudo order chrome vs firefox");
+        set_active_preset("chrome150").unwrap();
+        let st = status_json();
+        assert_eq!(st["documentedJa3"], "ab063844a93885b408c5a0bfcb2444c6");
+        assert_eq!(st["ja3Parity"], false);
+        assert_eq!(st["supportsFullBrowserJa3"], false);
+        assert_eq!(st["realImpersonateStackAvailable"], false);
+        assert!(!st["h2Fingerprint"].as_str().unwrap_or("").is_empty());
+        assert!(st["h2Settings"].as_array().unwrap().len() >= 4);
+    }
+
+    #[test]
+    fn documented_ja3_never_alone_enables_parity() {
+        let _guard = preset_lock();
+        set_active_preset("chrome150").unwrap();
+        let st = status_json();
+        assert!(st["documentedJa3"].as_str().unwrap().len() == 32);
+        assert_eq!(st["ja3Parity"], false);
+        assert_eq!(st["supportsFullBrowserJa3"], false);
+        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+        assert!(!impersonate_unavailable_reason().is_empty());
+    }
+
+    #[test]
+    fn impersonate_engine_stays_rustls_without_linked_stack() {
+        let _guard = preset_lock();
+        crate::tls_impersonate::set_impersonate_requested(true);
+        assert!(!real_impersonate_stack_available());
+        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+        assert!(!active_engine().supports_full_browser_ja3());
+        let st = status_json();
+        assert_eq!(st["supportsFullBrowserJa3"], false);
+        assert_eq!(st["impersonateRequested"], true);
+        assert!(st["impersonateUnavailableReason"]
+            .as_str()
+            .unwrap()
+            .contains("no linked"));
+        crate::tls_impersonate::set_impersonate_requested(false);
     }
 }

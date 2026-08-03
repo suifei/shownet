@@ -744,6 +744,9 @@ export interface ClientHelloPresetInfo {
   documentedJa3?: string | null;
   recipeFingerprint?: string;
   claimsFullBrowserJa3?: boolean;
+  h2Settings?: Array<{ id: number; value: number }>;
+  h2PseudoHeaderOrder?: string[];
+  h2Fingerprint?: string;
 }
 
 export interface OutboundTlsProfileStatus {
@@ -762,6 +765,11 @@ export interface OutboundTlsProfileStatus {
   ja3Parity: boolean;
   supportsFullBrowserJa3: boolean;
   realImpersonateStackAvailable?: boolean;
+  impersonateUnavailableReason?: string;
+  documentedJa3?: string | null;
+  h2Fingerprint?: string | null;
+  h2Settings?: Array<{ id: number; value: number }> | null;
+  h2PseudoHeaderOrder?: string[] | null;
   targetJa3?: string | null;
   targetJa3Label?: string | null;
   /** All preset ids (versioned catalog). */
