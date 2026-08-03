@@ -132,10 +132,26 @@ impl OutboundTlsEngine {
 /// Always false in the rustls-only product path so `supportsFullBrowserJa3` cannot go true
 /// without a real integrated stack.
 pub fn real_impersonate_stack_available() -> bool {
-    // Linked-in stack would return true here (e.g. cfg!(feature = "impersonate-boring")).
-    if cfg!(feature = "impersonate-boring") {
-        return true;
-    }
+    // Two independent conditions, deliberately. The cargo feature only compiles the
+    // impersonate lane in; it links nothing. Treating the flag alone as "a real
+    // browser TLS stack is present" would let a build claim browser-level JA3 while
+    // still handshaking with rustls — exactly the false-positive the plan forbids
+    // (docs/plan-real-browser-ja3-impersonate.md §1.2, §7).
+    cfg!(feature = "impersonate-boring") && impersonate_connector_linked()
+}
+
+/// Whether a real BoringSSL / curl-impersonate-class origin connector is linked
+/// and usable for MITM egress.
+///
+/// No build registers one yet. Phase 1 flips this by wiring an actual connector;
+/// until then the feature lane compiles and tests without claiming a stack.
+#[cfg(feature = "impersonate-boring")]
+fn impersonate_connector_linked() -> bool {
+    false
+}
+
+#[cfg(not(feature = "impersonate-boring"))]
+fn impersonate_connector_linked() -> bool {
     false
 }
 
@@ -143,6 +159,9 @@ pub fn real_impersonate_stack_available() -> bool {
 pub fn impersonate_unavailable_reason() -> &'static str {
     if real_impersonate_stack_available() {
         return "";
+    }
+    if cfg!(feature = "impersonate-boring") {
+        return "impersonate-boring feature compiled in, but no linked BoringSSL/curl-impersonate connector is registered; MITM uses rustls";
     }
     if std::env::var_os("SHOWNET_IMPERSONATE_LIB").is_some()
         || std::env::var_os("SHOWNET_IMPERSONATE_ENABLE").is_some()
@@ -627,6 +646,32 @@ mod tests {
         assert_eq!(status["supportsFullBrowserJa3"], false);
         assert_eq!(status["engine"], "rustls");
         assert_eq!(status["realImpersonateStackAvailable"], false);
+    }
+
+    /// The cargo feature compiles the impersonate lane in; it links nothing.
+    /// Both lanes must therefore agree that no real stack is present, so the
+    /// feature can be built and tested in CI without manufacturing a claim.
+    /// Phase 1 changes this only by linking an actual connector.
+    #[test]
+    fn compiling_the_feature_does_not_by_itself_provide_a_stack() {
+        let _guard = preset_lock();
+        assert!(
+            !real_impersonate_stack_available(),
+            "no connector is linked in any current build, feature flag or not"
+        );
+        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+        assert!(!active_engine().supports_full_browser_ja3());
+        let reason = impersonate_unavailable_reason();
+        assert!(
+            reason.contains("no linked"),
+            "reason must say a stack is not linked, got: {reason}"
+        );
+        if cfg!(feature = "impersonate-boring") {
+            assert!(
+                reason.contains("feature compiled in"),
+                "the feature lane should say the flag is on but nothing is linked, got: {reason}"
+            );
+        }
     }
 
     /// The alignment ladder must not become a second, softer way to claim parity.
