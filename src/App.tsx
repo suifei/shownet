@@ -1393,6 +1393,11 @@ function App() {
               onToggleLiveDisplay={toggleLiveDisplay}
               onLiveDisplayAutoProtectionChange={setLiveDisplayAutoProtection}
               onConnect={() => setConnectOpen(true)}
+              onOpenBrowser={() => setActiveView("browser")}
+              onOpenSettingsCapture={() => {
+                setSettingsTab("capture");
+                setActiveView("settings");
+              }}
             />
           )}
           {activeView === "lab" && (

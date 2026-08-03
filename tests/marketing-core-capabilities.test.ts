@@ -62,8 +62,18 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
 
     assert.match(srt, /自动部署数字证书|安装 ShowNet Root CA|装证书/);
     assert.match(srt, /内嵌浏览器|开始抓包/);
+    assert.match(srt, /不必先装证书|开箱即用/);
+    assert.match(srt, /高级控制台|MITM/);
     assert.match(srt, /AI 分析|内置 Agent|自动逆向|加密逆向|API 逆向/);
     assert.match(srt, /算法重放|Request Lab|客户端代码|生成.*代码/);
+    // Each cue should be a complete sentence-ish line (not truncated mid-phrase markers)
+    const cues = srt.split(/\n\n+/).filter((block) => /\d+\n\d{2}:/.test(block));
+    assert.ok(cues.length >= 9, `expected full multi-scene SRT, got ${cues.length}`);
+    for (const cue of cues) {
+      const text = cue.split("\n").slice(2).join("");
+      assert.ok(text.length >= 20, `cue too short (possible truncation): ${text}`);
+      assert.match(text, /[。！？.]$/, `cue should end with sentence punctuation: ${text.slice(-20)}`);
+    }
     // Honesty: no Root requirement claim for Android
     assert.doesNotMatch(srt, /需要 Root|必须 Root|Root 权限/);
   });

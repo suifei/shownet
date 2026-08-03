@@ -8,8 +8,11 @@
 
 ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研究人员。它把多来源流量收进同一个本地会话，用 **内置 AI Agent + Skill 编排** 自动分析证据，并导出 **算法重放包** 与 **多语言调用代码**。HTTPS 解密所需的 **Root CA 生成、本机一键安装、手机扫码装证与代理** 也集成在产品内。
 
+**产品原则：开箱即用、能自动化就自动化、既简单又强大。** 完整功能盘点与前后关系见 [功能全景与工作流](docs/feature-map.md)。
+
 > 只想看浏览器流量时：打开内嵌浏览器点「开始抓包」即可，不必先装证书。  
-> 要抓手机 / 桌面 App 的 HTTPS：用「一键安装 CA」或设备扫码页完成信任与代理。
+> 要抓手机 / 桌面 App 的 HTTPS：用「一键安装 CA」或设备扫码页完成信任与代理。  
+> 需要 TLS 预置 / PX / 指纹与 AI 取证串联：打开 **MITM 高级控制台**（抓包→证据→分析→导出）。
 
 ## 核心能力（重点）
 
@@ -123,6 +126,10 @@ Android 也可用「设备证书与代理」由电脑协助推送证书与代理
 
 <img src="docs/assets/tutorial/07-code-generation.png" alt="生成调用代码" width="920" />
 
+### 5. 高级控制台（可选增强）
+
+导航 **请求工具 → 高级**：阶段条引导抓包 / 证据 / 分析 / 导出；配置出站 ClientHello、PX 开关；查看 TLS 指纹与防护证据。AI 分析会自动调用同源只读工具（指纹、出站状态、PX 结构解码）。详见 [ClientHello 与高级控制台](docs/clienthello-catalog-and-mitm-console.md) 与 [功能全景](docs/feature-map.md)。
+
 ---
 
 ## 功能拼图
@@ -164,8 +171,10 @@ Android 也可用「设备证书与代理」由电脑协助推送证书与代理
 - 上游直连 / HTTP / HTTPS / SOCKS5；系统代理可选接管并自动恢复  
 - HTTPS HTTP/1.1 与 HTTP/2 MITM；入站 JA3/JA4、出站版本化 ClientHello 预置（rustls 配方，**不宣称**位级浏览器 JA3 克隆，见 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)）  
 - WebSocket / SSE 有序有界捕获与专用检视  
-- MITM 高级控制台：指纹、PX 证据、预置选择等  
-- macOS DMG（ad-hoc）与 Windows Portable 本地 QA 包（见 [本地构建记录](docs/local-release-0.1.0-build.md)）
+- MITM 高级控制台：阶段工作流、指纹、PX 证据、预置选择、抓包/分析能力表  
+- Agent 自动取证：TLS 指纹、出站 TLS 状态、PX 证据/结构解码（只读，诚实边界内）  
+- macOS DMG（ad-hoc）与 Windows Portable 本地 QA 包（见 [本地构建记录](docs/local-release-0.1.0-build.md)）  
+- 功能关系总表：[docs/feature-map.md](docs/feature-map.md)
 
 ## 抓包与证书决策（摘要）
 

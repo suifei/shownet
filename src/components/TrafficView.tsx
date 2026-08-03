@@ -108,9 +108,13 @@ interface TrafficViewProps {
   onToggleLiveDisplay: () => void;
   onLiveDisplayAutoProtectionChange: (enabled: boolean) => void;
   onConnect: () => void;
+  /** Zero-setup path: open embedded browser capture without CA. */
+  onOpenBrowser?: () => void;
+  /** Optional jump to settings CA install when MITM HTTPS is needed. */
+  onOpenSettingsCapture?: () => void;
 }
 
-export function TrafficView({ requests, totalCount, filteredCount, hookCount, bookmarkedCount, requestWindowOffset, requestWindowTargetOffset, facets, loading, cancelling, capturing, liveDisplay, sessionId, focusRequestId, onFocusRequestConsumed, onQueryChange, onRequestWindowChange, onCancelRequestQuery, onOpenAnalysis, onAnalyzeSelection, onOpenWorkbench, onToggleLiveDisplay, onLiveDisplayAutoProtectionChange, onConnect }: TrafficViewProps) {
+export function TrafficView({ requests, totalCount, filteredCount, hookCount, bookmarkedCount, requestWindowOffset, requestWindowTargetOffset, facets, loading, cancelling, capturing, liveDisplay, sessionId, focusRequestId, onFocusRequestConsumed, onQueryChange, onRequestWindowChange, onCancelRequestQuery, onOpenAnalysis, onAnalyzeSelection, onOpenWorkbench, onToggleLiveDisplay, onLiveDisplayAutoProtectionChange, onConnect, onOpenBrowser, onOpenSettingsCapture }: TrafficViewProps) {
   const [query, setQuery] = useState("");
   const [quickFilter, setQuickFilter] = useState<QuickFilterState>(emptyQuickFilter);
   const [advancedFilter, setAdvancedFilter] = useState<FilterExpression>();
@@ -569,12 +573,31 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
           <button className="secondary-button" data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={13} /> : <X size={13} />}{cancelling ? "正在停止" : "取消当前查询"}</button>
         </div>
       ) : totalCount === 0 ? (
-        <div className="traffic-empty">
+        <div className="traffic-empty" data-testid="traffic-empty-oob">
           <div className="traffic-empty__icon"><CircleDot size={25} /></div>
           <h2>等待第一条请求</h2>
+          <p className="traffic-empty__hint">
+            <strong>开箱最快路径：</strong>内嵌浏览器点「开始抓包」，不必先装证书。
+            要解密 App / 系统 HTTPS 时再安装 Root CA。抓到请求后可自动进入 AI 分析与代码导出。
+          </p>
+          <ol className="traffic-empty__steps">
+            <li>内嵌浏览器开始抓包（零配置）</li>
+            <li>需要明文 HTTPS 时：设置里一键装 CA</li>
+            <li>有请求后：AI 自动逆向 → 导出重放 / 客户端代码</li>
+          </ol>
           <div className="empty-actions">
-            <button className="primary-button" onClick={onConnect}>连接流量来源</button>
-            <button className="secondary-button" onClick={onOpenAnalysis} disabled>AI 分析</button>
+            {onOpenBrowser ? (
+              <button type="button" className="primary-button" onClick={onOpenBrowser} data-testid="empty-open-browser">
+                <Browser size={14} /> 内嵌浏览器开始抓包
+              </button>
+            ) : null}
+            <button type="button" className="secondary-button" onClick={onConnect}>连接其他流量来源</button>
+            {onOpenSettingsCapture ? (
+              <button type="button" className="secondary-button" onClick={onOpenSettingsCapture}>安装 CA / 代理设置</button>
+            ) : null}
+            <button type="button" className="secondary-button" onClick={onOpenAnalysis} disabled title="先抓到请求再分析">
+              AI 分析
+            </button>
           </div>
         </div>
       ) : (
