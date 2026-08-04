@@ -16,4 +16,27 @@ describe("session sidebar", () => {
     assert.match(source, /aria-label={`打开 \${session\.name} 的最近 AI 报告`}/);
     assert.match(source, /invoke<Session>\("rename_session"/);
   });
+
+  it("stacks the session tools dropdown above the session list without glass bleed", async () => {
+    const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+
+    assert.match(css, /\.sessions-label\s*\{[^}]*z-index:\s*20/s);
+    assert.match(css, /\.session-tools-menu\s*\{[^}]*z-index:\s*50/s);
+    assert.match(css, /\.session-list\s*\{[^}]*z-index:\s*1/s);
+    assert.match(css, /\.session-list\s*\{[^}]*isolation:\s*isolate/s);
+    // Glass material must target the menu panel, not the relative wrapper.
+    assert.match(css, /\.session-tools-menu/);
+    assert.doesNotMatch(
+      css,
+      /\.dialog,\s*\n\.command-palette,\s*\n\.filter-builder-popover,\s*\n\.session-tools,\s*\n\.toast/,
+    );
+    assert.match(
+      css,
+      /\.session-tools-menu\s*\{[^}]*backdrop-filter:\s*none/s,
+    );
+    assert.match(
+      css,
+      /\.session-tools-menu\s*\{[^}]*background-color:\s*var\(--dark-elevated\)/s,
+    );
+  });
 });

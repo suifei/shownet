@@ -396,7 +396,10 @@ kbd {
 }
 
 .sessions-label {
+  /* Elevate above .session-list so the ⋯ dropdown is not painted under rows
+     (child z-index alone cannot beat later siblings without a parent context). */
   position: relative;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -407,20 +410,26 @@ kbd {
   text-transform: uppercase;
 }
 
-.session-tools { position: relative; }
+.session-tools {
+  position: relative;
+  z-index: 21;
+}
 
 .session-tools-menu {
   position: absolute;
-  z-index: 30;
-  top: 28px;
+  z-index: 50;
+  top: calc(100% + 4px);
   right: 0;
   width: 224px;
   padding: 6px;
   color: var(--text-primary);
-  background: var(--dark-surface);
+  /* Opaque elevated surface — list content must never show through the menu. */
+  background: var(--dark-elevated);
   border: 1px solid var(--dark-border-strong);
   border-radius: 10px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+  /* Own stacking context so blur/filter rules cannot flatten us under the list. */
+  isolation: isolate;
 }
 
 .session-tools-menu button {
@@ -445,10 +454,14 @@ kbd {
 .session-tools-menu i { display: block; height: 1px; margin: 5px 4px; background: var(--dark-raised); }
 
 .session-list {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   padding: 0 8px;
   overflow-y: auto;
+  /* Keep session rows (report badges z-index:2) below the tools dropdown. */
+  isolation: isolate;
 }
 
 .session-entry { position: relative; }
@@ -8359,7 +8372,7 @@ code, pre, kbd { font-variant-ligatures: none; }
 .dialog,
 .command-palette,
 .filter-builder-popover,
-.session-tools,
+.session-tools-menu,
 .toast {
   background-color: var(--material-thick);
   -webkit-backdrop-filter: var(--glass-blur-strong);
@@ -8367,8 +8380,15 @@ code, pre, kbd { font-variant-ligatures: none; }
   box-shadow: var(--glass-edge-strong), var(--elev-3);
   border-color: rgba(255, 255, 255, 0.09);
 }
+/* Dropdown must stay fully opaque so session rows never show through. */
+.session-tools-menu {
+  background-color: var(--dark-elevated);
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: var(--elev-3);
+}
 .filter-builder-popover,
-.session-tools,
 .toast { box-shadow: var(--glass-edge), var(--elev-2); }
 
 /* --- scrims blur the whole app behind the sheet --- */
@@ -8413,7 +8433,7 @@ input:focus, select:focus, textarea:focus {
   .nav-rail, .topbar, .sessions-panel, .request-grid-header,
   .request-grid-statusbar, .detail-tabs, .browser-toolbar, .proxy-mini-status,
   .traffic-summary, .request-detail, .advanced-console-panel, .settings-panel,
-  .dialog, .command-palette, .filter-builder-popover, .session-tools, .toast {
+  .dialog, .command-palette, .filter-builder-popover, .session-tools-menu, .toast {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     background-color: var(--surface-panel);
