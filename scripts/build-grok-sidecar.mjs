@@ -39,11 +39,24 @@ if (!options.stampOnly) {
   // xai-proto-build hardcodes /dev/stdout and /dev/null — broken on Windows.
   await patchWindowsProtocDeps(sourceDir);
   const buildArgs = ["build", "-p", "xai-grok-pager-bin", "--release", "--features", "release-dist", "--target", target];
+  // Windows MSVC LNK4319: PDB public-symbol limit on this large binary. Strip
+  // debuginfo so link.exe does not hit the PDB limit during release builds.
+  const windowsLinkEnv =
+    process.platform === "win32" || target.includes("windows")
+      ? {
+          CARGO_PROFILE_RELEASE_DEBUG: "0",
+          CARGO_PROFILE_RELEASE_STRIP: "symbols",
+          RUSTFLAGS: [process.env.RUSTFLAGS, "-C", "debuginfo=0", "-C", "strip=symbols"]
+            .filter(Boolean)
+            .join(" "),
+        }
+      : {};
   if (options.xwin) {
     const pinnedCargo = capture("rustup", ["which", "--toolchain", GROK_RUST_TOOLCHAIN, "cargo"], root);
     run("cargo-xwin", buildArgs, sourceDir, {
       ...process.env,
       ...protocEnv,
+      ...windowsLinkEnv,
       PATH: `${dirname(pinnedCargo)}${delimiter}${process.env.PATH ?? ""}`,
       RUSTUP_TOOLCHAIN: GROK_RUST_TOOLCHAIN,
     });
@@ -51,6 +64,7 @@ if (!options.stampOnly) {
     run("rustup", ["run", GROK_RUST_TOOLCHAIN, "cargo", ...buildArgs], sourceDir, {
       ...process.env,
       ...protocEnv,
+      ...windowsLinkEnv,
     });
   }
 
