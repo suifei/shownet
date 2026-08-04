@@ -156,8 +156,9 @@ jobs:
       - name: Build ad-hoc DMG (no Apple cert secrets)
         if: steps.mode.outputs.signed != 'true'
         run: |
+          # Strip residual Apple signing env from the runner so ad-hoc identity "-" works.
           unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
-            APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH APPLE_SIGNING_IDENTITY || true
+            APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH || true
           npm run tauri -- build --target aarch64-apple-darwin --bundles dmg \
             --config src-tauri/tauri.grok.conf.json \
             --config src-tauri/tauri.local.macos.conf.json
