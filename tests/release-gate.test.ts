@@ -98,9 +98,13 @@ describe("signed macOS release gate", () => {
     assert.doesNotMatch(config, /"signingIdentity"\s*:\s*"-"/);
     assert.match(localConfig, /"signingIdentity"\s*:\s*"-"/);
     assert.match(packageJson, /tauri\.grok\.conf\.json --config src-tauri\/tauri\.local\.macos\.conf\.json/);
-    assert.doesNotMatch(workflow, /tauri\.local\.macos\.conf\.json/);
+    // Signed path still uses the Gatekeeper verifier; ad-hoc fallback may use local.macos.conf.
     assert.match(workflow, /npm run verify:release:macos/);
     assert.match(workflow, /release-verification-macos\.json/);
+    assert.match(workflow, /tauri\.local\.macos\.conf\.json/);
+    assert.match(workflow, /shownet-macos-aarch64/);
+    assert.match(workflow, /shownet-windows-x86_64/);
+    assert.match(workflow, /softprops\/action-gh-release/);
     assert.match(verifier, /codesign[\s\S]*--deep[\s\S]*--strict/);
     assert.match(verifier, /stapler[\s\S]*validate/);
     assert.match(verifier, /runTool\("spctl"/);

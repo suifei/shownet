@@ -759,9 +759,10 @@ fn required_field_missing(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => true,
         Some(Value::String(text)) => text.trim().is_empty(),
-        Some(Value::Array(_)) | Some(Value::Object(_)) | Some(Value::Bool(_)) | Some(Value::Number(_)) => {
-            false
-        }
+        Some(Value::Array(_))
+        | Some(Value::Object(_))
+        | Some(Value::Bool(_))
+        | Some(Value::Number(_)) => false,
     }
 }
 

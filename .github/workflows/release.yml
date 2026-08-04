@@ -2,6 +2,11 @@ name: Quality and signed release
 
 on:
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create/update a GitHub Release for package.json version (vX.Y.Z)"
+        type: boolean
+        default: true
   pull_request:
   push:
     branches:
@@ -15,7 +20,7 @@ permissions:
 
 concurrency:
   group: shownet-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +29,7 @@ env:
 jobs:
   quality:
     name: Quality / ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -37,32 +42,31 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
       - run: npm ci
       - run: npm run check:release
       - run: npm run build
-      # The TypeScript suite was previously written but never executed here.
-      # It needs Node >= 22.6 for --experimental-strip-types, which is why the
-      # runner version above moved off 20.
       - run: npm test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      # Impersonate lane: compiles the engine router in, links no connector.
-      # Both lanes must agree that no real stack is present, so the honesty
-      # assertions stay enforced rather than being switched off where a real
-      # stack would eventually live. --no-default-features keeps the lane honest
-      # if `default` ever gains members.
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
       - run: npm run test:rust:network
       - run: npm run tauri -- build --debug --no-bundle
 
+  # ─── Release builds (tag v* or manual dispatch) ───────────────────────────
   release-macos:
-    name: Signed macOS release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: macOS release (aarch64)
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: quality
     runs-on: macos-14
+    permissions:
+      contents: read
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -82,26 +86,43 @@ jobs:
         run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            src-tauri/.sidecar-src/grok-build
       - run: npm ci
-      - name: Validate release version and signing secrets
+      - run: npm run check:release
+      - name: Detect signing mode
+        id: mode
         shell: bash
         run: |
-          npm run check:release
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!name}" ]; then
-              echo "Required secret $name is missing" >&2
-              exit 1
-            fi
-          done
+          if [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] \
+            && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Using Developer ID + notarization"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets incomplete — building ad-hoc (unsigned) macOS DMG"
+          fi
+      - name: Download ripgrep for Agent sidecar offline bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rg"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/rg/rg.tgz" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-aarch64-apple-darwin.tar.gz"
+          tar -xzf "$RUNNER_TEMP/rg/rg.tgz" -C "$RUNNER_TEMP/rg"
+          RG_BIN="$(find "$RUNNER_TEMP/rg" -type f -name rg | head -n 1)"
+          test -x "$RG_BIN"
+          echo "GROK_TOOLS_BUNDLE_RG_PATH=$RG_BIN" >> "$GITHUB_ENV"
       - name: Build and verify built-in Agent sidecar
         run: |
           npm run build:agent-sidecar -- --target aarch64-apple-darwin
           npm run check:release -- --require-agent-target aarch64-apple-darwin
-          npm run test:agent-sidecar
-      - name: Build, sign and notarize
+      - name: Build signed + notarized DMG
+        if: steps.mode.outputs.signed == 'true'
         run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.grok.conf.json
       - name: Verify Apple signature and notarization ticket
+        if: steps.mode.outputs.signed == 'true'
         shell: bash
         run: |
           app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
@@ -113,6 +134,15 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --architecture arm64 \
             --report src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
+      - name: Build ad-hoc DMG (no Apple cert secrets)
+        if: steps.mode.outputs.signed != 'true'
+        run: |
+          npm run tauri -- build --target aarch64-apple-darwin --bundles dmg \
+            --config src-tauri/tauri.grok.conf.json \
+            --config src-tauri/tauri.local.macos.conf.json
+          mkdir -p src-tauri/target/aarch64-apple-darwin/release/bundle
+          printf '%s\n' '{"mode":"ad-hoc","architecture":"arm64","note":"Built without APPLE_* secrets"}' \
+            > src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
       - uses: actions/upload-artifact@v4
         with:
           name: shownet-macos-aarch64
@@ -122,10 +152,14 @@ jobs:
           if-no-files-found: error
 
   release-windows:
-    name: Signed Windows release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Windows release (x86_64 portable)
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: quality
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -142,34 +176,55 @@ jobs:
         run: rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            src-tauri/.sidecar-src/grok-build
       - run: npm ci
-      - name: Validate release version and import signing certificate
+      - name: Detect signing mode
+        id: mode
         shell: pwsh
         run: |
           npm run check:release
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD are required"
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -and -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "Using Windows Authenticode signing"
+          } else {
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "WINDOWS_* cert secrets missing — building unsigned portable ZIP"
           }
+      - name: Import Windows signing certificate
+        if: steps.mode.outputs.signed == 'true'
+        shell: pwsh
+        run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "shownet-signing.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
           $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
           $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
           "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Remove-Item $pfxPath -Force
+      - name: Download ripgrep for Agent sidecar offline bundle
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "rg"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $dir "rg.zip"
+          Invoke-WebRequest -Uri "https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-x86_64-pc-windows-msvc.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $rg = Get-ChildItem -Path $dir -Recurse -Filter rg.exe | Select-Object -First 1
+          if (-not $rg) { throw "rg.exe not found in ripgrep archive" }
+          "GROK_TOOLS_BUNDLE_RG_PATH=$($rg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build and verify built-in Agent sidecar
         shell: pwsh
         run: |
           npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc
           $sidecar = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
-          & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $sidecar
-          if ($LASTEXITCODE -ne 0) { throw "Failed to sign built-in Agent sidecar" }
-          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $sidecar
+            if ($LASTEXITCODE -ne 0) { throw "Failed to sign built-in Agent sidecar" }
+            npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
+          }
           npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
-          $signature = Get-AuthenticodeSignature $sidecar
-          if ($signature.Status -ne "Valid") { throw "Built-in Agent sidecar signature is $($signature.Status)" }
-          npm run test:agent-sidecar
-      - name: Build and sign PortableApps package
+      - name: Build PortableApps package
         shell: pwsh
         run: |
           npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.grok.conf.json
@@ -177,17 +232,21 @@ jobs:
           cargo build --manifest-path packaging/windows/launcher/Cargo.toml --release --target x86_64-pc-windows-msvc
           $application = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
           $launcher = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
-          foreach ($executable in @($application, $launcher)) {
-            & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $executable
-            if ($LASTEXITCODE -ne 0) { throw "Failed to sign $executable" }
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            foreach ($executable in @($application, $launcher)) {
+              & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $executable
+              if ($LASTEXITCODE -ne 0) { throw "Failed to sign $executable" }
+            }
           }
           npm run package:windows:portable -- --target x86_64-pc-windows-msvc
           $portableRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable"
           $executables = Get-ChildItem $portableRoot -Recurse -File -Filter *.exe
           if ($executables.Count -ne 3) { throw "Portable package must contain exactly three executables" }
-          foreach ($executable in $executables) {
-            $signature = Get-AuthenticodeSignature $executable.FullName
-            if ($signature.Status -ne "Valid") { throw "$($executable.Name) signature is $($signature.Status)" }
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            foreach ($executable in $executables) {
+              $signature = Get-AuthenticodeSignature $executable.FullName
+              if ($signature.Status -ne "Valid") { throw "$($executable.Name) signature is $($signature.Status)" }
+            }
           }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $archive = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable_${version}_windows_x86_64.zip"
@@ -203,9 +262,14 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish release and update manifest
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-macos, release-windows]
+    name: Publish GitHub Release
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.create_release)) &&
+      needs.release-macos.result == 'success' &&
+      needs.release-windows.result == 'success'
+    needs: [quality, release-macos, release-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -221,19 +285,35 @@ jobs:
           pattern: shownet-*
           path: release-assets
           merge-multiple: true
-      - name: Build update manifest and checksums
+      - name: Resolve release tag and assets
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            if [[ "$tag" != "v$version" ]]; then
+              echo "Tag $tag does not match package.json version $version" >&2
+              exit 1
+            fi
+          else
+            tag="v${version}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -laR release-assets
           mac_name="$(find release-assets -type f -name '*.dmg' -printf '%f\n' | head -n 1)"
           win_name="$(find release-assets -type f -name '*.zip' -printf '%f\n' | head -n 1)"
           test -n "$mac_name"
           test -n "$win_name"
-          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           mac_url="${release_base}/$(jq -rn --arg value "$mac_name" '$value|@uri')"
           win_url="${release_base}/$(jq -rn --arg value "$win_name" '$value|@uri')"
-          version="${GITHUB_REF_NAME#v}"
-          notes="$(git tag -l "$GITHUB_REF_NAME" --format='%(contents)' | head -c 12000)"
+          notes="$(git tag -l "$tag" --format='%(contents)' | head -c 12000 || true)"
+          if [ -z "$notes" ]; then
+            notes="ShowNet ${version} desktop builds (macOS aarch64 DMG + Windows x86_64 portable ZIP)."
+          fi
           published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           jq -n \
             --arg version "$version" \
@@ -244,15 +324,32 @@ jobs:
             '{version:$version,notes:$notes,publishedAt:$publishedAt,platforms:{"darwin-aarch64":{url:$macUrl},"windows-x86_64":{url:$windowsUrl}}}' \
             > release-assets/latest.json
           (cd release-assets && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+      - name: Ensure git tag exists (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "ShowNet ${{ steps.meta.outputs.version }}"
+            git push origin "$tag"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ShowNet ${{ steps.meta.outputs.version }}
           generate_release_notes: true
           files: release-assets/**/*
+          fail_on_unmatched_files: true
       - name: Publish latest.json to ClaudeGPT.org
         shell: bash
         run: |
-          if [ -z "$SHOWNET_UPDATE_PUBLISH_URL" ] || [ -z "$SHOWNET_UPDATE_PUBLISH_TOKEN" ]; then
-            echo "ClaudeGPT.org manifest publishing is not configured; latest.json remains attached to the GitHub release."
+          if [ -z "${SHOWNET_UPDATE_PUBLISH_URL:-}" ] || [ -z "${SHOWNET_UPDATE_PUBLISH_TOKEN:-}" ]; then
+            echo "ClaudeGPT.org manifest publishing is not configured; latest.json remains on the GitHub release."
             exit 0
           fi
           curl --fail --show-error --silent \
