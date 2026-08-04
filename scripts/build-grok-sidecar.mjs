@@ -36,6 +36,8 @@ if (!options.stampOnly) {
   validatePinnedSource(sourceDir);
   // Vendored bin/protoc is a macOS dotslash stub; CI must inject a real protoc.
   const protocEnv = await ensureRealProtoc(sourceDir);
+  // xai-proto-build hardcodes /dev/stdout and /dev/null — broken on Windows.
+  await patchWindowsProtocDeps(sourceDir);
   const buildArgs = ["build", "-p", "xai-grok-pager-bin", "--release", "--features", "release-dist", "--target", target];
   if (options.xwin) {
     const pinnedCargo = capture("rustup", ["which", "--toolchain", GROK_RUST_TOOLCHAIN, "cargo"], root);
@@ -126,6 +128,28 @@ function hostTarget() {
   return target;
 }
 
+/** Paths we rewrite during the sidecar build (must not trip the dirty-tree guard). */
+const EPHEMERAL_SOURCE_PATHS = [
+  "bin/protoc",
+  "bin/protoc.exe",
+  "crates/build/xai-proto-build/src/lib.rs",
+];
+
+function resetEphemeralPatches(directory) {
+  // Restore tracked files we may have overwritten on a previous run.
+  try {
+    run("git", ["checkout", "HEAD", "--", ...EPHEMERAL_SOURCE_PATHS], directory);
+  } catch {
+    // Fresh clone or path missing — fine.
+  }
+  for (const relative of EPHEMERAL_SOURCE_PATHS) {
+    // Drop untracked copies (e.g. protoc.exe we inject on Windows).
+    const full = join(directory, relative);
+    // only remove if untracked; checkout already restored tracked
+    void full;
+  }
+}
+
 async function ensurePinnedSource(directory) {
   if (options.fresh) await rm(directory, { recursive: true, force: true });
   let cloned = false;
@@ -137,6 +161,9 @@ async function ensurePinnedSource(directory) {
     cloned = true;
   }
   if (!cloned) {
+    resetEphemeralPatches(directory);
+    // Ignore leftover untracked protoc.exe from prior Windows builds.
+    await rm(join(directory, "bin/protoc.exe"), { force: true }).catch(() => {});
     const changes = capture("git", ["status", "--porcelain"], directory);
     if (changes) throw new Error(`Agent source checkout has local changes: ${directory}`);
     const currentCommit = capture("git", ["rev-parse", "HEAD"], directory);
@@ -200,6 +227,125 @@ async function ensureRealProtoc(sourceDir) {
     await copyFile(protocPath, join(binDir, "protoc"));
   }
   return { PROTOC: dest };
+}
+
+/**
+ * Upstream xai-proto-build runs:
+ *   protoc --dependency_out=/dev/stdout --descriptor_set_out=/dev/null ...
+ * Those device paths do not exist on Windows, so Windows CI fails with:
+ *   /dev/stdout: No such file or directory
+ * Rewrite the build helper to use temp files when building on win32.
+ */
+async function patchWindowsProtocDeps(sourceDir) {
+  if (process.platform !== "win32") return;
+  const libPath = join(sourceDir, "crates/build/xai-proto-build/src/lib.rs");
+  let source = await readFile(libPath, "utf8");
+  if (source.includes("SHOWNET_WIN_PROTOC_PATCH")) {
+    console.log("Windows protoc dependency patch already applied");
+    return;
+  }
+  const needle = `            command
+                .arg("--dependency_out=/dev/stdout")
+                .arg("--descriptor_set_out=/dev/null");
+
+            // Add protoc's well-known types include directory first (if found).
+            // This is needed for Bazel sandboxed builds where protoc and its
+            // include files are in different locations.
+            if let Some(include_dir) = protoc_include_dir {
+                command.arg(format!(
+                    "-I{}",
+                    include_dir.to_str().context("include path not UTF-8")?
+                ));
+            }
+
+            for include in &includes {
+                command.arg(format!("-I{}", include.to_str().context("path not UTF-8")?));
+            }
+
+            command.arg(proto);
+
+            command.stdin(Stdio::null());
+            command.stderr(Stdio::inherit());
+
+            let output = command.output().context("protoc command failed")?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!("protoc command failed"));
+            }
+
+            let output =
+                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+
+            let mut lines = output.lines();
+            let first_line = lines.next().context("protoc command output is empty")?;
+            let prefix = "/dev/null:";
+            let rem = first_line.strip_prefix(prefix).with_context(|| {
+                format!("protoc command output must start with /dev/null: {output:?}")
+            })?;`;
+
+  const replacement = `            // SHOWNET_WIN_PROTOC_PATCH: Windows has no /dev/stdout or /dev/null.
+            let dep_path = std::env::temp_dir().join(format!(
+                "shownet-protoc-deps-{}-{}.d",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let null_path = dep_path.with_extension("pb");
+            let null_prefix = format!("{}:", null_path.display());
+            command
+                .arg(format!("--dependency_out={}", dep_path.display()))
+                .arg(format!("--descriptor_set_out={}", null_path.display()));
+
+            // Add protoc's well-known types include directory first (if found).
+            // This is needed for Bazel sandboxed builds where protoc and its
+            // include files are in different locations.
+            if let Some(include_dir) = protoc_include_dir {
+                command.arg(format!(
+                    "-I{}",
+                    include_dir.to_str().context("include path not UTF-8")?
+                ));
+            }
+
+            for include in &includes {
+                command.arg(format!("-I{}", include.to_str().context("path not UTF-8")?));
+            }
+
+            command.arg(proto);
+
+            command.stdin(Stdio::null());
+            command.stderr(Stdio::inherit());
+
+            let output = command.output().context("protoc command failed")?;
+            if !output.status.success() {
+                let _ = fs::remove_file(&dep_path);
+                let _ = fs::remove_file(&null_path);
+                return Err(anyhow::anyhow!("protoc command failed"));
+            }
+
+            let output = fs::read_to_string(&dep_path).context("failed to read protoc dependency file")?;
+            let _ = fs::remove_file(&dep_path);
+            let _ = fs::remove_file(&null_path);
+
+            let mut lines = output.lines();
+            let first_line = lines.next().context("protoc command output is empty")?;
+            // Match protoc's "out.pb: deps" line without split_once(':') — Windows drive letters contain ':'.
+            let null_fwd = null_path.display().to_string().replace('\\\\', "/");
+            let rem = first_line
+                .strip_prefix(null_prefix.as_str())
+                .or_else(|| first_line.strip_prefix(format!("{}:", null_fwd).as_str()))
+                .with_context(|| {
+                    format!("protoc dependency output missing descriptor prefix: {output:?}")
+                })?;`;
+
+  if (!source.includes(needle)) {
+    throw new Error(
+      "Unable to apply Windows protoc patch: expected snippet missing in xai-proto-build/src/lib.rs (upstream changed?)",
+    );
+  }
+  source = source.replace(needle, replacement);
+  await writeFile(libPath, source, "utf8");
+  console.log("Applied Windows protoc dependency patch to xai-proto-build");
 }
 
 function run(command, args, cwd, env = process.env) {
