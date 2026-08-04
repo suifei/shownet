@@ -240,6 +240,9 @@ async function patchWindowsProtocDeps(sourceDir) {
   if (process.platform !== "win32") return;
   const libPath = join(sourceDir, "crates/build/xai-proto-build/src/lib.rs");
   let source = await readFile(libPath, "utf8");
+  // Git on Windows may materialize CRLF; normalize before matching LF snippets.
+  const hadCrlf = source.includes("\r\n");
+  source = source.replace(/\r\n/g, "\n");
   if (source.includes("SHOWNET_WIN_PROTOC_PATCH")) {
     console.log("Windows protoc dependency patch already applied");
     return;
@@ -339,11 +342,15 @@ async function patchWindowsProtocDeps(sourceDir) {
                 })?;`;
 
   if (!source.includes(needle)) {
+    // Diagnostics for upstream drift / line-ending surprises.
+    const idx = source.indexOf("dependency_out");
+    const snippet = idx >= 0 ? source.slice(Math.max(0, idx - 40), idx + 200) : "<no dependency_out>";
     throw new Error(
-      "Unable to apply Windows protoc patch: expected snippet missing in xai-proto-build/src/lib.rs (upstream changed?)",
+      `Unable to apply Windows protoc patch: expected snippet missing in xai-proto-build/src/lib.rs (upstream changed?). Near match: ${JSON.stringify(snippet)}`,
     );
   }
   source = source.replace(needle, replacement);
+  if (hadCrlf) source = source.replace(/\n/g, "\r\n");
   await writeFile(libPath, source, "utf8");
   console.log("Applied Windows protoc dependency patch to xai-proto-build");
 }
