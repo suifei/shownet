@@ -63,6 +63,20 @@ const TAB_ORDER: ConsoleTabId[] = [
   "config",
 ];
 
+/** Short labels for the horizontal tab strip (full name stays in panel title). */
+const TAB_SHORT_LABEL: Record<ConsoleTabId, string> = {
+  overview: "总览",
+  capture: "捕获",
+  hooks: "Hook",
+  rules: "规则",
+  fingerprint: "指纹",
+  "px-replay": "PX 重放",
+  "px-compare": "PX 对比",
+  "px-tamper": "PX 篡改",
+  recaptcha: "reCAPTCHA",
+  config: "配置",
+};
+
 interface AdvancedConsoleViewProps {
   sessionId?: string | null;
   requests: RequestListItem[];
@@ -236,24 +250,46 @@ export function AdvancedConsoleView({
     setTab(map[phase]);
   };
 
+  const suggestedStage = WORKFLOW_STAGES.find((stage) => stage.id === suggestedPhase) ?? WORKFLOW_STAGES[0];
+
   return (
     <div className="advanced-console">
       <header className="advanced-console-hero">
-        <div className="advanced-console-hero-main">
-          <h2>
-            <Activity size={18} aria-hidden /> MITM 高级控制台
-          </h2>
-          <p className="advanced-console-lead">
-            抓包配置与证据中枢：和<strong>流量</strong>、<strong>浏览器</strong>、<strong>设置</strong>、
-            <strong>AI 分析</strong>串联。按阶段使用，避免空会话上空调参数。
-          </p>
-          <p className="advanced-console-honesty" role="note">
-            {honestyBanner()}
-          </p>
+        <div className="advanced-console-hero-top">
+          <div className="advanced-console-hero-main">
+            <h2>
+              <Activity size={18} aria-hidden /> MITM 高级控制台
+            </h2>
+            <p className="advanced-console-lead">
+              抓包配置与证据中枢 · 串联流量 / 浏览器 / 设置 / AI
+            </p>
+          </div>
+          <div className="advanced-console-toggles">
+            <label className={pxSettings.decryptEnabled ? "is-on" : ""}>
+              <span>PX 解密</span>
+              <input
+                type="checkbox"
+                checked={pxSettings.decryptEnabled}
+                disabled={saving}
+                onChange={(e) => void updatePx({ decryptEnabled: e.target.checked })}
+              />
+              <em>{pxSettings.decryptEnabled ? "开" : "关"}</em>
+            </label>
+            <label className={pxSettings.interceptEcData ? "is-on" : ""}>
+              <span>拦截 ecData</span>
+              <input
+                type="checkbox"
+                checked={pxSettings.interceptEcData}
+                disabled={saving}
+                onChange={(e) => void updatePx({ interceptEcData: e.target.checked })}
+              />
+              <em>{pxSettings.interceptEcData ? "开" : "关"}</em>
+            </label>
+          </div>
         </div>
         <div className="advanced-console-stats" aria-label="会话状态">
           <span>
-            代理端口 <strong>{proxyPort}</strong>
+            端口 <strong>{proxyPort}</strong>
           </span>
           <span>
             请求 <strong>{packetCount}</strong>
@@ -265,62 +301,50 @@ export function AdvancedConsoleView({
             指纹 <strong>{fingerprints.length}</strong>
           </span>
           <span>
-            PX 证据 <strong>{pxEvidence.length}</strong>
+            PX <strong>{pxEvidence.length}</strong>
           </span>
           <span>
-            出站预置{" "}
+            预置{" "}
             <strong>
               <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "—"}</code>
             </strong>
           </span>
           <span>
-            JA3 对等 <strong className={outboundTls?.ja3Parity ? "is-ok" : "is-warn"}>{outboundTls?.ja3Parity ? "是" : "否"}</strong>
+            JA3 对等{" "}
+            <strong className={outboundTls?.ja3Parity ? "is-ok" : "is-warn"}>
+              {outboundTls?.ja3Parity ? "是" : "否"}
+            </strong>
           </span>
         </div>
-        <div className="advanced-console-toggles">
-          <label className={pxSettings.decryptEnabled ? "is-on" : ""}>
-            <span>PX 解密</span>
-            <input
-              type="checkbox"
-              checked={pxSettings.decryptEnabled}
-              disabled={saving}
-              onChange={(e) => void updatePx({ decryptEnabled: e.target.checked })}
-            />
-            <em>{pxSettings.decryptEnabled ? "已启用" : "已禁用"}</em>
-          </label>
-          <label className={pxSettings.interceptEcData ? "is-on" : ""}>
-            <span>拦截 ecData</span>
-            <input
-              type="checkbox"
-              checked={pxSettings.interceptEcData}
-              disabled={saving}
-              onChange={(e) => void updatePx({ interceptEcData: e.target.checked })}
-            />
-            <em>{pxSettings.interceptEcData ? "已启用" : "已禁用"}</em>
-          </label>
-        </div>
+        <p className="advanced-console-honesty" role="note" title={honestyBanner()}>
+          {honestyBanner()}
+        </p>
       </header>
 
-      <nav className="advanced-workflow" aria-label="推荐工作流：抓包 → 证据 → 分析 → 导出">
-        {WORKFLOW_STAGES.map((stage, index) => (
-          <button
-            key={stage.id}
-            type="button"
-            className={`advanced-workflow-step${suggestedPhase === stage.id ? " is-suggested" : ""}`}
-            onClick={() => goPhase(stage.id)}
-          >
-            <span className="advanced-workflow-num">{stage.step}</span>
-            <span className="advanced-workflow-body">
-              <strong>{stage.label}</strong>
-              <small>{stage.summary}</small>
-              <em>{stage.beginnerTip}</em>
-            </span>
-            {index < WORKFLOW_STAGES.length - 1 && (
-              <ArrowRight className="advanced-workflow-arrow" size={14} aria-hidden />
-            )}
-          </button>
-        ))}
-      </nav>
+      {/* Compact step strip — titles only; long tips live under the strip / in panel guide */}
+      <div className="advanced-workflow-block">
+        <nav className="advanced-workflow" aria-label="推荐工作流：抓包 → 证据 → 分析 → 导出">
+          {WORKFLOW_STAGES.map((stage, index) => (
+            <button
+              key={stage.id}
+              type="button"
+              className={`advanced-workflow-step${suggestedPhase === stage.id ? " is-suggested" : ""}`}
+              onClick={() => goPhase(stage.id)}
+              title={`${stage.summary}\n${stage.beginnerTip}`}
+            >
+              <span className="advanced-workflow-num">{stage.step}</span>
+              <strong className="advanced-workflow-label">{stage.label}</strong>
+              {index < WORKFLOW_STAGES.length - 1 && (
+                <ArrowRight className="advanced-workflow-arrow" size={14} aria-hidden />
+              )}
+            </button>
+          ))}
+        </nav>
+        <p className="advanced-workflow-tip" role="status">
+          <span className="advanced-workflow-tip-label">建议 · {suggestedStage.label}</span>
+          {suggestedStage.beginnerTip}
+        </p>
+      </div>
 
       <nav className="advanced-console-tabs" aria-label="高级控制台分区">
         {TAB_ORDER.map((id) => {
@@ -344,10 +368,11 @@ export function AdvancedConsoleView({
               type="button"
               className={tab === id ? "is-active" : ""}
               data-phase={meta.phase}
+              title={meta.label}
               onClick={() => setTab(id)}
             >
               <Icon size={14} aria-hidden />
-              {meta.label}
+              <span>{TAB_SHORT_LABEL[id]}</span>
               {badge !== null && badge > 0 ? <span className="advanced-tab-badge">{badge}</span> : null}
             </button>
           );
@@ -356,26 +381,29 @@ export function AdvancedConsoleView({
 
       <section className="advanced-console-panel">
         <div className="advanced-panel-guide" data-tab={tab}>
-          <div>
+          <div className="advanced-panel-guide-head">
             <span className="advanced-phase-pill" data-phase={guide.phase}>
               {WORKFLOW_STAGES.find((s) => s.id === guide.phase)?.shortLabel ?? guide.phase}
             </span>
             <h3>{guide.label}</h3>
           </div>
-          <dl className="advanced-guide-grid">
-            <div>
-              <dt>何时用</dt>
-              <dd>{guide.whenToUse}</dd>
-            </div>
-            <div>
-              <dt>最佳实践</dt>
-              <dd>{guide.bestPractice}</dd>
-            </div>
-            <div>
-              <dt>下一步</dt>
-              <dd>{guide.nextStep}</dd>
-            </div>
-          </dl>
+          <p className="advanced-panel-guide-next">
+            <strong>下一步</strong>
+            <span>{guide.nextStep}</span>
+          </p>
+          <details className="advanced-panel-guide-more">
+            <summary>何时用 · 最佳实践</summary>
+            <dl className="advanced-guide-grid">
+              <div>
+                <dt>何时用</dt>
+                <dd>{guide.whenToUse}</dd>
+              </div>
+              <div>
+                <dt>最佳实践</dt>
+                <dd>{guide.bestPractice}</dd>
+              </div>
+            </dl>
+          </details>
         </div>
 
         {tab === "overview" && (

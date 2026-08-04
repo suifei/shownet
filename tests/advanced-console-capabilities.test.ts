@@ -113,13 +113,18 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
     assert.match(src, /get_tls_fingerprints/);
     assert.match(src, /list_px_evidence/);
     assert.match(src, /set_outbound_tls_profile/);
+    // Compact layout: step strip titles only + tip line; long tips not inside step cards
+    assert.match(src, /advanced-workflow-tip/);
+    assert.match(src, /TAB_SHORT_LABEL/);
+    assert.match(src, /advanced-panel-guide-more/);
+    assert.doesNotMatch(src, /advanced-workflow-body/);
   });
 
   it("styles use codex accent tokens without isolated #5b6cff primary", async () => {
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     const consoleCssStart = css.indexOf("/* —— MITM Advanced Console");
     assert.ok(consoleCssStart >= 0);
-    const slice = css.slice(consoleCssStart, consoleCssStart + 12_000);
+    const slice = css.slice(consoleCssStart, consoleCssStart + 14_000);
     assert.match(slice, /--codex-accent/);
     assert.doesNotMatch(slice, /#5b6cff/);
     assert.doesNotMatch(slice, /#8ea2ff/);
@@ -127,6 +132,12 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
     assert.match(slice, /\.advanced-workflow/);
     assert.match(slice, /\.advanced-empty/);
     assert.match(slice, /\.advanced-capability-columns/);
+    // Layout contract: step strip single-row; tabs no-wrap scroll
+    assert.match(slice, /\.advanced-workflow\s*\{[^}]*flex-wrap:\s*nowrap/s);
+    assert.match(slice, /\.advanced-workflow-step\s*\{[^}]*max-height:\s*44px/s);
+    assert.match(slice, /\.advanced-console-tabs\s*\{[^}]*flex-wrap:\s*nowrap/s);
+    assert.match(slice, /\.advanced-console-tabs\s*\{[^}]*overflow-x:\s*auto/s);
+    assert.doesNotMatch(slice, /grid-template-columns:\s*repeat\(4/);
     // brace balance of full stylesheet must not be left open/closed by Advanced Console edits
     const full = css;
     assert.equal(full.split("{").length, full.split("}").length, "styles.css brace imbalance");

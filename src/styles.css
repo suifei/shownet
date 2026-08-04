@@ -7708,10 +7708,10 @@ kbd {
 .advanced-console {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-height: 0;
   height: 100%;
-  padding: 12px 14px 18px;
+  padding: 10px 12px 16px;
   overflow: auto;
   color: var(--ink);
   background: var(--paper);
@@ -7719,42 +7719,58 @@ kbd {
 .advanced-console-hero {
   border: 1px solid var(--codex-accent-border);
   border-radius: var(--radius);
-  padding: 14px 16px;
+  padding: 10px 12px;
   background: linear-gradient(180deg, var(--codex-accent-softest), var(--panel));
   display: grid;
-  gap: 10px;
-  box-shadow: 0 1px 2px rgba(25, 34, 41, 0.04);
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.advanced-console-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.advanced-console-hero-main {
+  min-width: 0;
+  flex: 1 1 200px;
 }
 .advanced-console-hero-main h2 {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
-  font-size: 19px;
+  font-size: 16px;
   color: var(--ink);
 }
-.advanced-console-hero-main h2 svg { color: var(--codex-accent); }
+.advanced-console-hero-main h2 svg { color: var(--codex-accent); flex-shrink: 0; }
 .advanced-console-lead {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .advanced-console-honesty {
-  margin: 6px 0 0;
-  padding: 8px 10px;
-  border-radius: var(--radius);
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
   border: 1px solid var(--codex-accent-border);
   background: var(--codex-accent-soft);
   color: var(--codex-accent-ink);
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
+  /* Single-line clamp so honesty never eats the viewport */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .advanced-console-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 14px;
-  font-size: 14px;
+  gap: 6px 12px;
+  font-size: 12px;
   color: var(--muted);
 }
 .advanced-console-stats strong { color: var(--ink); font-weight: 600; }
@@ -7763,18 +7779,20 @@ kbd {
 .advanced-console-toggles {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 .advanced-console-toggles label {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 4px 8px;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--panel);
-  font-size: 14px;
+  font-size: 12px;
   color: var(--ink);
+  white-space: nowrap;
 }
 .advanced-console-toggles label.is-on {
   border-color: var(--codex-accent-border);
@@ -7784,83 +7802,130 @@ kbd {
 .advanced-console-toggles em {
   font-style: normal;
   color: var(--subtle);
+  font-size: 11px;
+}
+
+/* Compact horizontal step strip (no multi-line cards) */
+.advanced-workflow-block {
+  display: grid;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 .advanced-workflow {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+  min-height: 40px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 .advanced-workflow-step {
   position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  text-align: left;
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  border: 1px solid var(--line);
-  background: var(--panel);
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 88px;
+  min-height: 40px;
+  max-height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--ink);
-  min-height: 100%;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.advanced-workflow-step + .advanced-workflow-step {
+  border-left: 1px solid var(--line);
 }
 .advanced-workflow-step:hover {
-  border-color: var(--codex-accent-border);
   background: var(--codex-accent-softest);
+  color: var(--codex-accent-ink);
 }
 .advanced-workflow-step.is-suggested {
-  border-color: var(--codex-accent);
-  box-shadow: inset 0 -2px var(--codex-accent);
-  background: var(--codex-accent-softest);
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-ink);
+  box-shadow: inset 0 -2px 0 var(--codex-accent);
 }
 .advanced-workflow-num {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 11px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: #fff;
   background: var(--codex-accent);
 }
-.advanced-workflow-body {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.advanced-workflow-body strong { font-size: 15px; }
-.advanced-workflow-body small {
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.35;
-}
-.advanced-workflow-body em {
-  font-style: normal;
-  color: var(--codex-accent-ink);
-  font-size: 14px;
-  line-height: 1.35;
+.advanced-workflow-label {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .advanced-workflow-arrow {
   display: none;
 }
+.advanced-workflow-tip {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.advanced-workflow-tip-label {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--codex-accent-ink);
+  background: var(--codex-accent-soft);
+  border: 1px solid var(--codex-accent-border);
+  vertical-align: baseline;
+}
+
+/* Single-row tabs; scroll sideways instead of wrapping under the step strip */
 .advanced-console-tabs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 .advanced-console-tabs button {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink);
-  border-radius: var(--radius);
-  padding: 7px 10px;
-  font-size: 14px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .advanced-console-tabs button:hover {
   border-color: var(--codex-accent-border);
@@ -7871,40 +7936,81 @@ kbd {
   border-color: var(--codex-accent-border);
   color: var(--codex-accent-ink);
   background: var(--codex-accent-soft);
-  box-shadow: inset 0 -2px var(--codex-accent);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border);
 }
 .advanced-tab-badge {
-  min-width: 1.25rem;
+  min-width: 1.1rem;
   padding: 0 5px;
   border-radius: 999px;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: #fff;
   background: var(--codex-accent);
   text-align: center;
 }
 .advanced-console-panel {
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   display: grid;
   gap: 10px;
+  align-content: start;
 }
 .advanced-panel-guide {
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 10px 12px;
   background: var(--panel);
 }
-.advanced-panel-guide h3 {
-  margin: 6px 0 0;
-  font-size: 17px;
+.advanced-panel-guide-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
+.advanced-panel-guide h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.advanced-panel-guide-next {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.advanced-panel-guide-next strong {
+  color: var(--codex-accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+.advanced-panel-guide-more {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.advanced-panel-guide-more > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--codex-accent-ink);
+  user-select: none;
+}
+.advanced-panel-guide-more > summary::-webkit-details-marker { display: none; }
+.advanced-panel-guide-more > summary::before {
+  content: "▸ ";
+  color: var(--subtle);
+}
+.advanced-panel-guide-more[open] > summary::before { content: "▾ "; }
 .advanced-phase-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 14px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--codex-accent-ink);
   background: var(--codex-accent-soft);
@@ -7912,19 +8018,19 @@ kbd {
 }
 .advanced-guide-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-  margin: 10px 0 0;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin: 8px 0 0;
 }
 .advanced-guide-grid dt {
-  font-size: 14px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--codex-accent-ink);
   margin: 0 0 4px;
 }
 .advanced-guide-grid dd {
   margin: 0;
-  font-size: 14px;
+  font-size: 12px;
   color: var(--muted);
   line-height: 1.4;
 }
@@ -8134,16 +8240,7 @@ kbd {
   color: var(--codex-accent-ink);
   background: var(--codex-accent-soft);
 }
-@media (max-width: 960px) {
-  .advanced-workflow {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-@media (max-width: 640px) {
-  .advanced-workflow {
-    grid-template-columns: 1fr;
-  }
-}
+/* Step strip stays single-row (scroll) at all widths — do not re-grid into cards. */
 .checkbox-row {
   display: flex;
   gap: 8px;
@@ -8401,12 +8498,19 @@ code, pre, kbd { font-variant-ligatures: none; }
 
 /* --- raised content gets a top-lit sheen so cards read as solid objects --- */
 .session-item.is-active,
-.advanced-workflow-step,
 .certificate-status,
 .advanced-panel-guide,
 .recommended-service {
   background-image: var(--sheen);
   box-shadow: var(--glass-edge), var(--elev-1);
+}
+/* Compact workflow steps must stay flat — no sheen that expands/overlaps tabs */
+.advanced-workflow-step {
+  background-image: none;
+  box-shadow: none;
+}
+.advanced-workflow-step.is-suggested {
+  background-image: none;
 }
 
 /* --- controls gain dimension: sheen + edge + lift --- */
