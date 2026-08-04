@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: shownet-release-${{ github.ref }}
+  # Keep push CI and manual release dispatch from cancelling each other.
+  group: shownet-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
