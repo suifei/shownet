@@ -170,6 +170,9 @@ async function ensurePinnedSource(directory) {
   try {
     await stat(resolve(directory, ".git"));
   } catch {
+    // CI rust-cache / prior partial runs can leave a non-empty directory without
+    // .git; git clone refuses to write into it. Wipe and clone cleanly.
+    await rm(directory, { recursive: true, force: true });
     await mkdir(resolve(directory, ".."), { recursive: true });
     run("git", ["clone", "--filter=blob:none", "--no-checkout", GROK_REPOSITORY, directory], root);
     cloned = true;
