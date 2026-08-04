@@ -717,7 +717,9 @@ pub fn validate_artifact(contract: &GraphArtifactContract, artifact: &Value) -> 
     };
     let mut errors = Vec::new();
     for field in &contract.required_fields {
-        if object.get(field).is_none_or(value_is_empty) {
+        // Presence check: key must exist. Empty arrays/objects are valid (e.g. failedSkills: []
+        // when every skill succeeded). Blank strings are still invalid for string fields.
+        if required_field_missing(object.get(field)) {
             errors.push(format!("缺少必填产物字段: {field}"));
         }
     }
@@ -750,6 +752,17 @@ pub fn validate_artifact(contract: &GraphArtifactContract, artifact: &Value) -> 
         }
     }
     errors
+}
+
+/// Required-field presence: missing/null/blank string fail; empty `[]` / `{}` pass.
+fn required_field_missing(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Array(_)) | Some(Value::Object(_)) | Some(Value::Bool(_)) | Some(Value::Number(_)) => {
+            false
+        }
+    }
 }
 
 fn value_is_empty(value: &Value) -> bool {
@@ -883,6 +896,71 @@ mod tests {
         assert!(validate_artifact(contract, &artifact).is_empty());
         let missing = json!({ "skillId": "api-reverse", "summary": "x" });
         assert!(!validate_artifact(contract, &missing).is_empty());
+    }
+
+    #[test]
+    fn quality_gate_accepts_empty_failed_skills_when_all_skills_succeeded() {
+        let graph = api_graph();
+        let contract = &graph.node("quality-gate").unwrap().artifact_contract;
+        let gate = json!({
+            "successfulSkills": ["api-reverse"],
+            "failedSkills": [],
+            "evidenceRefs": ["#1 GET /api/v1/items"],
+            "planReasons": ["用户选择 API 协议逆向"],
+        });
+        let errors = validate_artifact(contract, &gate);
+        assert!(
+            errors.is_empty(),
+            "empty failedSkills must be valid (no failures): {errors:?}"
+        );
+
+        let mut run = AnalysisGraphRun::new("analysis-gate", graph, 8, 1);
+        run.start_node("quality-gate", 2).unwrap();
+        run.complete_node("quality-gate", gate, 3)
+            .expect("quality-gate complete_node must accept failedSkills: []");
+        assert_eq!(
+            run.node("quality-gate").unwrap().status,
+            GraphNodeStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn quality_gate_rejects_missing_failed_skills_key() {
+        let graph = api_graph();
+        let contract = &graph.node("quality-gate").unwrap().artifact_contract;
+        let gate = json!({
+            "successfulSkills": ["api-reverse"],
+            "evidenceRefs": ["#1 GET /x"],
+        });
+        let errors = validate_artifact(contract, &gate);
+        assert!(
+            errors.iter().any(|e| e.contains("failedSkills")),
+            "missing key must still fail: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn skill_artifact_allows_empty_gaps_array() {
+        let graph = api_graph();
+        let contract = &graph.node("skill-api-reverse").unwrap().artifact_contract;
+        let artifact = json!({
+            "skillId": "api-reverse",
+            "summary": "ok",
+            "findings": ["one"],
+            "evidenceRefs": ["#1 POST /login"],
+            "gaps": [],
+            "outputs": {
+                "端点矩阵": ["POST /login"],
+                "鉴权链路": "n/a",
+                "数据模型": { "note": "no extra fields" },
+                "复现模板": "curl"
+            }
+        });
+        let errors = validate_artifact(contract, &artifact);
+        assert!(
+            errors.is_empty(),
+            "gaps: [] is a valid explicit empty list: {errors:?}"
+        );
     }
 
     #[test]
