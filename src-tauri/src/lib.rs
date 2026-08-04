@@ -29,6 +29,7 @@ mod protection_analysis;
 mod proxy;
 mod proxy_terminal;
 mod px_analysis;
+mod real_capture_probe;
 mod request_collections;
 mod request_replay;
 mod scorecard;
