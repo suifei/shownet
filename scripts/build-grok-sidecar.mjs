@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, resolve } from "node:path";
+import { access, chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { constants as fsConstants } from "node:fs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourceMetadata = JSON.parse(await readFile(resolve(root, "third-party/grok-build/SOURCE.json"), "utf8"));
@@ -33,16 +34,22 @@ const output = resolve(
 if (!options.stampOnly) {
   await ensurePinnedSource(sourceDir);
   validatePinnedSource(sourceDir);
+  // Vendored bin/protoc is a macOS dotslash stub; CI must inject a real protoc.
+  const protocEnv = await ensureRealProtoc(sourceDir);
   const buildArgs = ["build", "-p", "xai-grok-pager-bin", "--release", "--features", "release-dist", "--target", target];
   if (options.xwin) {
     const pinnedCargo = capture("rustup", ["which", "--toolchain", GROK_RUST_TOOLCHAIN, "cargo"], root);
     run("cargo-xwin", buildArgs, sourceDir, {
       ...process.env,
+      ...protocEnv,
       PATH: `${dirname(pinnedCargo)}${delimiter}${process.env.PATH ?? ""}`,
       RUSTUP_TOOLCHAIN: GROK_RUST_TOOLCHAIN,
     });
   } else {
-    run("rustup", ["run", GROK_RUST_TOOLCHAIN, "cargo", ...buildArgs], sourceDir);
+    run("rustup", ["run", GROK_RUST_TOOLCHAIN, "cargo", ...buildArgs], sourceDir, {
+      ...process.env,
+      ...protocEnv,
+    });
   }
 
   const built = resolve(sourceDir, `target/${target}/release/xai-grok-pager${executableSuffix}`);
@@ -147,6 +154,52 @@ function validatePinnedSource(directory) {
   if (version !== GROK_VERSION) {
     throw new Error(`grok-build version mismatch: expected ${GROK_VERSION}, found ${version ?? "<missing>"}`);
   }
+}
+
+/**
+ * grok-build ships a `bin/protoc` that is a macOS "dotslash" stub (not a real
+ * protoc binary). CI must provide a real protoc via PATH / PROTOC and we replace
+ * the vendored stub so build.rs does not pick a non-Win32 / non-executable file.
+ */
+async function ensureRealProtoc(sourceDir) {
+  const fromEnv = process.env.PROTOC?.trim();
+  let protocPath = fromEnv || "";
+  if (!protocPath) {
+    const which = process.platform === "win32" ? "where" : "which";
+    const found = spawnSync(which, ["protoc"], { encoding: "utf8" });
+    if (found.status === 0) {
+      protocPath = found.stdout.trim().split(/\r?\n/).find(Boolean) ?? "";
+    }
+  }
+  if (!protocPath) {
+    throw new Error(
+      "protoc not found. Install protobuf compiler and set PROTOC, or put protoc on PATH (CI: arduino/setup-protoc).",
+    );
+  }
+  await access(protocPath, fsConstants.X_OK).catch(async () => {
+    await access(protocPath, fsConstants.F_OK);
+  });
+  const version = spawnSync(protocPath, ["--version"], { encoding: "utf8" });
+  if (version.status !== 0) {
+    throw new Error(`protoc at ${protocPath} is not runnable: ${version.stderr || version.stdout}`);
+  }
+  console.log(`Using protoc: ${protocPath} (${version.stdout.trim()})`);
+
+  const binDir = join(sourceDir, "bin");
+  await mkdir(binDir, { recursive: true });
+  // Remove non-portable stubs (no extension and wrong-arch copies).
+  for (const name of ["protoc", "protoc.exe"]) {
+    await rm(join(binDir, name), { force: true }).catch(() => {});
+  }
+  const destName = process.platform === "win32" ? "protoc.exe" : "protoc";
+  const dest = join(binDir, destName);
+  await copyFile(protocPath, dest);
+  if (process.platform !== "win32") await chmod(dest, 0o755);
+  // Also place plain "protoc" on Windows for build scripts that look for that name.
+  if (process.platform === "win32") {
+    await copyFile(protocPath, join(binDir, "protoc"));
+  }
+  return { PROTOC: dest };
 }
 
 function run(command, args, cwd, env = process.env) {

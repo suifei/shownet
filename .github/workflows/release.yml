@@ -66,6 +66,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: quality
     runs-on: macos-14
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -85,6 +86,11 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Install pinned Agent Rust toolchain
         run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-apple-darwin
+      # Real protoc on PATH — grok-build's vendored bin/protoc needs unavailable "dotslash"
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "28.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -115,6 +121,8 @@ jobs:
           RG_BIN="$(find "$RUNNER_TEMP/rg" -type f -name rg | head -n 1)"
           test -x "$RG_BIN"
           echo "GROK_TOOLS_BUNDLE_RG_PATH=$RG_BIN" >> "$GITHUB_ENV"
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+          protoc --version
       - name: Build and verify built-in Agent sidecar
         run: |
           npm run build:agent-sidecar -- --target aarch64-apple-darwin
@@ -159,6 +167,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: quality
     runs-on: windows-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -175,6 +184,11 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Install pinned Agent Rust toolchain
         run: rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+      # Real Win32 protoc — vendored bin/protoc in grok-build is not a valid Win32 app
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "28.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -214,6 +228,9 @@ jobs:
           $rg = Get-ChildItem -Path $dir -Recurse -Filter rg.exe | Select-Object -First 1
           if (-not $rg) { throw "rg.exe not found in ripgrep archive" }
           "GROK_TOOLS_BUNDLE_RG_PATH=$($rg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $protoc = (Get-Command protoc).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & protoc --version
       - name: Build and verify built-in Agent sidecar
         shell: pwsh
         run: |
