@@ -10,6 +10,10 @@ license = "GPL-3.0-only"
 name = "shownet_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "tls-golden-probe"
+path = "src/bin/tls_golden_probe.rs"
+
 # Optional future: real BoringSSL/curl-impersonate MITM path. When enabled and linked,
 # `real_impersonate_stack_available` can return true. Default build is rustls-only.
 [features]

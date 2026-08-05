@@ -76,25 +76,35 @@ src-tauri/testdata/tls-golden/
 对 `curl-impersonate` / `curl_cffi` 一类工具自连探针，解析其 ClientHello。
 可用于打通 Phase 1 链路，但**只能**支撑 `tool-matched`，不能升到 `browser-matched`。
 
-低成本刷新入口（优先工具，缺省时诚实 skip，不静默假绿）：
+低成本刷新入口（优先工具，否则本地探针 measure-rustls，不静默假绿）：
 
 ```bash
 # 校验 inventory + 多版本矩阵；列出已安装工具
-npm run tls-golden:capture -- --dry-run
+npm run tls-golden:capture:dry
 
-# 尝试对某一 Chrome major 做工具侧观测（无二进制则打印 skip 行）
-npm run tls-golden:capture -- --preset chrome150 --platform desktop-windows
+# 结构校验
+npm run tls-golden:validate
+
+# 本地环回探针：测 rustls 配方 ClientHello（对齐天花板 = recipe，禁止当 tool/browser 金标写入）
+npm run tls-golden:measure-rustls
+# 或：npm run tls-golden:probe -- measure-rustls --preset chrome150
+
+# 等待外部工具/浏览器连入探针（tool/browser 捕获用）
+npm run tls-golden:probe -- wait --seconds 45
+
+# 工具侧观测（curl-impersonate / curl_cffi）；无工具时 auto 模式回退 measure-rustls
+node scripts/tls-golden-capture.mjs --preset chrome150 --platform desktop-windows
 
 # 门禁测试
 npm run test:tls-golden
 ```
 
-脚本：`scripts/tls-golden-capture.mjs`。  
-完整 `status: captured` 仍需要本地 ClientHello 探针产出的 `clientHelloHex`；
-仅从公开 JA3 探针拿到 hash **不足以** 升格 alignment。
+脚本：`scripts/tls-golden-capture.mjs`；探针 CLI：`src-tauri` bin `tls-golden-probe`。  
+完整 `status: captured` + `tool-matched` 需要 **外部工具** ClientHello 的 `clientHelloHex`（`wait` 模式）；
+`measure-rustls` 只证明探针与 rustls 配方链路，**不会** 升格 alignment。
 
 外部源清单（避免为每个 major 下载完整浏览器）：
-`fingerprint-reference/sources-inventory.json`（curl-impersonate 系、curl_cffi、uTLS、wreq/rquest 等）。
+`fingerprint-reference/sources-inventory.json`（curl-impersonate 系、curl_cffi、uTLS、wreq/rquest、JA4 规范等）。
 
 ### 4.3 禁止事项
 

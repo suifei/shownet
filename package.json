@@ -40,6 +40,8 @@
     "tls-golden:capture": "node scripts/tls-golden-capture.mjs",
     "tls-golden:capture:dry": "node scripts/tls-golden-capture.mjs --dry-run",
     "tls-golden:validate": "node scripts/tls-golden-capture.mjs --validate-only",
+    "tls-golden:measure-rustls": "node scripts/tls-golden-capture.mjs --mode measure-rustls --preset chrome150",
+    "tls-golden:probe": "node scripts/rust-stable.mjs cargo run --manifest-path src-tauri/Cargo.toml --bin tls-golden-probe --",
     "test:client-access-ui": "node --experimental-strip-types --test tests/client-access-ui.test.ts",
     "test:mcp-guide": "node --experimental-strip-types --test tests/mcp-client-guide.test.ts",
     "test:analysis-scope": "node --experimental-strip-types --test tests/analysis-scope.test.ts",

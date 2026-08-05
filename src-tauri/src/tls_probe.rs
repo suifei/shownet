@@ -104,6 +104,54 @@ impl ClientHelloProbe {
     }
 }
 
+/// Measure what the **rustls recipe path** emits for a catalog preset.
+///
+/// This is a development instrument: the result is *not* a browser/tool golden
+/// and must never be written into an entry as `tool-matched` or `browser-matched`.
+/// Use it to confirm the probe + fingerprint pipeline and to record recipe-only
+/// wire differences between presets.
+pub async fn measure_rustls_preset(preset_id: &str) -> Result<CapturedClientHello, String> {
+    use crate::tls_outbound;
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::TlsConnector;
+
+    tls_outbound::set_active_preset(preset_id)?;
+    let config = tls_outbound::build_client_config_for_preset(preset_id)?;
+    let probe = ClientHelloProbe::bind_loopback().await?;
+    let addr = probe.local_addr()?;
+    let sni = format!("probe.{preset_id}.local");
+    let server_name = ServerName::try_from(sni.clone())
+        .map_err(|error| format!("invalid SNI: {error}"))?;
+
+    let client = tokio::spawn(async move {
+        let tcp = TcpStream::connect(addr).await?;
+        let _ = TlsConnector::from(config).connect(server_name, tcp).await;
+        Ok::<(), std::io::Error>(())
+    });
+
+    let captured = probe
+        .capture_one_within(Duration::from_secs(5))
+        .await
+        .map_err(|error| format!("rustls measure failed for {preset_id}: {error}"))?;
+    let _ = client.await;
+    Ok(captured)
+}
+
+/// Wait for an *external* TLS client (curl-impersonate, browser, etc.) to connect
+/// to a loopback probe and return the first ClientHello.
+///
+/// Prints the listen address as a single line `PROBE_ADDR host:port` on stderr so
+/// a driver script can point the tool at it.
+pub async fn wait_for_external_client(
+    budget: Duration,
+) -> Result<(SocketAddr, CapturedClientHello), String> {
+    let probe = ClientHelloProbe::bind_loopback().await?;
+    let addr = probe.local_addr()?;
+    eprintln!("PROBE_ADDR {addr}");
+    let captured = probe.capture_one_within(budget).await?;
+    Ok((addr, captured))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

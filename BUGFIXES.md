@@ -143,8 +143,9 @@
 | 多版本 `pending-capture` 矩阵（Chrome 120…150 等） | **已落地** `src-tauri/testdata/tls-golden/entries/` |
 | 外部源 inventory（≥3 GitHub/工具） | **已落地** `fingerprint-reference/sources-inventory.json` |
 | 低成本 capture 脚本（缺工具诚实 skip） | **已落地** `scripts/tls-golden-capture.mjs` / `npm run tls-golden:capture` |
+| 本地 ClientHello 探针 CLI | **已落地** `tls-golden-probe`（`measure-rustls` / `wait`） |
 | 诚实门禁 `npm run test:tls-golden` | **通过**；`ja3Parity` 仍为 false |
-| 真栈 tool/browser-matched 升格 | **未做**（需 curl-impersonate 类引擎 + ClientHello 探针） |
+| 真栈 tool/browser-matched 升格 | **未做**（需 curl-impersonate 类引擎；探针已就绪） |
 
 ---
 

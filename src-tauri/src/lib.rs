@@ -44,7 +44,7 @@ mod tls_golden;
 mod tls_impersonate;
 mod tls_interception;
 mod tls_outbound;
-mod tls_probe;
+pub mod tls_probe;
 mod updates;
 mod web_risk_lab;
 

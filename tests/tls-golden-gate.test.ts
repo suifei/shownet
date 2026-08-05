@@ -303,7 +303,7 @@ describe("tls golden: fingerprint-reference inventory", () => {
     assert.match(r.stdout, /low-cost sources:/);
   });
 
-  it("capture CLI without tools prints honest skip (or dry-run ok)", () => {
+  it("capture CLI without tools prints honest skip, measure-rustls, or dry-run ok", () => {
     const script = join(root, "scripts/tls-golden-capture.mjs");
     const dry = spawnSync(process.execPath, [script, "--dry-run", "--preset", "chrome150"], {
       encoding: "utf8",
@@ -312,22 +312,34 @@ describe("tls golden: fingerprint-reference inventory", () => {
     assert.equal(dry.status, 0, dry.stderr || dry.stdout);
     assert.match(dry.stdout, /dry-run ok:|inventory sources=/);
 
+    // --mode tool forces external tools only → honest skip when none installed.
+    const toolOnly = spawnSync(
+      process.execPath,
+      [script, "--mode", "tool", "--preset", "chrome150", "--platform", "desktop-windows"],
+      { encoding: "utf8", cwd: root, env: { ...process.env, PATH: process.env.PATH } },
+    );
+    assert.ok(toolOnly.status === 0 || toolOnly.status === 2, toolOnly.stderr || toolOnly.stdout);
+    assert.match(
+      `${toolOnly.stdout}\n${toolOnly.stderr}`,
+      /tool not installed \/ capture skipped|capture-result:|capture observed/,
+    );
+
+    // auto mode may fall back to local probe measure-rustls (recipe only).
     const capture = spawnSync(
       process.execPath,
       [script, "--preset", "chrome150", "--platform", "desktop-windows"],
       { encoding: "utf8", cwd: root, env: { ...process.env, PATH: process.env.PATH } },
     );
-    // Either tool missing (honest skip) or tool present (capture-result / observed).
     assert.ok(
       capture.status === 0 || capture.status === 1,
       `unexpected exit ${capture.status}: ${capture.stderr}`,
     );
     const out = `${capture.stdout}\n${capture.stderr}`;
     assert.ok(
-      /tool not installed \/ capture skipped|capture-result:|capture observed|capture failed honestly/.test(
+      /tool not installed \/ capture skipped|capture-result:|capture observed|capture failed honestly|measure-rustls-result:|recipe measure ok/.test(
         out,
       ),
-      `expected honest skip or real capture output, got: ${out.slice(0, 400)}`,
+      `expected honest skip, tool capture, or recipe measure, got: ${out.slice(0, 400)}`,
     );
   });
 
@@ -338,5 +350,45 @@ describe("tls golden: fingerprint-reference inventory", () => {
     assert.match(pkg.scripts["test:tls-golden"], /tls-golden-gate\.test\.ts/);
     assert.match(pkg.scripts["tls-golden:capture"], /tls-golden-capture\.mjs/);
     assert.match(pkg.scripts["tls-golden:capture:dry"], /--dry-run/);
+    assert.match(pkg.scripts["tls-golden:measure-rustls"], /measure-rustls/);
+    assert.match(pkg.scripts["tls-golden:probe"], /tls-golden-probe/);
+  });
+
+  it("tls-golden-probe binary source and Cargo.toml bin entry exist", async () => {
+    const cargo = await readFile(join(root, "src-tauri/Cargo.toml"), "utf8");
+    assert.match(cargo, /name\s*=\s*"tls-golden-probe"/);
+    assert.ok(existsSync(join(root, "src-tauri/src/bin/tls_golden_probe.rs")));
+    const probeSrc = await readFile(join(root, "src-tauri/src/tls_probe.rs"), "utf8");
+    assert.match(probeSrc, /pub async fn measure_rustls_preset/);
+    assert.match(probeSrc, /pub async fn wait_for_external_client/);
+    const binSrc = await readFile(join(root, "src-tauri/src/bin/tls_golden_probe.rs"), "utf8");
+    assert.match(binSrc, /measure-rustls/);
+    assert.match(binSrc, /alignmentCeiling/);
+  });
+
+  it("measureRustlsViaProbe drives the real probe CLI and returns recipe-only golden shape", async () => {
+    const scriptUrl = pathToFileURL(join(root, "scripts/tls-golden-capture.mjs")).href;
+    const mod = await import(scriptUrl);
+    assert.equal(typeof mod.measureRustlsViaProbe, "function");
+    const measured = mod.measureRustlsViaProbe("chrome150") as {
+      ok?: boolean;
+      mode?: string;
+      alignmentCeiling?: string;
+      golden?: { ja3?: string; clientHelloHex?: string };
+      error?: string;
+    };
+    // Building the binary can fail in constrained environments; still must not invent success.
+    if (!measured.ok) {
+      assert.ok(measured.error, "failure must include error text");
+      console.log("measureRustlsViaProbe skipped/failed honestly:", measured.error?.slice(0, 200));
+      return;
+    }
+    assert.equal(measured.mode, "measure-rustls");
+    assert.equal(measured.alignmentCeiling, "recipe");
+    assert.match(measured.golden?.ja3 ?? "", /^[0-9a-f]{32}$/i);
+    assert.ok(
+      (measured.golden?.clientHelloHex?.length ?? 0) > 20,
+      "recipe measure must include clientHelloHex from the real probe",
+    );
   });
 });

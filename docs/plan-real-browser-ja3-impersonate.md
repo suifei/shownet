@@ -240,10 +240,10 @@ Android 上「接近浏览器 JA3」至少分三类：
 
 ### Phase 0 — 测量与门禁基建（1–2 周量级）
 
-- [ ] 固定 **JA3/JA4 探针**：本地 TLS 服务器只记录 ClientHello 并返回解析结果（可复用现有 `tls_fingerprint` / `tls_probe`）。  
+- [x] 固定 **JA3/JA4 探针**：`tls_probe` 环回监听 + CLI `tls-golden-probe`（`measure-rustls` / `wait`）；解析复用 `tls_fingerprint`。  
 - [x] 金标仓库：`src-tauri/testdata/tls-golden/`（schema + multi-version `pending-capture` entries + honesty gates）。  
 - [x] 外部源清单（低成本、免装全量浏览器）：`fingerprint-reference/sources-inventory.json`（curl-impersonate / curl_cffi / uTLS / wreq 等）+ `scripts/tls-golden-capture.mjs`。  
-- [x] CI/本地：`npm run test:tls-golden` 与 `tls_golden` Rust 门禁；rustls 路径 `ja3Parity==false`。  
+- [x] CI/本地：`npm run test:tls-golden` 与 `tls_golden` / `tls_probe` Rust 门禁；rustls 路径 `ja3Parity==false`。  
 - [x] 文档/UI：「对齐级别」枚举 `recipe` | `tool-matched` | `browser-matched`（`tls_golden::AlignmentLevel`）。
 
 ### Phase 1 — curl-impersonate 类接入（MVP 真 JA3）
@@ -325,7 +325,7 @@ Android 上「接近浏览器 JA3」至少分三类：
 
 ## 9. 里程碑验收清单（摘要）
 
-- [ ] Phase 0：探针 + 金标格式 + CI 诚实断言  
+- [x] Phase 0：探针 + 金标格式 + CI 诚实断言（真栈 tool-matched 仍属 Phase 1）
 - [ ] Phase 1：至少 1 个 desktop Chrome 预置 **tool-matched** JA3 通过  
 - [ ] Phase 2：同一预置 **browser-matched** JA3 通过；`supportsFullBrowserJa3` 策略文档化  
 - [ ] Phase 4：至少 1 个 `chrome-android*` 或明确「仅 desktop」范围声明  

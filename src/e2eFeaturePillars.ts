@@ -65,10 +65,15 @@ export const E2E_FEATURE_PILLARS: FeaturePillarCoverage[] = [
     artifacts: [
       "src-tauri/src/tls_outbound.rs",
       "src-tauri/src/tls_clienthello_catalog.rs",
+      "src-tauri/src/tls_golden.rs",
+      "src-tauri/src/tls_probe.rs",
+      "src-tauri/src/bin/tls_golden_probe.rs",
+      "src-tauri/testdata/tls-golden/fingerprint-reference/sources-inventory.json",
+      "scripts/tls-golden-capture.mjs",
       "tests/tls-golden-gate.test.ts",
       "tests/advanced-console-capabilities.test.ts",
     ],
-    shippedMarker: /ClientHello|chrome150|ja3Parity|browserParity|fidelityLabel/,
+    shippedMarker: /ClientHello|chrome150|ja3Parity|browserParity|fidelityLabel|tls-golden-probe|measure-rustls|pending-capture/,
   },
   {
     id: "embedded-browser-lifecycle",

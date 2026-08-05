@@ -42,6 +42,8 @@ function parseArgs(argv) {
     requireTool: false,
     write: false,
     validateOnly: false,
+    /** auto | tool | measure-rustls */
+    mode: "auto",
     preset: "chrome150",
     platform: "desktop-windows",
     probeUrl: process.env.TLS_GOLDEN_PROBE_URL || "https://tls.browserleaks.com/json",
@@ -53,6 +55,7 @@ function parseArgs(argv) {
     else if (a === "--require-tool") out.requireTool = true;
     else if (a === "--write") out.write = true;
     else if (a === "--validate-only") out.validateOnly = true;
+    else if (a === "--mode") out.mode = argv[++i] || "auto";
     else if (a === "--preset") out.preset = argv[++i];
     else if (a === "--platform") out.platform = argv[++i];
     else if (a === "--probe-url") out.probeUrl = argv[++i];
@@ -187,16 +190,86 @@ Options:
   --dry-run              Validate inventory + matrix; list tools; do not capture
   --validate-only        Structural validation only (no tool detection / network)
   --list-tools           Print detected capture tools for --preset
+  --mode <auto|tool|measure-rustls>
+                         auto (default): external tool, else local rustls probe measure
+                         tool: curl-impersonate / curl_cffi only
+                         measure-rustls: local tls-golden-probe (recipe only)
   --preset <id>          Catalog preset (default chrome150)
   --platform <plat>      Platform key (default desktop-windows)
   --probe-url <url>      Optional live probe (default tls.browserleaks.com/json)
   --write                Annotate entry notes if a tool returns parseable JA3
-  --require-tool         Exit 2 when no tool is installed (default: honest skip exit 0)
+  --require-tool         Exit 2 when no external tool is installed
   -h, --help             This help
 
 Honesty: never invents JA3; never claims browser-matched from tools.
-Full status=captured still requires clientHelloHex from a local ClientHello probe.
+measure-rustls uses the real loopback ClientHello probe but alignment ceiling is recipe only.
+Full status=captured + tool-matched still needs an external tool capture + clientHelloHex.
 `);
+}
+
+function findTlsGoldenProbeBinary() {
+  const candidates = [
+    join(root, "src-tauri/target/debug/tls-golden-probe.exe"),
+    join(root, "src-tauri/target/debug/tls-golden-probe"),
+    join(root, "src-tauri/target/release/tls-golden-probe.exe"),
+    join(root, "src-tauri/target/release/tls-golden-probe"),
+  ];
+  return candidates.find((p) => existsSync(p)) || null;
+}
+
+/**
+ * Drive the shipped Rust `tls-golden-probe` against the real ClientHello probe.
+ * Prefers an already-built binary; falls back to `cargo run`.
+ * Returns parsed JSON or { ok:false }.
+ */
+export function measureRustlsViaProbe(preset) {
+  const built = findTlsGoldenProbeBinary();
+  let r;
+  if (built) {
+    r = spawnSync(built, ["measure-rustls", "--preset", preset], {
+      encoding: "utf8",
+      cwd: root,
+      timeout: 60000,
+    });
+  } else {
+    const rustStable = join(root, "scripts/rust-stable.mjs");
+    r = spawnSync(
+      process.execPath,
+      [
+        rustStable,
+        "cargo",
+        "run",
+        "--quiet",
+        "--manifest-path",
+        join(root, "src-tauri/Cargo.toml"),
+        "--bin",
+        "tls-golden-probe",
+        "--",
+        "measure-rustls",
+        "--preset",
+        preset,
+      ],
+      { encoding: "utf8", cwd: root, timeout: 300000 },
+    );
+  }
+  if (r.status !== 0) {
+    return {
+      ok: false,
+      error: `tls-golden-probe failed (status=${r.status}): ${(r.stderr || r.stdout || "").slice(0, 400)}`,
+    };
+  }
+  const text = (r.stdout || "").trim();
+  // cargo may print warnings; find the JSON object
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) {
+    return { ok: false, error: `no JSON from tls-golden-probe: ${text.slice(0, 200)}` };
+  }
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch (e) {
+    return { ok: false, error: `parse tls-golden-probe JSON: ${e.message}` };
+  }
 }
 
 function tryCaptureWithCurlCffi(tools, preset, probeUrl) {
@@ -339,49 +412,74 @@ function main() {
   }
 
   const tools = detectTools(args.preset);
-  if (tools.length === 0) {
-    // Single honest skip line required by the goal verification plan.
+  const wantTool = args.mode === "auto" || args.mode === "tool";
+  const wantRustls = args.mode === "auto" || args.mode === "measure-rustls";
+
+  if (wantTool && tools.length > 0) {
+    console.log(
+      `attempting tool capture preset=${args.preset} platform=${args.platform} tools=${tools.map((t) => t.name).join(",")}`,
+    );
+    let result =
+      tryCaptureWithCurlCffi(tools, args.preset, args.probeUrl) ||
+      tryCaptureWithCurlBinary(tools, args.preset, args.probeUrl);
+
+    if (result?.ok) {
+      console.log("capture-result:", JSON.stringify(result));
+      if (args.write) {
+        writeCapturedEntry(args.preset, args.platform, result, result.tool || "curl_cffi");
+      } else {
+        console.log(
+          "capture observed (not written; pass --write to annotate entry notes). " +
+            "Full status=captured still requires clientHelloHex from local tls-golden-probe wait mode.",
+        );
+      }
+      process.exit(0);
+    }
+    if (result && !result.ok) {
+      console.log(`tool capture failed honestly: ${result.error || "unknown"}`);
+      if (args.mode === "tool") process.exit(1);
+    }
+  }
+
+  if (wantTool && tools.length === 0 && args.mode === "tool") {
     console.log("tool not installed / capture skipped");
     console.log(
       `hint: install curl-impersonate or pip install curl_cffi, then re-run for ${args.preset} (${args.platform})`,
     );
-    console.log(
-      `inventory low-cost sources: ${inventory.sources
-        .filter((s) => s.captureCost === "low-tool")
-        .map((s) => s.id)
-        .join(", ")}`,
-    );
     process.exit(args.requireTool ? 2 : 0);
   }
 
-  console.log(
-    `attempting tool capture preset=${args.preset} platform=${args.platform} tools=${tools.map((t) => t.name).join(",")}`,
-  );
-
-  let result =
-    tryCaptureWithCurlCffi(tools, args.preset, args.probeUrl) ||
-    tryCaptureWithCurlBinary(tools, args.preset, args.probeUrl);
-
-  if (!result) {
-    console.log("tool not installed / capture skipped");
-    process.exit(args.requireTool ? 2 : 0);
-  }
-
-  console.log("capture-result:", JSON.stringify(result));
-
-  if (!result.ok) {
-    console.log(`capture failed honestly: ${result.error || "unknown"}`);
-    process.exit(1);
-  }
-
-  if (args.write) {
-    writeCapturedEntry(args.preset, args.platform, result, result.tool || "curl_cffi");
-  } else {
+  if (wantRustls) {
     console.log(
-      "capture observed (not written; pass --write to annotate entry notes). " +
-        "Full status=captured still requires clientHelloHex from a local ClientHello probe.",
+      `attempting local probe measure-rustls preset=${args.preset} (alignment ceiling: recipe only)`,
     );
+    const measured = measureRustlsViaProbe(args.preset);
+    console.log("measure-rustls-result:", JSON.stringify(measured));
+    if (!measured.ok) {
+      if (args.mode === "measure-rustls") {
+        console.log(`measure-rustls failed honestly: ${measured.error || "unknown"}`);
+        process.exit(1);
+      }
+      console.log("tool not installed / capture skipped");
+      console.log(`hint: rustls measure also failed: ${measured.error || "unknown"}`);
+      process.exit(args.requireTool ? 2 : 0);
+    }
+    const ja3 = measured.golden?.ja3;
+    console.log(
+      `recipe measure ok ja3=${ja3} clientHelloHexLen=${(measured.golden?.clientHelloHex || "").length} ` +
+        "(NOT tool-matched; NOT written as golden unless you manually review)",
+    );
+    if (args.write) {
+      console.log(
+        "refusing --write for measure-rustls: would invent a false tool/browser golden from rustls recipe",
+      );
+      process.exit(3);
+    }
+    process.exit(0);
   }
+
+  console.log("tool not installed / capture skipped");
+  process.exit(args.requireTool ? 2 : 0);
 }
 
 function isMainModule() {
