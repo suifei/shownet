@@ -110,6 +110,31 @@
 
 ---
 
+### P0-C · 流量列表/详情区分代理 502 与源站 4xx
+
+| 项 | 内容 |
+|----|------|
+| **现象** | 用户难以区分「代理连不上」（502 + 超时文案）与「源站主动 400」（CDN/业务）。 |
+| **修复** | `trafficStatus.ts` 分类：列表 502 显示 `502·代理`；详情对源站 4xx 展示 Server + 绕行提示；代理错误保留全文。 |
+| **关键文件** | `src/trafficStatus.ts`、`src/components/TrafficView.tsx`、`tests/traffic-status.test.ts` |
+
+---
+
+## Goal 验收勾选（`docs/goal-embedded-browser-proxy-mitm-ux.md`）
+
+| 条目 | 结果 |
+|------|------|
+| P0 百度图/脚本（绕行或 HTTP/1.1） | 实现：一键绕行 + 严格 CDN 强制 HTTP/1.1；手测见 Windows 清单 |
+| P1 出口错误可发现 | 实现：探测 / env 导入 / 502 toast+详情 |
+| P2 切 tab 不丢浏览器 | 实现：keep-alive |
+| P3 系统浏览器外开 | 实现：plugin-opener |
+| P4 Happy Eyeballs / IPv4 优先 | 实现 |
+| P5 交互焦点/IME | 实现：点击聚焦 |
+| CI `npm test` / quality | `npm run test:windows` 门禁 |
+| 完整 JA3 impersonate | **非目标** |
+
+---
+
 ## 未在本批修复（刻意非目标）
 
 | 项 | 说明 |

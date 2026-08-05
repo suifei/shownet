@@ -2406,6 +2406,39 @@ kbd {
   vertical-align: middle;
 }
 
+.status-code.status-proxy {
+  color: var(--warning-ink);
+  font-weight: 700;
+}
+
+.origin-4xx-banner span {
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.overview-origin-4xx {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  color: var(--warning-ink);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+}
+
+.overview-origin-4xx h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.overview-origin-4xx p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .status-code {
   display: inline-flex;
   align-items: center;

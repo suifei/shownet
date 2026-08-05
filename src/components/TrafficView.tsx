@@ -64,6 +64,7 @@ import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
 import { nextRequestListWindowOffset, REQUEST_LIST_WINDOW_SIZE, shouldChangeRequestListWindow } from "../requestList";
 import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
 import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
+import { classifyTrafficStatus, looksLikeProxyErrorBody } from "../trafficStatus";
 import { filterAndOrderSseEvents, isSseTerminal, prettySseData, sseEventLabel, type SseOrder } from "../sseInspector";
 import type { CaptureRuleRun, CryptoCodeSnippet, FilterExpression, RequestAnnotation, RequestAnnotationInput, RequestAnnotationSummary, RequestFacets, RequestField, RequestListItem, RequestRecord, RequestSort, RiskLevel, SavedRequestView, SourceType, SseEvent, WebSocketFrameEvent } from "../types";
 import { useDismissibleLayer, useEscapeDismiss } from "../useDismissibleLayer";
@@ -747,7 +748,23 @@ function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
   if (column === "state") return <span className={`request-state request-state--${request.state}`}>{request.state === "tunnel" && <LockKeyhole size={10} />}{request.state === "pending" ? "进行中" : request.state === "streaming" ? "流式" : request.state === "complete" ? "完成" : request.state === "tunnel" ? "未解密" : "失败"}</span>;
   if (column === "method") return <span className={`method method-${request.method.toLowerCase()}`}>{request.method}</span>;
   if (column === "url") return <span className="grid-url"><strong>{request.host}</strong><span>{request.path}{request.query ? `?${request.query}` : ""}</span>{request.hasHook && <Braces size={11} />}</span>;
-  if (column === "status") return <span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.status ?? (request.state === "pending" ? "…" : "失败")}</span>;
+  if (column === "status") {
+    const presentation = classifyTrafficStatus(request.status, {
+      // List rows lack body; 502 still labeled as proxy so users open detail for the full string.
+      responseBody: request.status === 502 || request.status === 504 ? null : undefined,
+    });
+    if (request.status == null && request.state === "pending") {
+      return <span className="status-code status-0">…</span>;
+    }
+    if (request.status == null) {
+      return <span className="status-code status-0">失败</span>;
+    }
+    return (
+      <span className={`status-code status-${presentation.cssClass}`} title={presentation.title}>
+        {presentation.label}
+      </span>
+    );
+  }
   if (column === "source") { const SourceIcon = sourceIcons[request.source]; return <span className="source-cell"><SourceIcon size={13} />{sourceLabels[request.source]}</span>; }
   if (column === "sizeBytes") return formatListBytes(request.sizeBytes);
   if (column === "durationMs") return <span className={(request.durationMs ?? 0) > 1_000 ? "is-slow" : ""}>{request.durationMs == null ? "--" : `${request.durationMs} ms`}</span>;
@@ -994,7 +1011,17 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
         </div>
       </div>
       <div className="request-meta-line">
-        <span className={`status-code status-${Math.floor(request.status / 100)}`}>{request.status}</span>
+        {(() => {
+          const presentation = classifyTrafficStatus(request.status, {
+            responseBody: request.responseBody,
+            server: headerValue(request.responseHeaders, "server"),
+          });
+          return (
+            <span className={`status-code status-${presentation.cssClass}`} title={presentation.title}>
+              {presentation.label}
+            </span>
+          );
+        })()}
         <span>{request.protocol}</span><span>{request.tls}</span><span>{request.size}</span><span>{request.duration} ms</span>
       </div>
       {request.risk !== "none" && (
@@ -1003,12 +1030,34 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
           <span>{request.risk === "critical" ? "发现敏感凭据或签名参数" : request.risk === "warning" ? "该请求需要关注" : "AI 已标记为协议关键请求"}</span>
         </div>
       )}
-      {request.status === 502 && request.responseBody?.trim() && (
-        <div className="risk-banner risk-banner--warning proxy-error-banner" role="alert">
-          <CircleAlert size={15} />
-          <span><strong>代理错误（502）</strong>{request.responseBody.trim()}</span>
-        </div>
-      )}
+      {(() => {
+        const presentation = classifyTrafficStatus(request.status, {
+          responseBody: request.responseBody,
+          server: headerValue(request.responseHeaders, "server"),
+        });
+        if (presentation.kind === "proxy" && request.responseBody?.trim()) {
+          return (
+            <div className="risk-banner risk-banner--warning proxy-error-banner" role="alert">
+              <CircleAlert size={15} />
+              <span><strong>代理错误（{request.status}）</strong>{request.responseBody.trim()}</span>
+            </div>
+          );
+        }
+        if (presentation.kind === "origin4xx") {
+          const server = headerValue(request.responseHeaders, "server");
+          return (
+            <div className="risk-banner risk-banner--warning origin-4xx-banner" role="status">
+              <CircleAlert size={15} />
+              <span>
+                <strong>源站 {request.status}</strong>
+                {server ? ` · Server: ${server}` : ""}
+                {" — 请求已到达源站（非代理连接超时）。静态 CDN 可试「设置 → HTTPS 解密 → 推荐静态 CDN 绕行」。"}
+              </span>
+            </div>
+          );
+        }
+        return null;
+      })()}
       <div className="detail-tabs">
         {tabs.map((item) => (
           <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}>
@@ -1067,7 +1116,16 @@ function RequestOverview({ request }: { request: RequestRecord }) {
   const server = headerValue(request.responseHeaders, "server") ?? "未提供";
   const contentType = headerValue(request.responseHeaders, "content-type") ?? "未提供";
   const url = `${request.tls === "明文" ? "http" : "https"}://${request.host}${request.path}${request.query ? `?${request.query}` : ""}`;
-  const proxyError = request.status === 502 && request.responseBody?.trim() ? request.responseBody.trim() : "";
+  const statusPresentation = classifyTrafficStatus(request.status, {
+    responseBody: request.responseBody,
+    server: headerValue(request.responseHeaders, "server"),
+  });
+  const proxyError =
+    statusPresentation.kind === "proxy" && request.responseBody?.trim()
+      ? request.responseBody.trim()
+      : looksLikeProxyErrorBody(request.responseBody)
+        ? request.responseBody!.trim()
+        : "";
   return <div className="request-overview">
     {proxyError && (
       <section className="overview-proxy-error" role="alert">
@@ -1075,9 +1133,15 @@ function RequestOverview({ request }: { request: RequestRecord }) {
         <pre>{proxyError}</pre>
       </section>
     )}
+    {statusPresentation.kind === "origin4xx" && (
+      <section className="overview-origin-4xx" role="status">
+        <h3>源站 {request.status}{server !== "未提供" ? ` · ${server}` : ""}</h3>
+        <p>这是源站返回的 4xx，不是「连接超时」类代理错误。百度静态域若大量 400，请启用设置中的推荐静态 CDN 绕行。</p>
+      </section>
+    )}
     <dl className="overview-grid">
       <div className="is-wide"><dt>完整 URL</dt><dd>{url}</dd></div>
-      <div><dt>状态</dt><dd>{request.status}</dd></div>
+      <div><dt>状态</dt><dd title={statusPresentation.title}>{statusPresentation.label}</dd></div>
       <div><dt>协议</dt><dd>{request.protocol}</dd></div>
       <div><dt>TLS</dt><dd>{request.tls}</dd></div>
       <div><dt>服务器</dt><dd>{server}</dd></div>
