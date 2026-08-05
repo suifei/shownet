@@ -81,6 +81,26 @@ describe("Phase 1 tool impersonate measure", () => {
     assert.equal(mod.mapUtlsHello("chrome149"), "chrome102");
   });
 
+  it("parseProbeAddrLine requires a complete host:port line (not truncated stream)", async () => {
+    const mod = await import(pathToFileURL(measureScript).href);
+    assert.equal(typeof mod.parseProbeAddrLine, "function");
+    // Truncated IPv4 mid-stream (the skeptic failure mode).
+    assert.equal(mod.parseProbeAddrLine("PROBE_ADDR 127.0.0"), null);
+    assert.equal(mod.parseProbeAddrLine("PROBE_ADDR 127.0.0.1"), null);
+    assert.equal(mod.parseProbeAddrLine("PROBE_ADDR 127.0.0.1:"), null);
+    assert.equal(mod.parseProbeAddrLine("PROBE_ADDR 127.0.0.1:12"), null); // no newline yet
+    // Complete line with newline.
+    assert.equal(mod.parseProbeAddrLine("PROBE_ADDR 127.0.0.1:54321\n"), "127.0.0.1:54321");
+    assert.equal(mod.parseProbeAddrLine("noise\nPROBE_ADDR 127.0.0.1:9\r\nmore"), "127.0.0.1:9");
+    // Partial then complete across buffer growth.
+    let buf = "PROBE_ADDR 127.0.0";
+    assert.equal(mod.parseProbeAddrLine(buf), null);
+    buf += ".1:44";
+    assert.equal(mod.parseProbeAddrLine(buf), null);
+    buf += "44\n";
+    assert.equal(mod.parseProbeAddrLine(buf), "127.0.0.1:4444");
+  });
+
   it("writeToolGoldenEntry persists the actual tool identity from the measure result", async () => {
     const mod = await import(pathToFileURL(measureScript).href);
     const cffiId = mod.toolIdentityFromResult({

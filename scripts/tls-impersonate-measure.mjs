@@ -165,6 +165,35 @@ export function toolIdentityFromResult(result) {
 }
 
 /**
+ * Extract PROBE_ADDR only from a **complete** stderr line (terminated by newline).
+ * Rejects truncated stream chunks such as "PROBE_ADDR 127.0.0" before ":port" arrives
+ * (otherwise utls dials without a port and re-measure fails intermittently).
+ *
+ * @param {string} stderrBuf cumulative stderr text from tls-golden-probe wait
+ * @returns {string|null} host:port or null if no complete line yet
+ */
+export function parseProbeAddrLine(stderrBuf) {
+  if (!stderrBuf || typeof stderrBuf !== "string") return null;
+  // Lines that are not yet terminated are incomplete — ignore the last fragment
+  // unless the buffer itself ends with a newline.
+  const endsWithNl = /\r?\n$/.test(stderrBuf);
+  const parts = stderrBuf.split(/\r?\n/);
+  const completeLines = endsWithNl ? parts.filter((l) => l.length > 0) : parts.slice(0, -1);
+  for (const line of completeLines) {
+    // Require host:port with numeric port on a full line (no trailing partial tokens).
+    const m = line.match(/^PROBE_ADDR\s+(\S+:\d{1,5})\s*$/);
+    if (!m) continue;
+    const addr = m[1];
+    // Guard truncated IPv4 like "127.0.0" (no colon) — already rejected by :\d
+    // Guard "127.0.0:" incomplete port — :\d{1,5} requires digits.
+    if (/^.+:\d{1,5}$/.test(addr)) {
+      return addr;
+    }
+  }
+  return null;
+}
+
+/**
  * Drive tool → local probe and return capture result.
  * Exported for unit tests (structural path); live run needs tool + probe binary.
  */
@@ -223,16 +252,22 @@ export async function measureToolClientHello({ preset, waitSeconds = 25 } = {}) 
     stdout += c.toString();
   });
 
-  // Wait for PROBE_ADDR line
+  // Wait for a *complete* PROBE_ADDR host:port line (newline-terminated).
   const addr = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      fn(value);
+    };
     const deadline = setTimeout(() => {
-      reject(new Error("probe did not print PROBE_ADDR in time"));
+      finish(reject, new Error("probe did not print complete PROBE_ADDR host:port line in time"));
     }, 15000);
     const check = () => {
-      const m = stderr.match(/PROBE_ADDR\s+(\S+)/);
-      if (m) {
-        clearTimeout(deadline);
-        resolve(m[1]);
+      const parsed = parseProbeAddrLine(stderr);
+      if (parsed) {
+        finish(resolve, parsed);
         return true;
       }
       return false;
@@ -242,14 +277,22 @@ export async function measureToolClientHello({ preset, waitSeconds = 25 } = {}) 
       check();
     });
     probe.on("error", (e) => {
-      clearTimeout(deadline);
-      reject(e);
+      finish(reject, e);
     });
     probe.on("exit", (code) => {
-      if (!stderr.includes("PROBE_ADDR")) {
-        clearTimeout(deadline);
-        reject(new Error(`probe exited early code=${code} stderr=${stderr.slice(0, 200)}`));
+      if (settled) return;
+      // Final chance: if process flushed a complete line on exit.
+      const parsed = parseProbeAddrLine(stderr.endsWith("\n") ? stderr : `${stderr}\n`);
+      if (parsed) {
+        finish(resolve, parsed);
+        return;
       }
+      finish(
+        reject,
+        new Error(
+          `probe exited early code=${code} without complete PROBE_ADDR host:port (stderr=${stderr.slice(0, 200)})`,
+        ),
+      );
     });
   }).catch((e) => {
     try {
@@ -265,6 +308,19 @@ export async function measureToolClientHello({ preset, waitSeconds = 25 } = {}) 
   }
 
   const hostPort = String(addr);
+  if (!/:\d{1,5}$/.test(hostPort)) {
+    try {
+      probe.kill();
+    } catch {
+      /* ignore */
+    }
+    return {
+      ok: false,
+      skipped: false,
+      reason: `invalid probe address (missing port): ${hostPort}`,
+      tool,
+    };
+  }
   const url = `https://${hostPort}/`;
   const impersonate = mapImpersonateName(preset);
 
