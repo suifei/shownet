@@ -139,9 +139,10 @@ const defaultSystemProxy: SystemProxySettings = {
   bypass: ["localhost", "127.0.0.1", "::1", "*.local"],
 };
 
+/** Matches first-run backend seed (static CDN bypass for browser usability). */
 const defaultTlsInterception: TlsInterceptionSettings = {
-  mode: "intercept_all",
-  bypass: [],
+  mode: "bypass_selected",
+  bypass: [...STATIC_CDN_BYPASS_PRESET],
   showBypassedConnections: true,
 };
 
@@ -1612,7 +1613,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   <button type="button" className={tlsInterception.mode === "bypass_selected" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "bypass_selected"} onClick={() => selectTlsInterceptionMode("bypass_selected")} title="只绕行指定域名"><ListFilter size={14} />绕行指定</button>
                   <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title="不解密任何 HTTPS"><ShieldOff size={14} />全部绕行</button>
                 </div>
-                <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
+                <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。新安装默认已包含常见静态 CDN 绕行。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
                 <div className="tls-static-cdn-preset">
                   <button
                     type="button"

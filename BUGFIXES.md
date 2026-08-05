@@ -14,9 +14,9 @@
 |----|------|
 | **现象** | 内嵌浏览器能开 `www.baidu.com` 主 HTML，但 `pss.bdstatic.com` / `*.bcebos.com` 等图/CSS/JS 源站 **HTTP 400**；搜索等前端逻辑不绑定。 |
 | **根因** | 静态 CDN 对 MITM 出站 rustls 指纹/H2 更严；主站仍 200 造成「半残页面」。 |
-| **修复** | 设置页「HTTPS 解密」增加 **一键推荐静态 CDN 绕行**（`*.bdstatic.com`、`*.bcebos.com`）；写入 `bypass_selected`，命中域名端到端真 TLS，不解密正文。 |
-| **关键文件** | `src/tlsBypassPresets.ts`、`src/components/SettingsView.tsx`、`src-tauri/src/tls_interception.rs` |
-| **验证** | 单测绕行命中；手测：启用预设后静态资源不再大面积 400。 |
+| **修复** | 设置页「HTTPS 解密」增加 **一键推荐静态 CDN 绕行**（`*.bdstatic.com`、`*.bcebos.com`）；写入 `bypass_selected`，命中域名端到端真 TLS，不解密正文。**新安装默认即启用该绕行**（库内无历史 `tls_interception` 时种子化）。 |
+| **关键文件** | `src/tlsBypassPresets.ts`、`src/components/SettingsView.tsx`、`src-tauri/src/tls_interception.rs`、`src-tauri/src/storage.rs` |
+| **验证** | 单测绕行命中 + first-run seed；手测：默认或一键后静态资源不再大面积 400。 |
 
 ---
 
@@ -38,7 +38,7 @@
 |----|------|
 | **现象** | 从「浏览器」切到「流量/设置」再回来 → Chrome 被杀，回到初始态。 |
 | **根因** | `App.tsx` 条件渲染卸载 `BrowserView`；unmount 调用 `stop_proxy_browser`。 |
-| **修复** | **Keep-alive**：浏览器视图始终挂载，非激活用 `hidden`/CSS 隐藏；切 tab **不** `stop`；停止抓包 / 用户点停止 / 真卸载才杀进程。 |
+| **修复** | **Keep-alive**：浏览器视图始终挂载，非激活用 `hidden`/CSS 隐藏；切 tab **不** `stop`；停止抓包 / 用户点停止 / 真卸载才杀进程。**sessionStorage 记忆 last URL**；CDP 断开后返回浏览器页 **重连 WebSocket**（不重新 launch）。 |
 | **关键文件** | `src/App.tsx`、`src/components/BrowserView.tsx`、`src/styles.css` |
 | **验证** | `tests/browser-keepalive.test.ts`；手测切 tab 后 URL/screencast 保持。 |
 
@@ -124,13 +124,14 @@
 
 | 条目 | 结果 |
 |------|------|
-| P0 百度图/脚本（绕行或 HTTP/1.1） | 实现：一键绕行 + 严格 CDN 强制 HTTP/1.1；手测见 Windows 清单 |
-| P1 出口错误可发现 | 实现：探测 / env 导入 / 502 toast+详情 |
-| P2 切 tab 不丢浏览器 | 实现：keep-alive |
-| P3 系统浏览器外开 | 实现：plugin-opener |
-| P4 Happy Eyeballs / IPv4 优先 | 实现 |
-| P5 交互焦点/IME | 实现：点击聚焦 |
-| CI `npm test` / quality | `npm run test:windows` 门禁 |
+| P0 百度图/脚本（绕行或 HTTP/1.1） | **通过**：默认 CDN 绕行 + 一键 + HTTP/1.1 兜底 |
+| P0-C 代理/源站状态可分 | **通过**：`502·代理` vs 源站 4xx |
+| P1 出口错误可发现 | **通过**：探测 / env 导入 / 502 toast+详情 |
+| P2 切 tab 不丢浏览器 | **通过**：keep-alive + last URL + CDP 重连 |
+| P3 系统浏览器外开 | **通过**：plugin-opener |
+| P4 Happy Eyeballs / IPv4 优先 | **通过** |
+| P5 交互焦点/IME | **通过**：点击聚焦 + CDP 错误 busNote |
+| CI `npm test` / quality | **通过**：`npm run test:windows` |
 | 完整 JA3 impersonate | **非目标** |
 
 ---

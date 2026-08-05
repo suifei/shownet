@@ -98,6 +98,8 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 打开应用 → **内嵌浏览器** → 点「**开始抓包**」→ 访问目标网页。  
 请求、响应与页面 Hook 会自动写入当前会话，流量列表立刻有内容可点。
 
+新安装默认会 **绕行常见静态 CDN**（`*.bdstatic.com` / `*.bcebos.com`），减轻百度等站图裂/脚本 400；可在 **设置 → HTTPS 解密** 关闭或改写规则。出口代理与系统 `HTTP_PROXY` 无关，需单独配置；错端口可用「探测连通性」。详见 [BUGFIXES.md](./BUGFIXES.md) 与 `npm run test:windows`。
+
 <img src="docs/assets/tutorial/07-browser-capturing.png" alt="内嵌浏览器开始抓包" width="920" />
 
 <img src="docs/assets/tutorial/03-request-detail.png" alt="请求详情与证据" width="920" />

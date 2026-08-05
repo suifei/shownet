@@ -29,11 +29,12 @@ describe("HTTPS interception settings", () => {
   });
 
   it("offers a one-click static CDN bypass preset for Baidu-style MITM 400s", async () => {
-    const [settings, presets, rust, styles] = await Promise.all([
+    const [settings, presets, rust, styles, storage] = await Promise.all([
       readFile(new URL("../src/components/SettingsView.tsx", import.meta.url), "utf8"),
       readFile(new URL("../src/tlsBypassPresets.ts", import.meta.url), "utf8"),
       readFile(new URL("../src-tauri/src/tls_interception.rs", import.meta.url), "utf8"),
       readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+      readFile(new URL("../src-tauri/src/storage.rs", import.meta.url), "utf8"),
     ]);
 
     assert.match(presets, /\*\.bdstatic\.com/);
@@ -47,7 +48,12 @@ describe("HTTPS interception settings", () => {
     assert.match(settings, /applyStaticCdnBypassPreset/);
     assert.match(settings, /aria-label="推荐：绕过常见静态 CDN"/);
     assert.match(settings, /不解密正文/);
+    assert.match(settings, /bypass_selected/);
+    assert.match(settings, /STATIC_CDN_BYPASS_PRESET/);
     assert.match(styles, /\.tls-static-cdn-preset/);
+    // First-run seeds CDN bypass into SQLite when no prior tls_interception key.
+    assert.match(storage, /first_run_tls_interception_seeds_static_cdn_bypass_preset|apply_static_cdn_bypass_preset/);
+    assert.match(storage, /First-run product default/);
   });
 
   it("uses Codex blue for normal policy state and stacks controls on narrow screens", async () => {

@@ -49,4 +49,14 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.match(browser, /imeInputRef\.current\?\.focus/);
     assert.match(browser, /browser-statusbar__hint/);
   });
+
+  it("persists last URL and can reattach CDP after keep-alive disconnect", async () => {
+    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
+    assert.match(browser, /LAST_URL_STORAGE_KEY|shownet\.browser\.lastUrl/);
+    assert.match(browser, /writeStoredBrowserUrl/);
+    assert.match(browser, /readStoredBrowserUrl/);
+    assert.match(browser, /attachCdpSession/);
+    assert.match(browser, /正在重连 CDP/);
+    assert.match(browser, /CDP 已断开/);
+  });
 });

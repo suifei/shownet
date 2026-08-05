@@ -54,6 +54,28 @@ interface BrowserViewProps {
 const previewHookEvents: BrowserHookEvent[] = [];
 const CDP_BINDING = "__SHOWNET_CDP_BINDING__";
 const LAB_BINDING = "__SHOWNET_LAB_BINDING__";
+/** sessionStorage key for last navigated URL (P2 optional keep-alive restore). */
+const LAST_URL_STORAGE_KEY = "shownet.browser.lastUrl";
+
+function readStoredBrowserUrl(): string | null {
+  try {
+    const value = sessionStorage.getItem(LAST_URL_STORAGE_KEY)?.trim() ?? "";
+    if (/^https?:\/\//i.test(value) && !/^chrome/i.test(value)) return value;
+  } catch {
+    /* private mode / SSR */
+  }
+  return null;
+}
+
+function writeStoredBrowserUrl(url: string) {
+  try {
+    if (/^https?:\/\//i.test(url) && !/^chrome/i.test(url)) {
+      sessionStorage.setItem(LAST_URL_STORAGE_KEY, url);
+    }
+  } catch {
+    /* ignore */
+  }
+}
 const REMOTE_SELECTION_EXPRESSION = `(() => {
   const active = document.activeElement;
   if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
@@ -84,8 +106,8 @@ type LabStatusPayload = { phase?: string; status?: number; endpoint?: string; me
 type BrowserFileDropState = { phase: "ready" | "delivered"; count: number } | null;
 
 export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }: BrowserViewProps) {
-  const [address, setAddress] = useState("https://example.com");
-  const [currentUrl, setCurrentUrl] = useState(address);
+  const [address, setAddress] = useState(() => readStoredBrowserUrl() ?? "https://example.com");
+  const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl() ?? "https://example.com");
   const [externalPage, setExternalPage] = useState<string | null>(null);
   const [hookPanel, setHookPanel] = useState(true);
   const [hookFilter, setHookFilter] = useState("all");
@@ -227,6 +249,36 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
       observer.disconnect();
     };
   }, [active, proxyBrowser?.running]);
+
+  // Keep-alive: if Chrome is still running but CDP socket died, reattach when the tab is shown again.
+  const cdpReattachInFlight = useRef(false);
+  useEffect(() => {
+    if (!active || !desktop || !capturing || browserConnecting) return;
+    if (cdpSendRef.current || cdpReattachInFlight.current) return;
+    let cancelled = false;
+    cdpReattachInFlight.current = true;
+    void (async () => {
+      try {
+        const status = await getProxyBrowserStatus().catch(() => null);
+        if (cancelled || !status?.running || !status.webSocketDebuggerUrl) return;
+        if (cdpSendRef.current) return;
+        setProxyBrowser(status);
+        setBusNote("正在重连 CDP…");
+        await attachCdpSession(status, undefined, { navigate: false });
+        if (!cancelled) setBusNote("CDP 已重连");
+      } catch (error) {
+        if (!cancelled) {
+          setBrowserError(String(error));
+          setBusNote("CDP 重连失败");
+        }
+      } finally {
+        cdpReattachInFlight.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active, capturing, desktop, browserConnecting, proxyBrowser?.running]);
 
   useEffect(() => {
     const receiveHook = (message: MessageEvent) => {
@@ -406,40 +458,29 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     }
   };
 
-  async function launchProxyChrome(destination?: string) {
-    if (!desktop || browserConnecting) return;
-    if (proxyBrowser?.running) {
-      cdpSendRef.current?.("Page.stopScreencast");
-      cdpSocketRef.current?.close();
-      cdpSocketRef.current = null;
-      cdpSendRef.current = null;
-      cdpPendingRef.current.clear();
-      await invoke("stop_proxy_browser");
-      setProxyBrowser(null);
-      screencastFrameRef.current = null;
-      setScreencastFrame(null);
-      setBrowserError("");
-      return;
-    }
-    setBrowserConnecting(true);
-    setBrowserError("");
-    try {
-      const [status, hookRuntime] = await Promise.all([
-        invoke<ProxyBrowserStatus>("launch_proxy_browser", { sessionId }),
-        invoke<string>("get_browser_hook_script"),
-      ]);
-      // Confirm bus sees the same running handle.
-      const busStatus = await getProxyBrowserStatus().catch(() => null);
-      setProxyBrowser(busStatus?.running ? busStatus : status);
-      setBusNote(busStatus?.running ? "Browser 总线已就绪" : "Browser 已启动");
+  async function attachCdpSession(
+    status: ProxyBrowserStatus,
+    destination?: string,
+    options?: { navigate?: boolean },
+  ) {
+    const navigate = options?.navigate !== false;
+    const hookRuntime = await invoke<string>("get_browser_hook_script");
+    await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(status.webSocketDebuggerUrl);
       cdpSocketRef.current = socket;
+      let opened = false;
       socket.addEventListener("open", () => {
+        opened = true;
         const bridgeSource = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });\n${hookRuntime}`;
         const send: CdpSend = (method, params = {}, onResult) => {
           const id = ++cdpMessageId.current;
           if (onResult) cdpPendingRef.current.set(id, onResult);
-          socket.send(JSON.stringify({ id, method, params }));
+          try {
+            socket.send(JSON.stringify({ id, method, params }));
+          } catch (error) {
+            setBrowserError(`CDP 发送失败：${error instanceof Error ? error.message : String(error)}`);
+            setBusNote("CDP 发送失败");
+          }
           return id;
         };
         cdpSendRef.current = send;
@@ -464,13 +505,24 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           });
         }
         send("Page.startScreencast", { format: "jpeg", quality: 78, maxWidth: 1800, maxHeight: 1200, everyNthFrame: 1 });
-        const target = destination === "__shownet_lab__" || !destination ? status.labUrl : destination;
-        setAddress(target);
-        setCurrentUrl(target);
-        setBrowserLoading(true);
-        send("Page.navigate", { url: target });
+        if (navigate) {
+          const stored = readStoredBrowserUrl();
+          // Explicit destination wins; lab override; else restore last URL; else lab home.
+          const navigateUrl =
+            destination === "__shownet_lab__"
+              ? status.labUrl
+              : destination
+                ? destination
+                : (stored ?? status.labUrl);
+          setAddress(navigateUrl);
+          setCurrentUrl(navigateUrl);
+          writeStoredBrowserUrl(navigateUrl);
+          setBrowserLoading(true);
+          send("Page.navigate", { url: navigateUrl });
+        }
         setProxyBrowser(status);
         setBrowserConnecting(false);
+        resolve();
       });
       socket.addEventListener("message", (message) => {
         let packet: { id?: number; method?: string; result?: Record<string, unknown>; params?: Record<string, unknown> };
@@ -519,6 +571,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           if (frame && !frame.parentId && typeof frame.url === "string") {
             setAddress(frame.url);
             setCurrentUrl(frame.url);
+            writeStoredBrowserUrl(frame.url);
           }
           return;
         }
@@ -540,25 +593,64 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             if (stored.kind !== "network") return;
             return invoke<BrowserHookEvent[]>("list_browser_hooks", { sessionId, limit: 500 })
               .then(setHookEvents);
-          }).catch((error) => setBrowserError(String(error)));
-        } catch { setBrowserError("CDP Hook 数据格式无效"); }
+          }).catch((error) => {
+            setBrowserError(String(error));
+            setBusNote("Hook 上报失败");
+          });
+        } catch {
+          setBrowserError("CDP Hook 数据格式无效");
+          setBusNote("CDP Hook 数据无效");
+        }
       });
       socket.addEventListener("error", () => {
         setBrowserError("无法连接 Chrome CDP");
+        setBusNote("CDP 连接错误");
         setBrowserConnecting(false);
+        if (!opened) reject(new Error("无法连接 Chrome CDP"));
       });
       socket.addEventListener("close", () => {
         cdpSendRef.current = null;
+        cdpSocketRef.current = null;
         cdpPendingRef.current.clear();
-        setProxyBrowser(null);
+        // Keep proxyBrowser running state so keep-alive can reattach; clear frames only.
         screencastFrameRef.current = null;
         setScreencastFrame(null);
         setBrowserLoading(false);
         setBrowserConnecting(false);
+        setBusNote("CDP 已断开");
       });
+    });
+  }
+
+  async function launchProxyChrome(destination?: string) {
+    if (!desktop || browserConnecting) return;
+    if (proxyBrowser?.running) {
+      cdpSendRef.current?.("Page.stopScreencast");
+      cdpSocketRef.current?.close();
+      cdpSocketRef.current = null;
+      cdpSendRef.current = null;
+      cdpPendingRef.current.clear();
+      await invoke("stop_proxy_browser");
+      setProxyBrowser(null);
+      screencastFrameRef.current = null;
+      setScreencastFrame(null);
+      setBrowserError("");
+      setBusNote("已停止内嵌浏览器");
+      return;
+    }
+    setBrowserConnecting(true);
+    setBrowserError("");
+    try {
+      const status = await invoke<ProxyBrowserStatus>("launch_proxy_browser", { sessionId });
+      const busStatus = await getProxyBrowserStatus().catch(() => null);
+      const resolved = busStatus?.running ? busStatus : status;
+      setProxyBrowser(resolved);
+      setBusNote(busStatus?.running ? "Browser 总线已就绪" : "Browser 已启动");
+      await attachCdpSession(resolved, destination, { navigate: true });
     } catch (error) {
       if (destination === "__shownet_lab__") analyzeAfterLab.current = false;
       setBrowserError(String(error));
+      setBusNote("浏览器启动失败");
       setBrowserConnecting(false);
     }
   }

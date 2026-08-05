@@ -35,7 +35,9 @@ use crate::models::{
     UpstreamProxySettingsInput,
 };
 use crate::system_proxy::SystemProxySnapshot;
-use crate::tls_interception::{normalize_tls_interception_settings, TlsInterceptionSettings};
+use crate::tls_interception::{
+    apply_static_cdn_bypass_preset, normalize_tls_interception_settings, TlsInterceptionSettings,
+};
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use cookie_store::CookieStore;
 use regex::Regex;
@@ -221,11 +223,28 @@ impl Storage {
         apply_migrations(&connection)?;
         let data_storage_settings =
             read_json_setting(&connection, DATA_STORAGE_KEY)?.unwrap_or_default();
-        let tls_interception_settings =
-            read_json_setting::<TlsInterceptionSettings>(&connection, TLS_INTERCEPTION_KEY)?
-                .map(normalize_tls_interception_settings)
-                .transpose()?
-                .unwrap_or_default();
+        let tls_interception_settings = match read_json_setting::<TlsInterceptionSettings>(
+            &connection,
+            TLS_INTERCEPTION_KEY,
+        )? {
+            Some(settings) => normalize_tls_interception_settings(settings)?,
+            // First-run product default: bypass common static CDNs so embedded browser
+            // pages (e.g. Baidu) load images/JS without rustls MITM 400s. Users can still
+            // restore "解密全部" in Settings. Existing DBs with a stored key are unchanged.
+            None => {
+                let seeded = apply_static_cdn_bypass_preset(&TlsInterceptionSettings::default())?;
+                let value =
+                    serde_json::to_string(&seeded).map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO app_settings(key, value_json, updated_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO NOTHING",
+                        params![TLS_INTERCEPTION_KEY, value, now_ms()],
+                    )
+                    .map_err(|error| error.to_string())?;
+                seeded
+            }
+        };
         Ok(Self {
             connection: Mutex::new(connection),
             database_path,
@@ -9941,13 +9960,21 @@ mod tests {
     }
 
     #[test]
+    fn first_run_tls_interception_seeds_static_cdn_bypass_preset() {
+        let storage = storage();
+        let settings = storage.get_tls_interception_settings().unwrap();
+        assert_eq!(settings.mode, TlsInterceptionMode::BypassSelected);
+        assert!(settings.bypass.iter().any(|r| r == "*.bdstatic.com"));
+        assert!(settings.bypass.iter().any(|r| r == "*.bcebos.com"));
+        // Main sites remain decrypted.
+        assert!(!settings.decision("www.baidu.com", None).bypass);
+        assert!(settings.decision("pss.bdstatic.com", None).bypass);
+    }
+
+    #[test]
     fn persists_normalized_tls_interception_settings_in_the_runtime_cache() {
         let storage = storage();
-        assert_eq!(
-            storage.get_tls_interception_settings().unwrap().mode,
-            TlsInterceptionMode::InterceptAll
-        );
-
+        // First-run seed may already be BypassSelected; overwrite with a custom policy.
         let saved = storage
             .save_tls_interception_settings(TlsInterceptionSettings {
                 mode: TlsInterceptionMode::BypassSelected,

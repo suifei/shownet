@@ -99,8 +99,7 @@ fn show_bypassed_connections_by_default() -> bool {
 
 /// Merge the static CDN preset into settings, switching to `bypass_selected` when needed.
 /// Does not change `bypass_all` (already tunnels every host). Dedupes against existing rules.
-/// Renderer applies the same merge client-side; this helper is the authoritative matching contract.
-#[allow(dead_code)]
+/// Used for first-run storage seed and settings one-click apply (UI mirrors list in TS).
 pub fn apply_static_cdn_bypass_preset(
     settings: &TlsInterceptionSettings,
 ) -> Result<TlsInterceptionSettings, String> {
