@@ -17,3 +17,8 @@ docs/**/*.md
 docs/scorecard-aws-waf-fixture.json
 docs/scorecard-session-ee2a709d.json
 .env
+
+# Phase1 local tool binary (rebuild via go build)
+tools/utls-chrome-dial/utls-chrome-dial.exe
+tools/utls-chrome-dial/utls-chrome-dial
+

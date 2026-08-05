@@ -317,19 +317,39 @@ mod tests {
         );
     }
 
-    // The whole point of the store: nothing is captured yet, so nothing may claim alignment.
+    /// Pending entries stay at recipe; tool/browser captures may authorise match rungs
+    /// but never exceed their capture-kind ceiling.
     #[test]
-    fn nothing_is_aligned_before_capture() {
+    fn pending_entries_stay_at_recipe_and_captures_respect_ceiling() {
         for entry in entries() {
-            assert_eq!(
-                entry.authorised_level(),
-                AlignmentLevel::Recipe,
-                "{} is still pending capture and must stay at recipe",
-                entry.preset_id
-            );
-            assert!(!entry.is_usable());
+            match entry.status {
+                GoldenStatus::PendingCapture => {
+                    assert_eq!(
+                        entry.authorised_level(),
+                        AlignmentLevel::Recipe,
+                        "{} is still pending capture and must stay at recipe",
+                        entry.preset_id
+                    );
+                    assert!(!entry.is_usable());
+                }
+                GoldenStatus::Captured => {
+                    assert!(entry.is_usable(), "{} captured must be usable", entry.preset_id);
+                    let level = entry.authorised_level();
+                    assert!(
+                        level.is_matched(),
+                        "{} captured should authorise a matched level",
+                        entry.preset_id
+                    );
+                    // Tool captures must never authorise browser-matched.
+                    if matches!(entry.source.kind, CaptureKind::ToolCapture) {
+                        assert_eq!(level, AlignmentLevel::ToolMatched);
+                    }
+                }
+                GoldenStatus::Superseded => {
+                    assert_eq!(entry.authorised_level(), AlignmentLevel::Recipe);
+                }
+            }
         }
-        assert_eq!(alignment_for("chrome150"), AlignmentLevel::Recipe);
     }
 
     #[test]
@@ -393,12 +413,25 @@ mod tests {
     }
 
     #[test]
-    fn status_json_reports_recipe_and_pending() {
+    fn status_json_reports_alignment_for_current_platform_golden() {
         let status = status_json("chrome150");
-        assert_eq!(status["alignmentLevel"], "recipe");
-        assert_eq!(status["goldenStatus"], "pending-capture");
-        assert_eq!(status["goldenSource"], "pending");
-        assert!(status["goldenCapturedAt"].is_null());
+        let platform = current_platform();
+        let entry = golden_for("chrome150", platform);
+        match entry.map(|e| e.status) {
+            Some(GoldenStatus::PendingCapture) | None => {
+                assert_eq!(status["alignmentLevel"], "recipe");
+                assert_eq!(status["goldenStatus"], "pending-capture");
+                assert_eq!(status["goldenSource"], "pending");
+            }
+            Some(GoldenStatus::Captured) => {
+                assert!(status["alignmentLevel"] == "tool-matched" || status["alignmentLevel"] == "browser-matched");
+                assert_eq!(status["goldenStatus"], "captured");
+                assert!(status["goldenCapturedAt"].as_str().is_some());
+            }
+            Some(GoldenStatus::Superseded) => {
+                assert_eq!(status["alignmentLevel"], "recipe");
+            }
+        }
     }
 
     #[test]

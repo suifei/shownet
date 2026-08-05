@@ -524,6 +524,12 @@ pub fn status_json() -> serde_json::Value {
         })
         .flatten();
     let golden = crate::tls_golden::status_json(&preset_id);
+    // Phase 1: product MITM still uses rustls unless a connector is linked.
+    // ja3Parity requires BOTH a real stack on the wire AND a golden match.
+    // A tool-matched golden alone (utls / curl_cffi capture) does not flip parity
+    // while engine remains rustls.
+    let alignment = crate::tls_golden::alignment_for(&preset_id);
+    let ja3_parity = real_impersonate_stack_available() && alignment.is_matched();
     serde_json::json!({
         "profile": profile.as_str(),
         "presetId": preset_id,
@@ -535,7 +541,7 @@ pub fn status_json() -> serde_json::Value {
         "browserMajorVersion": preset.map(|p| p.major_version).unwrap_or(0),
         "engine": engine.as_str(),
         "autoFromInbound": auto_from_inbound(),
-        "ja3Parity": false,
+        "ja3Parity": ja3_parity,
         "supportsFullBrowserJa3": engine.supports_full_browser_ja3(),
         "realImpersonateStackAvailable": real_impersonate_stack_available(),
         "impersonateRequested": crate::tls_impersonate::impersonate_requested(),
@@ -551,6 +557,10 @@ pub fn status_json() -> serde_json::Value {
         "goldenStatus": golden["goldenStatus"],
         "goldenSource": golden["goldenSource"],
         "goldenCapturedAt": golden["goldenCapturedAt"],
+        "toolMatchedGolden": matches!(
+            golden["goldenStatus"].as_str(),
+            Some("captured")
+        ) && matches!(golden["goldenSource"].as_str(), Some("tool-capture")),
         "h2Fingerprint": h2.map(|r| r.fingerprint()),
         "h2Settings": h2.map(|r| {
             r.settings_pairs()
@@ -719,27 +729,40 @@ mod tests {
     }
 
     /// The alignment ladder must not become a second, softer way to claim parity.
-    /// With nothing captured, every preset reports `recipe` and parity stays false.
+    /// Pending presets stay at recipe; captured tool goldens may report tool-matched
+    /// but ja3Parity stays false until a real MITM impersonate stack is linked.
     #[test]
-    fn alignment_level_stays_recipe_until_a_golden_is_captured() {
+    fn alignment_and_parity_honesty_with_or_without_captured_golden() {
         let _guard = preset_lock();
         for preset in ["chrome150", "chrome149", "firefox136", "safari-ios18"] {
             set_active_preset(preset).unwrap();
             let status = status_json();
-            assert_eq!(
-                status["alignmentLevel"], "recipe",
-                "{preset} has no captured golden, so it may only claim recipe"
-            );
+            let platform = crate::tls_golden::current_platform();
+            let entry = crate::tls_golden::golden_for(preset, platform);
+            match entry.map(|e| e.status) {
+                Some(crate::tls_golden::GoldenStatus::Captured) => {
+                    assert!(
+                        status["alignmentLevel"] == "tool-matched"
+                            || status["alignmentLevel"] == "browser-matched",
+                        "{preset}: captured golden should raise alignment"
+                    );
+                    assert!(status["goldenCapturedAt"].as_str().is_some());
+                }
+                _ => {
+                    assert_eq!(
+                        status["alignmentLevel"], "recipe",
+                        "{preset} has no captured golden on {platform}, so it may only claim recipe"
+                    );
+                    assert!(
+                        status["goldenCapturedAt"].is_null(),
+                        "{preset} must not report a capture date before being captured"
+                    );
+                }
+            }
+            // MITM stack is still rustls-only in this build.
             assert_eq!(status["ja3Parity"], false);
             assert_eq!(status["supportsFullBrowserJa3"], false);
-            assert_eq!(
-                status["goldenPlatform"],
-                crate::tls_golden::current_platform()
-            );
-            assert!(
-                status["goldenCapturedAt"].is_null(),
-                "{preset} must not report a capture date before being captured"
-            );
+            assert_eq!(status["goldenPlatform"], platform);
         }
         set_active_preset("chrome150").unwrap();
     }

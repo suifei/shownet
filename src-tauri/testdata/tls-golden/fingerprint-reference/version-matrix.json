@@ -13,7 +13,7 @@
     { "presetId": "chrome144", "platform": "desktop-windows", "major": 144, "status": "pending-capture", "alignment": "recipe" },
     { "presetId": "chrome146", "platform": "desktop-windows", "major": 146, "status": "pending-capture", "alignment": "recipe" },
     { "presetId": "chrome149", "platform": "desktop-windows", "major": 149, "status": "pending-capture", "alignment": "recipe" },
-    { "presetId": "chrome150", "platform": "desktop-windows", "major": 150, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome150", "platform": "desktop-windows", "major": 150, "status": "captured", "alignment": "tool-matched" },
     { "presetId": "chrome150", "platform": "desktop-macos", "major": 150, "status": "pending-capture", "alignment": "recipe" },
     { "presetId": "chrome150", "platform": "desktop-linux", "major": 150, "status": "pending-capture", "alignment": "recipe" },
     { "presetId": "chrome-android131", "platform": "android", "major": 131, "status": "pending-capture", "alignment": "recipe" },

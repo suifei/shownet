@@ -145,9 +145,11 @@
 | 低成本 capture 脚本（缺工具诚实 skip） | **已落地** `scripts/tls-golden-capture.mjs` / `npm run tls-golden:capture` |
 | 本地 ClientHello 探针 CLI | **已落地** `tls-golden-probe`（`measure-rustls` / `wait`） |
 | 公共 JA3/JA4 检测站 inventory + 验证 | **已落地** `detector-sites.json` + `npm run tls-detector:validate` |
-| 诚实门禁 `npm run test:tls-golden` | **通过**；`ja3Parity` 仍为 false |
-| 检测站 100%「浏览器通过」 | **不宣称**（rustls/node 可达 ≠ Chrome parity） |
-| 真栈 tool/browser-matched 升格 | **未做**（需 curl-impersonate 类引擎；探针已就绪） |
+| Phase1 tool 测金标（uTLS Chrome） | **已落地** `tools/utls-chrome-dial` + `chrome150--desktop-windows` tool-matched |
+| 检测站 tool 客户端矩阵 | **已落地** `npm run tls-detector:tool`（claimBrowserHundredPercent=false） |
+| 诚实门禁 `npm run test:tls-golden` | **通过**；`ja3Parity` 仍为 false（MITM 未接真栈） |
+| 检测站 100%「浏览器通过」 | **不宣称**（tool-matched ≠ browser-matched） |
+| MITM 默认 curl-impersonate 出站 | **未做**（默认 rustls；真连接器 Phase 1 后续） |
 
 ---
 

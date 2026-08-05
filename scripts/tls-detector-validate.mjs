@@ -172,10 +172,30 @@ function detectCurlCffi() {
       encoding: "utf8",
     });
     if (r.status === 0) {
-      return { python: py, version: (r.stdout || "").trim() };
+      return { kind: "curl_cffi", python: py, version: (r.stdout || "").trim() };
     }
   }
   return null;
+}
+
+function detectUtlsDial() {
+  const candidates = [
+    join(root, "tools/utls-chrome-dial/utls-chrome-dial.exe"),
+    join(root, "tools/utls-chrome-dial/utls-chrome-dial"),
+  ];
+  const binary = candidates.find((p) => existsSync(p));
+  return binary ? { kind: "utls-chrome-dial", binary } : null;
+}
+
+function detectToolClient() {
+  return detectCurlCffi() || detectUtlsDial();
+}
+
+function mapUtlsHello(preset) {
+  if (preset === "chrome120") return "chrome120";
+  if (preset === "chrome131") return "chrome131";
+  if (/^chrome\d+$/.test(preset)) return preset;
+  return "chrome";
 }
 
 async function fetchWithNode(url, timeoutMs) {
@@ -199,11 +219,11 @@ async function fetchWithNode(url, timeoutMs) {
   }
 }
 
-function fetchWithCurlCffi(url, preset, timeoutMs) {
-  const tool = detectCurlCffi();
-  if (!tool) return { error: "curl_cffi not installed", client: "tool" };
-  const impersonate = preset.startsWith("chrome") ? preset : "chrome";
-  const code = `
+function fetchWithTool(url, preset, timeoutMs) {
+  const cffi = detectCurlCffi();
+  if (cffi) {
+    const impersonate = preset.startsWith("chrome") ? preset : "chrome";
+    const code = `
 import json, sys
 from curl_cffi import requests
 try:
@@ -216,17 +236,48 @@ try:
 except Exception as e:
     print(json.dumps({"error": str(e)}))
 `;
-  const r = spawnSync(tool.python, ["-c", code], { encoding: "utf8", timeout: timeoutMs + 5000 });
-  const line = (r.stdout || "").trim().split(/\r?\n/).filter(Boolean).pop();
-  if (!line) {
-    return { error: `curl_cffi empty stdout: ${(r.stderr || "").slice(0, 200)}`, client: "tool" };
+    const r = spawnSync(cffi.python, ["-c", code], { encoding: "utf8", timeout: timeoutMs + 5000 });
+    const line = (r.stdout || "").trim().split(/\r?\n/).filter(Boolean).pop();
+    if (!line) {
+      return { error: `curl_cffi empty stdout: ${(r.stderr || "").slice(0, 200)}`, client: "tool" };
+    }
+    try {
+      const parsed = JSON.parse(line);
+      return { ...parsed, client: "tool", toolKind: "curl_cffi", toolVersion: cffi.version };
+    } catch {
+      return { error: `curl_cffi unparseable: ${line.slice(0, 200)}`, client: "tool" };
+    }
   }
-  try {
-    const parsed = JSON.parse(line);
-    return { ...parsed, client: "tool", toolVersion: tool.version };
-  } catch {
-    return { error: `curl_cffi unparseable: ${line.slice(0, 200)}`, client: "tool" };
+
+  const utls = detectUtlsDial();
+  if (utls) {
+    const r = spawnSync(
+      utls.binary,
+      ["-url", url, "-hello", mapUtlsHello(preset), "-timeout", `${Math.max(5, Math.floor(timeoutMs / 1000))}s`],
+      { encoding: "utf8", timeout: timeoutMs + 5000 },
+    );
+    if (r.status !== 0) {
+      return {
+        error: `utls-chrome-dial failed: ${(r.stderr || r.stdout || "").slice(0, 240)}`,
+        client: "tool",
+        toolKind: "utls-chrome-dial",
+      };
+    }
+    const text = (r.stdout || "").trim();
+    try {
+      const body = JSON.parse(text);
+      return { httpStatus: 200, body, client: "tool", toolKind: "utls-chrome-dial" };
+    } catch {
+      return {
+        error: `utls non-JSON body: ${text.slice(0, 120)}`,
+        client: "tool",
+        httpStatus: 200,
+        rawText: text.slice(0, 500),
+      };
+    }
   }
+
+  return { error: "tool not installed (curl_cffi / utls-chrome-dial)", client: "tool" };
 }
 
 function measureLocalRustls(preset) {
@@ -314,22 +365,23 @@ export function buildReport({ inventory, rows, client, preset, localRustls }) {
 async function runLive(args, inventory) {
   let client = args.client;
   if (client === "auto") {
-    client = detectCurlCffi() ? "tool" : "node";
+    client = detectToolClient() ? "tool" : "node";
   }
-  if (client === "tool" && !detectCurlCffi()) {
+  if (client === "tool" && !detectToolClient()) {
     console.log("tool not installed / falling back to node client");
     client = "node";
   }
 
   const alignmentCeiling = client === "tool" ? "tool-matched" : "recipe";
   const rows = [];
+  const toolJa3s = [];
 
   for (const detector of inventory.detectors) {
     process.stderr.write(`hitting ${detector.id} via ${client}…\n`);
     let hit;
     try {
       if (client === "tool") {
-        hit = fetchWithCurlCffi(detector.url, args.preset, args.timeoutMs);
+        hit = fetchWithTool(detector.url, args.preset, args.timeoutMs);
       } else {
         hit = await fetchWithNode(detector.url, args.timeoutMs);
       }
@@ -389,10 +441,12 @@ async function runLive(args, inventory) {
       httpStatus: hit.httpStatus,
       alignmentCeiling,
     });
+    if (extract.ja3) toolJa3s.push({ id: detector.id, ja3: extract.ja3.toLowerCase() });
     rows.push({
       id: detector.id,
       url: detector.url,
       client: hit.client || client,
+      toolKind: hit.toolKind || null,
       httpStatus: hit.httpStatus,
       status: evalRow.status,
       reason: evalRow.reason,
@@ -407,7 +461,21 @@ async function runLive(args, inventory) {
   }
 
   const localRustls = measureLocalRustls(args.preset);
-  return buildReport({ inventory, rows, client, preset: args.preset, localRustls });
+  const report = buildReport({ inventory, rows, client, preset: args.preset, localRustls });
+  // Cross-site JA3 consistency for tool profile (when ≥2 sites returned digests).
+  if (client === "tool" && toolJa3s.length >= 2) {
+    const unique = [...new Set(toolJa3s.map((x) => x.ja3))];
+    report.toolProfileConsistency = {
+      samples: toolJa3s,
+      uniqueJa3Count: unique.length,
+      consistent: unique.length === 1,
+      note:
+        unique.length === 1
+          ? "all reporting detectors saw the same JA3 for this tool client"
+          : "JA3 differs across detectors (algorithm/GREASE/site variance) — inspect samples",
+    };
+  }
+  return report;
 }
 
 export function runOfflineFixtures(inventory) {
