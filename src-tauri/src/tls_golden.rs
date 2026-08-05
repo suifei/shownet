@@ -244,12 +244,50 @@ pub fn golden_for(preset_id: &str, platform: &str) -> Option<&'static GoldenEntr
         .find(|e| e.preset_id == preset_id && e.platform == platform)
 }
 
-/// Rung a preset may claim on this platform *before* the measurement check.
-/// Always `Recipe` while nothing is captured.
-pub fn alignment_for(preset_id: &str) -> AlignmentLevel {
+/// Ceiling a *captured* golden would authorise **if** outbound ClientHello matched.
+///
+/// This is **not** a product claim that the MITM path is already aligned — use
+/// [`evaluate_measured`] / [`measured_alignment`] for that. Status UIs must not
+/// present this ceiling as “已对齐” while the engine is still rustls and no
+/// wire sample has matched.
+pub fn golden_authorised_ceiling(preset_id: &str) -> AlignmentLevel {
     golden_for(preset_id, current_platform())
         .map(GoldenEntry::authorised_level)
         .unwrap_or_default()
+}
+
+/// Wording for the golden ceiling (existence of a usable capture), never “已对齐”.
+pub fn golden_ceiling_claim(level: AlignmentLevel) -> &'static str {
+    match level {
+        AlignmentLevel::Recipe => "无可用金标（pending-capture 或缺失），出站不可宣称工具/浏览器对齐",
+        AlignmentLevel::ToolMatched => {
+            "已收录 tool-capture 金标，可供实测比对；未匹配前出站仍为 recipe，不宣称已对齐"
+        }
+        AlignmentLevel::BrowserMatched => {
+            "已收录 browser-capture 金标，可供实测比对；未匹配前出站仍为 recipe，不宣称已对齐"
+        }
+    }
+}
+
+/// Product-facing measured alignment when no ClientHello sample is supplied.
+/// Always `Recipe` — a golden on disk alone never authorises tool/browser match.
+pub fn measured_alignment(
+    preset_id: &str,
+    measured_ja3: Option<&str>,
+    measured_ja4: Option<&str>,
+) -> AlignmentLevel {
+    match measured_ja3 {
+        Some(ja3) => evaluate_measured(preset_id, ja3, measured_ja4),
+        None => AlignmentLevel::Recipe,
+    }
+}
+
+/// Back-compat alias: **measured** alignment without a sample (always recipe).
+///
+/// Prefer [`golden_authorised_ceiling`] for the golden's potential rung and
+/// [`evaluate_measured`] when a wire sample exists.
+pub fn alignment_for(preset_id: &str) -> AlignmentLevel {
+    measured_alignment(preset_id, None, None)
 }
 
 /// The gate: a measurement promotes a preset only on an exact match against a
@@ -291,12 +329,22 @@ pub fn evaluate_measured(
 }
 
 /// Status surface for `tls_outbound::status_json` and the Agent tools.
+///
+/// Splits **golden ceiling** (what a capture could authorise) from **measured
+/// alignment** (what has been proven on the wire). Without a live sample,
+/// `alignmentLevel` stays `recipe` even if a tool-matched golden exists.
 pub fn status_json(preset_id: &str) -> serde_json::Value {
     let platform = current_platform();
     let entry = golden_for(preset_id, platform);
+    let ceiling = golden_authorised_ceiling(preset_id);
+    let measured = measured_alignment(preset_id, None, None);
     serde_json::json!({
-        "alignmentLevel": alignment_for(preset_id).as_str(),
-        "alignmentClaim": alignment_for(preset_id).claim(),
+        // Measured product claim (no live sample in this status path → recipe).
+        "alignmentLevel": measured.as_str(),
+        "alignmentClaim": measured.claim(),
+        // Golden file ceiling — informational; must not be shown as “已对齐” alone.
+        "goldenAuthorisedCeiling": ceiling.as_str(),
+        "goldenAuthorisedClaim": golden_ceiling_claim(ceiling),
         "platform": platform,
         "goldenStatus": entry.map(|e| match e.status {
             GoldenStatus::PendingCapture => "pending-capture",
@@ -309,6 +357,7 @@ pub fn status_json(preset_id: &str) -> serde_json::Value {
             CaptureKind::Pending => "pending",
         }),
         "goldenCapturedAt": entry.and_then(|e| e.source.captured_at.clone()),
+        "toolHelloId": entry.and_then(|e| e.stack_version.clone()),
     })
 }
 
@@ -464,23 +513,47 @@ mod tests {
     }
 
     #[test]
-    fn status_json_reports_alignment_for_current_platform_golden() {
+    fn status_json_splits_golden_ceiling_from_measured_alignment() {
         let status = status_json("chrome150");
         let platform = current_platform();
         let entry = golden_for("chrome150", platform);
+        // Without a live ClientHello sample, measured claim stays recipe.
+        assert_eq!(status["alignmentLevel"], "recipe");
+        assert!(
+            status["alignmentClaim"]
+                .as_str()
+                .unwrap_or("")
+                .contains("不代表浏览器级对齐")
+                || status["alignmentClaim"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("rustls"),
+            "measured claim must not say 已对齐: {}",
+            status["alignmentClaim"]
+        );
         match entry.map(|e| e.status) {
             Some(GoldenStatus::PendingCapture) | None => {
-                assert_eq!(status["alignmentLevel"], "recipe");
                 assert_eq!(status["goldenStatus"], "pending-capture");
                 assert_eq!(status["goldenSource"], "pending");
+                assert_eq!(status["goldenAuthorisedCeiling"], "recipe");
             }
             Some(GoldenStatus::Captured) => {
-                assert!(status["alignmentLevel"] == "tool-matched" || status["alignmentLevel"] == "browser-matched");
                 assert_eq!(status["goldenStatus"], "captured");
                 assert!(status["goldenCapturedAt"].as_str().is_some());
+                assert!(
+                    status["goldenAuthorisedCeiling"] == "tool-matched"
+                        || status["goldenAuthorisedCeiling"] == "browser-matched",
+                    "ceiling should reflect the captured golden"
+                );
+                let claim = status["goldenAuthorisedClaim"].as_str().unwrap_or("");
+                assert!(
+                    claim.contains("未匹配前") || claim.contains("可比对"),
+                    "ceiling claim must not assert 已对齐 alone: {claim}"
+                );
+                assert!(!claim.starts_with("已对齐"));
             }
             Some(GoldenStatus::Superseded) => {
-                assert_eq!(status["alignmentLevel"], "recipe");
+                assert_eq!(status["goldenAuthorisedCeiling"], "recipe");
             }
         }
     }

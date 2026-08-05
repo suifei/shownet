@@ -3,14 +3,14 @@
   "platform": "desktop-windows",
   "family": "chrome",
   "major": 150,
-  "stack": "chromium-boringssl",
-  "stackVersion": "utls HelloChrome_102 (pinned, pre-shuffle) via tools/utls-chrome-dial",
+  "stack": "unknown",
+  "stackVersion": "utls chrome102 (pinned pre-shuffle) via tools/utls-chrome-dial",
   "status": "captured",
   "alignment": "tool-matched",
   "source": {
     "kind": "tool-capture",
-    "tool": "utls-chrome-dial (refraction-networking/utls HelloChrome_102)",
-    "environment": "impersonate=chrome150→hello chrome102 pinned; probe=loopback; host=win32",
+    "tool": "utls-chrome-dial @ tools/utls-chrome-dial (HelloChrome_102)",
+    "environment": "tool=utls-chrome-dial; hello=chrome102; preset=chrome150; probe=loopback; host=win32",
     "capturedAt": "2026-08-05"
   },
   "golden": {

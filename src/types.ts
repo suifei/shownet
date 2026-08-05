@@ -766,6 +766,16 @@ export interface OutboundTlsProfileStatus {
   supportsFullBrowserJa3: boolean;
   realImpersonateStackAvailable?: boolean;
   impersonateUnavailableReason?: string;
+  /** Measured alignment (recipe until live ClientHello matches a golden). */
+  alignmentLevel?: string;
+  alignmentClaim?: string;
+  /** Ceiling from a captured golden file — not a wire “已对齐” claim. */
+  goldenAuthorisedCeiling?: string;
+  goldenAuthorisedClaim?: string;
+  goldenStatus?: string | null;
+  goldenSource?: string | null;
+  toolMatchedGolden?: boolean;
+  toolHelloId?: string | null;
   documentedJa3?: string | null;
   h2Fingerprint?: string | null;
   h2Settings?: Array<{ id: number; value: number }> | null;

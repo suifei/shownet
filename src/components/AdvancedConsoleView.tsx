@@ -562,11 +562,28 @@ export function AdvancedConsoleView({
                 </strong>
               </div>
               <div>
+                <span>实测对齐</span>
+                <strong className="is-warn">
+                  <code>{outboundTls?.alignmentLevel ?? "recipe"}</code>
+                </strong>
+              </div>
+              <div>
+                <span>金标上限</span>
+                <strong title={outboundTls?.goldenAuthorisedClaim}>
+                  <code>{outboundTls?.goldenAuthorisedCeiling ?? "recipe"}</code>
+                </strong>
+              </div>
+              <div>
                 <span>supportsFullBrowserJa3</span>
                 <strong className="is-warn">{String(outboundTls?.supportsFullBrowserJa3 ?? false)}</strong>
               </div>
             </div>
-            <p className="hint">{outboundTls?.note ?? honestyBanner()}</p>
+            <p className="hint">
+              {outboundTls?.alignmentClaim ?? outboundTls?.note ?? honestyBanner()}
+              {outboundTls?.goldenAuthorisedClaim
+                ? ` · ${outboundTls.goldenAuthorisedClaim}`
+                : ""}
+            </p>
             <div className="advanced-quick-actions">
               <button type="button" className="secondary-button" onClick={() => setTab("config")}>
                 修改出站预置

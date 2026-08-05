@@ -73,6 +73,54 @@ describe("Phase 1 tool impersonate measure", () => {
     assert.match(pkg.scripts["tls-detector:tool"], /--client tool/);
   });
 
+  it("mapUtlsHello pins goldenable chrome majors to chrome102", async () => {
+    const mod = await import(pathToFileURL(measureScript).href);
+    assert.equal(mod.mapUtlsHello("chrome150"), "chrome102");
+    assert.equal(mod.mapUtlsHello("chrome131"), "chrome102");
+    assert.equal(mod.mapUtlsHello("chrome120"), "chrome102");
+    assert.equal(mod.mapUtlsHello("chrome149"), "chrome102");
+  });
+
+  it("writeToolGoldenEntry persists the actual tool identity from the measure result", async () => {
+    const mod = await import(pathToFileURL(measureScript).href);
+    const cffiId = mod.toolIdentityFromResult({
+      ok: true,
+      presetId: "chrome150",
+      toolKind: "curl_cffi",
+      toolDetail: "curl_cffi 0.7.0 via python",
+      toolVersion: "0.7.0",
+      impersonateProfile: "chrome150",
+      golden: {
+        ja3: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ja3Raw: "raw",
+        ja4: "t13d1516h2_test",
+        ja4Raw: null,
+        clientHelloHex: "1603",
+      },
+    });
+    assert.match(cffiId.tool, /curl_cffi/);
+    assert.doesNotMatch(cffiId.tool, /utls-chrome-dial/);
+    assert.match(cffiId.stackVersion, /curl_cffi/);
+
+    const utlsId = mod.toolIdentityFromResult({
+      ok: true,
+      presetId: "chrome150",
+      toolKind: "utls-chrome-dial",
+      toolDetail: "utls-chrome-dial @ /path/utls-chrome-dial.exe",
+      utlsHello: "chrome102",
+      impersonateProfile: "chrome150",
+      golden: {
+        ja3: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ja3Raw: null,
+        ja4: "t13d1516h2_x",
+        ja4Raw: null,
+        clientHelloHex: "1603",
+      },
+    });
+    assert.match(utlsId.tool, /utls/);
+    assert.match(utlsId.stackVersion, /chrome102|pre-shuffle/i);
+  });
+
   it("re-measure without --write-golden equals stored tool golden digests", async () => {
     const mod = await import(pathToFileURL(measureScript).href);
     const tool = mod.detectImpersonateTool();

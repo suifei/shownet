@@ -190,16 +190,15 @@ func helloID(name string) (utls.ClientHelloID, error) {
 	case "chrome102", "102", "stable", "chrome-stable":
 		return utls.HelloChrome_102, nil
 	case "chrome", "chrome-auto", "chrome_auto":
-		// Auto == 131 with shuffle; keep for experiments, not goldens.
-		return utls.HelloChrome_Auto, nil
-	case "chrome120", "120":
-		return utls.HelloChrome_120, nil
-	case "chrome131", "131":
-		return utls.HelloChrome_131, nil
-	case "chrome133", "133", "chrome150", "150", "chrome149", "149",
-		"chrome144", "144", "chrome146", "146":
-		// Product majors → stable pre-shuffle parrot for tool goldens.
+		// Product default: pin pre-shuffle 102 (not Auto/131 which shuffles).
 		return utls.HelloChrome_102, nil
+	case "chrome120", "120", "chrome131", "131", "chrome133", "133",
+		"chrome150", "150", "chrome149", "149", "chrome144", "144", "chrome146", "146":
+		// All goldenable product majors → stable pre-shuffle parrot.
+		return utls.HelloChrome_102, nil
+	case "chrome131-shuffle", "chrome-auto-shuffle":
+		// Explicit opt-in for experiments only (unstable JA3).
+		return utls.HelloChrome_Auto, nil
 	case "firefox", "firefox_auto":
 		return utls.HelloFirefox_Auto, nil
 	case "ios", "safari_ios":

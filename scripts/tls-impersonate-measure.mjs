@@ -116,13 +116,52 @@ function mapImpersonateName(preset) {
   return "chrome";
 }
 
-function mapUtlsHello(preset) {
-  // Pin pre-shuffle HelloChrome_102 for product Chrome majors so re-measure can
-  // match stored JA3 (post-106 parrots permute extension order every handshake).
-  if (preset === "chrome120") return "chrome120";
-  if (preset === "chrome131") return "chrome131";
-  if (/^chrome\d+$/.test(preset)) return "chrome102";
+/**
+ * Map catalog preset → utls -hello id.
+ * Goldenable Chrome majors use HelloChrome_102 (pre-shuffle) so JA3 re-measures
+ * equal the committed golden. Post-106 parrots shuffle extension order every
+ * handshake and cannot satisfy exact JA3 equality.
+ */
+export function mapUtlsHello(preset) {
+  const id = String(preset || "").toLowerCase();
+  // Explicit aliases if we ever capture fixed non-102 goldens.
+  if (id === "chrome102") return "chrome102";
+  // All product chrome* majors that may be written as tool goldens.
+  if (/^chrome\d+$/.test(id) || id.startsWith("chrome-android")) {
+    return "chrome102";
+  }
   return "chrome102";
+}
+
+/** Build source.tool / stackVersion from the real measure tool result. */
+export function toolIdentityFromResult(result) {
+  const kind = result?.toolKind || result?.tool?.kind || null;
+  const detail = result?.toolDetail || result?.tool || "unknown-tool";
+  const hello = result?.utlsHello || mapUtlsHello(result?.presetId || "chrome150");
+  if (kind === "curl_cffi" || (typeof detail === "string" && detail.includes("curl_cffi"))) {
+    return {
+      tool: typeof detail === "string" ? detail : `curl_cffi ${result?.toolVersion || ""}`.trim(),
+      stackVersion: `curl_cffi impersonate=${result?.impersonateProfile || result?.presetId || "chrome"}`,
+      environment: `tool=curl_cffi; impersonate=${result?.impersonateProfile || ""}; probe=loopback; host=${process.platform}`,
+    };
+  }
+  if (kind === "curl-impersonate-bin" || (typeof detail === "string" && detail.includes("curl_chrome"))) {
+    return {
+      tool: typeof detail === "string" ? detail : "curl-impersonate",
+      stackVersion: `curl-impersonate binary (${result?.impersonateProfile || "chrome"})`,
+      environment: `tool=curl-impersonate-bin; profile=${result?.impersonateProfile || ""}; host=${process.platform}`,
+    };
+  }
+  // Default / utls-chrome-dial
+  const toolLabel =
+    typeof detail === "string" && detail.includes("utls")
+      ? detail
+      : `utls-chrome-dial (refraction-networking/utls ${hello})`;
+  return {
+    tool: toolLabel,
+    stackVersion: `utls ${hello} (pinned pre-shuffle for re-measure) via tools/utls-chrome-dial`,
+    environment: `tool=utls-chrome-dial; hello=${hello}; preset=${result?.presetId || ""}; probe=loopback; host=${process.platform}`,
+  };
 }
 
 /**
@@ -329,7 +368,11 @@ except Exception as e:
     alignmentCeiling: "tool-matched",
     honesty: "tool ClientHello via curl-impersonate-class stack; not browser-matched",
     presetId: preset,
+    toolKind: tool.kind,
+    toolDetail: tool.detail,
     tool: tool.detail,
+    toolVersion: tool.version || null,
+    utlsHello: tool.kind === "utls-chrome-dial" ? mapUtlsHello(preset) : null,
     impersonateProfile: impersonate,
     probeAddr: hostPort,
     connectResult,
@@ -353,16 +396,17 @@ export function writeToolGoldenEntry(result, platform) {
     throw new Error(`missing entry stub: ${file}`);
   }
   const entry = JSON.parse(readFileSync(path, "utf8"));
+  const identity = toolIdentityFromResult(result);
   // Refuse browser-matched
   entry.status = "captured";
   entry.alignment = "tool-matched";
   entry.source = {
     kind: "tool-capture",
-    tool: "utls-chrome-dial (refraction-networking/utls HelloChrome_102)",
-    environment: `impersonate=${result.impersonateProfile}→hello chrome102 pinned; probe=loopback; host=${process.platform}`,
+    tool: identity.tool,
+    environment: identity.environment,
     capturedAt: new Date().toISOString().slice(0, 10),
   };
-  entry.stackVersion = "utls HelloChrome_102 (pinned, pre-shuffle) via tools/utls-chrome-dial";
+  entry.stackVersion = identity.stackVersion;
   entry.golden = {
     ja3: result.golden.ja3,
     ja3Raw: result.golden.ja3Raw,
@@ -370,10 +414,9 @@ export function writeToolGoldenEntry(result, platform) {
     ja4Raw: result.golden.ja4Raw,
     clientHelloHex: result.golden.clientHelloHex,
   };
-  entry.stackVersion = result.tool || null;
   entry.notes =
     (entry.notes || "") +
-    " | Phase1 tool-capture via tls-impersonate-measure.mjs; not browser-matched.";
+    ` | Phase1 tool-capture via tls-impersonate-measure.mjs (${result.toolKind || "tool"}); not browser-matched.`;
   writeFileSync(path, JSON.stringify(entry, null, 2) + "\n", "utf8");
   return { path, entry };
 }

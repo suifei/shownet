@@ -525,11 +525,10 @@ pub fn status_json() -> serde_json::Value {
         .flatten();
     let golden = crate::tls_golden::status_json(&preset_id);
     // Phase 1: product MITM still uses rustls unless a connector is linked.
-    // ja3Parity requires BOTH a real stack on the wire AND a golden match.
-    // A tool-matched golden alone (utls / curl_cffi capture) does not flip parity
-    // while engine remains rustls.
-    let alignment = crate::tls_golden::alignment_for(&preset_id);
-    let ja3_parity = real_impersonate_stack_available() && alignment.is_matched();
+    // ja3Parity requires BOTH a real stack on the wire AND a *measured* golden match.
+    // Status has no live ClientHello sample → measured alignment is recipe → parity false.
+    let measured = crate::tls_golden::measured_alignment(&preset_id, None, None);
+    let ja3_parity = real_impersonate_stack_available() && measured.is_matched();
     serde_json::json!({
         "profile": profile.as_str(),
         "presetId": preset_id,
@@ -547,16 +546,17 @@ pub fn status_json() -> serde_json::Value {
         "impersonateRequested": crate::tls_impersonate::impersonate_requested(),
         "impersonateUnavailableReason": impersonate_unavailable_reason(),
         "documentedJa3": documented_ja3,
-        // Alignment ladder. Reports what has actually been *measured* against a
-        // golden, which is independent of `ja3Parity` — parity additionally
-        // requires a real impersonate stack, so this stays informational until
-        // both a capture and a linked stack exist.
+        // Measured claim (recipe until a live evaluate_measured match).
         "alignmentLevel": golden["alignmentLevel"],
         "alignmentClaim": golden["alignmentClaim"],
+        // Golden file ceiling (existence) — not a wire “已对齐” claim.
+        "goldenAuthorisedCeiling": golden["goldenAuthorisedCeiling"],
+        "goldenAuthorisedClaim": golden["goldenAuthorisedClaim"],
         "goldenPlatform": golden["platform"],
         "goldenStatus": golden["goldenStatus"],
         "goldenSource": golden["goldenSource"],
         "goldenCapturedAt": golden["goldenCapturedAt"],
+        "toolHelloId": golden["toolHelloId"],
         "toolMatchedGolden": matches!(
             golden["goldenStatus"].as_str(),
             Some("captured")
@@ -728,9 +728,9 @@ mod tests {
         }
     }
 
-    /// The alignment ladder must not become a second, softer way to claim parity.
-    /// Pending presets stay at recipe; captured tool goldens may report tool-matched
-    /// but ja3Parity stays false until a real MITM impersonate stack is linked.
+    /// Status must split golden ceiling from measured alignment: a tool golden
+    /// on disk raises goldenAuthorisedCeiling but measured alignmentLevel stays
+    /// recipe (no live sample). ja3Parity stays false without a linked stack.
     #[test]
     fn alignment_and_parity_honesty_with_or_without_captured_golden() {
         let _guard = preset_lock();
@@ -739,27 +739,38 @@ mod tests {
             let status = status_json();
             let platform = crate::tls_golden::current_platform();
             let entry = crate::tls_golden::golden_for(preset, platform);
+            // Measured claim is always recipe on the status path (no wire sample).
+            assert_eq!(
+                status["alignmentLevel"], "recipe",
+                "{preset}: measured alignment must stay recipe without a live match"
+            );
+            let claim = status["alignmentClaim"].as_str().unwrap_or("");
+            assert!(
+                !claim.starts_with("已对齐"),
+                "{preset}: measured claim must not start with 已对齐: {claim}"
+            );
             match entry.map(|e| e.status) {
                 Some(crate::tls_golden::GoldenStatus::Captured) => {
                     assert!(
-                        status["alignmentLevel"] == "tool-matched"
-                            || status["alignmentLevel"] == "browser-matched",
-                        "{preset}: captured golden should raise alignment"
+                        status["goldenAuthorisedCeiling"] == "tool-matched"
+                            || status["goldenAuthorisedCeiling"] == "browser-matched",
+                        "{preset}: captured golden should raise ceiling"
                     );
                     assert!(status["goldenCapturedAt"].as_str().is_some());
+                    let ceiling_claim = status["goldenAuthorisedClaim"].as_str().unwrap_or("");
+                    assert!(
+                        !ceiling_claim.starts_with("已对齐"),
+                        "{preset}: ceiling claim must not assert 已对齐 alone"
+                    );
                 }
                 _ => {
-                    assert_eq!(
-                        status["alignmentLevel"], "recipe",
-                        "{preset} has no captured golden on {platform}, so it may only claim recipe"
-                    );
+                    assert_eq!(status["goldenAuthorisedCeiling"], "recipe");
                     assert!(
                         status["goldenCapturedAt"].is_null(),
                         "{preset} must not report a capture date before being captured"
                     );
                 }
             }
-            // MITM stack is still rustls-only in this build.
             assert_eq!(status["ja3Parity"], false);
             assert_eq!(status["supportsFullBrowserJa3"], false);
             assert_eq!(status["goldenPlatform"], platform);
