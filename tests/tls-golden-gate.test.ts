@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const goldenDir = join(root, "src-tauri/testdata/tls-golden");
 const entriesDir = join(goldenDir, "entries");
+const refDir = join(goldenDir, "fingerprint-reference");
+const inventoryPath = join(refDir, "sources-inventory.json");
+const inventorySchemaPath = join(refDir, "sources-inventory.schema.json");
+const matrixPath = join(refDir, "version-matrix.json");
 
 type Golden = {
   presetId: string;
@@ -28,6 +34,31 @@ type Golden = {
   notes: string | null;
 };
 
+type InventorySource = {
+  id: string;
+  name: string;
+  kind: string;
+  url: string;
+  claimedFamilies: string[];
+  claimedVersionsNote: string;
+  captureCost: string;
+  mayAuthoriseAlignment: string;
+  lastReviewed: string;
+  binaryHints?: string[];
+  notes?: string | null;
+};
+
+type Inventory = {
+  schemaVersion: number;
+  lastReviewed: string;
+  honesty: {
+    toolMatchedIsNotBrowserMatched: boolean;
+    noInventedJa3: boolean;
+    noDocumentedJa3AsGolden: boolean;
+  };
+  sources: InventorySource[];
+};
+
 async function loadEntries(): Promise<Array<{ file: string; entry: Golden }>> {
   const files = (await readdir(entriesDir)).filter((f) => f.endsWith(".json")).sort();
   return Promise.all(
@@ -44,6 +75,21 @@ describe("tls golden: honesty gate", () => {
     assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
     const entries = await loadEntries();
     assert.ok(entries.length >= 5, `expected the P0 matrix, got ${entries.length} entries`);
+  });
+
+  it("includes multi-version industry-floor stubs (chrome majors)", async () => {
+    const entries = await loadEntries();
+    const windowsChrome = entries
+      .filter((e) => e.entry.platform === "desktop-windows" && e.entry.family === "chrome")
+      .map((e) => e.entry.major)
+      .sort((a, b) => a - b);
+    for (const major of [120, 124, 131, 133, 144, 146, 149, 150]) {
+      assert.ok(
+        windowsChrome.includes(major),
+        `expected chrome${major}--desktop-windows pending/captured stub`,
+      );
+    }
+    assert.ok(entries.length >= 12, `expected multi-version matrix, got ${entries.length}`);
   });
 
   it("file name matches the presetId and platform inside", async () => {
@@ -139,5 +185,158 @@ describe("tls golden: honesty gate", () => {
     for (const { file, entry } of await loadEntries()) {
       assert.ok(known.has(entry.presetId), `${file}: unknown presetId ${entry.presetId}`);
     }
+  });
+});
+
+describe("tls golden: fingerprint-reference inventory", () => {
+  it("inventory file and schema exist", async () => {
+    assert.ok(existsSync(inventoryPath), "sources-inventory.json missing");
+    assert.ok(existsSync(inventorySchemaPath), "sources-inventory.schema.json missing");
+    assert.ok(existsSync(matrixPath), "version-matrix.json missing");
+    assert.ok(existsSync(join(refDir, "README.md")), "fingerprint-reference README missing");
+  });
+
+  it("lists at least 3 external sources with required non-empty fields and https URLs", async () => {
+    const inv = JSON.parse(await readFile(inventoryPath, "utf8")) as Inventory;
+    assert.ok(inv.schemaVersion >= 1);
+    assert.ok(inv.lastReviewed, "lastReviewed required");
+    assert.equal(inv.honesty.toolMatchedIsNotBrowserMatched, true);
+    assert.equal(inv.honesty.noInventedJa3, true);
+    assert.equal(inv.honesty.noDocumentedJa3AsGolden, true);
+    assert.ok(Array.isArray(inv.sources) && inv.sources.length >= 3, "need ≥3 sources");
+
+    const ids = new Set<string>();
+    for (const s of inv.sources) {
+      assert.ok(s.id && s.id.trim(), "source.id empty");
+      assert.ok(s.name && s.name.trim(), "source.name empty");
+      assert.ok(s.url && /^https:\/\//.test(s.url), `${s.id}: url must be https`);
+      assert.ok(
+        s.claimedVersionsNote && s.claimedVersionsNote.length >= 8,
+        `${s.id}: claimedVersionsNote required`,
+      );
+      assert.ok(Array.isArray(s.claimedFamilies) && s.claimedFamilies.length >= 1, `${s.id}: families`);
+      assert.ok(s.lastReviewed, `${s.id}: lastReviewed required`);
+      assert.ok(
+        s.mayAuthoriseAlignment === "tool-matched" || s.mayAuthoriseAlignment === "none",
+        `${s.id}: mayAuthoriseAlignment invalid`,
+      );
+      // Inventory must never claim browser-matched from a tool source field.
+      assert.notEqual(
+        (s as { mayAuthoriseAlignment: string }).mayAuthoriseAlignment,
+        "browser-matched",
+      );
+      assert.ok(!ids.has(s.id), `duplicate source id ${s.id}`);
+      ids.add(s.id);
+    }
+  });
+
+  it("empty inventory or empty required source fields would fail the gate", async () => {
+    // Structural negative checks against the loaded file (guards the contract).
+    const inv = JSON.parse(await readFile(inventoryPath, "utf8")) as Inventory;
+    assert.notEqual(inv.sources.length, 0, "empty inventory must fail");
+    for (const s of inv.sources) {
+      assert.notEqual(s.url, "", "empty url must fail");
+      assert.notEqual(s.claimedVersionsNote, "", "empty claimedVersionsNote must fail");
+    }
+  });
+
+  it("version-matrix covers multi-version chrome majors and matches entry files", async () => {
+    const matrix = JSON.parse(await readFile(matrixPath, "utf8")) as {
+      matrix: Array<{ presetId: string; platform: string; status: string; alignment: string }>;
+    };
+    assert.ok(matrix.matrix.length >= 12, "matrix too small");
+    const entryFiles = new Set(
+      (await readdir(entriesDir)).filter((f) => f.endsWith(".json")),
+    );
+    for (const row of matrix.matrix) {
+      const name = `${row.presetId}--${row.platform}.json`;
+      assert.ok(entryFiles.has(name), `matrix row missing entry file ${name}`);
+      // Pending matrix rows must not claim matched alignment in the index.
+      if (row.status === "pending-capture") {
+        assert.equal(row.alignment, "recipe", `${name}: matrix pending must stay recipe`);
+      }
+    }
+  });
+
+  it("low-cost capture script exists", async () => {
+    const script = join(root, "scripts/tls-golden-capture.mjs");
+    assert.ok(existsSync(script), "scripts/tls-golden-capture.mjs missing");
+    const body = await readFile(script, "utf8");
+    assert.match(body, /tool not installed \/ capture skipped/);
+    assert.match(body, /curl_cffi|curl-impersonate/);
+  });
+
+  it("version-matrix and entries/ stay bijective (no orphan files)", async () => {
+    const matrix = JSON.parse(await readFile(matrixPath, "utf8")) as {
+      matrix: Array<{ presetId: string; platform: string }>;
+    };
+    const matrixKeys = new Set(matrix.matrix.map((r) => `${r.presetId}--${r.platform}.json`));
+    const entryFiles = (await readdir(entriesDir)).filter((f) => f.endsWith(".json"));
+    for (const file of entryFiles) {
+      assert.ok(matrixKeys.has(file), `entry ${file} missing from version-matrix.json`);
+    }
+    assert.equal(matrixKeys.size, entryFiles.length, "matrix size must equal entry file count");
+  });
+
+  it("validateGoldenTree from capture script validates the real tree", async () => {
+    const scriptUrl = pathToFileURL(join(root, "scripts/tls-golden-capture.mjs")).href;
+    const mod = await import(scriptUrl);
+    assert.equal(typeof mod.validateGoldenTree, "function");
+    const summary = mod.validateGoldenTree() as {
+      sources: number;
+      entries: number;
+      lowCostSources: string[];
+    };
+    assert.ok(summary.sources >= 3, "inventory must list at least 3 sources");
+    assert.ok(summary.entries >= 12, "multi-version matrix expected");
+    assert.ok(summary.lowCostSources.length >= 1, "need at least one low-cost tool source");
+  });
+
+  it("capture CLI --validate-only exits 0 on the shipped tree", () => {
+    const script = join(root, "scripts/tls-golden-capture.mjs");
+    const r = spawnSync(process.execPath, [script, "--validate-only"], {
+      encoding: "utf8",
+      cwd: root,
+    });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    assert.match(r.stdout, /validate-only ok:/);
+    assert.match(r.stdout, /low-cost sources:/);
+  });
+
+  it("capture CLI without tools prints honest skip (or dry-run ok)", () => {
+    const script = join(root, "scripts/tls-golden-capture.mjs");
+    const dry = spawnSync(process.execPath, [script, "--dry-run", "--preset", "chrome150"], {
+      encoding: "utf8",
+      cwd: root,
+    });
+    assert.equal(dry.status, 0, dry.stderr || dry.stdout);
+    assert.match(dry.stdout, /dry-run ok:|inventory sources=/);
+
+    const capture = spawnSync(
+      process.execPath,
+      [script, "--preset", "chrome150", "--platform", "desktop-windows"],
+      { encoding: "utf8", cwd: root, env: { ...process.env, PATH: process.env.PATH } },
+    );
+    // Either tool missing (honest skip) or tool present (capture-result / observed).
+    assert.ok(
+      capture.status === 0 || capture.status === 1,
+      `unexpected exit ${capture.status}: ${capture.stderr}`,
+    );
+    const out = `${capture.stdout}\n${capture.stderr}`;
+    assert.ok(
+      /tool not installed \/ capture skipped|capture-result:|capture observed|capture failed honestly/.test(
+        out,
+      ),
+      `expected honest skip or real capture output, got: ${out.slice(0, 400)}`,
+    );
+  });
+
+  it("package.json wires tls-golden scripts to the real capture entry", async () => {
+    const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    assert.match(pkg.scripts["test:tls-golden"], /tls-golden-gate\.test\.ts/);
+    assert.match(pkg.scripts["tls-golden:capture"], /tls-golden-capture\.mjs/);
+    assert.match(pkg.scripts["tls-golden:capture:dry"], /--dry-run/);
   });
 });

@@ -132,7 +132,19 @@
 | P4 Happy Eyeballs / IPv4 优先 | **通过** |
 | P5 交互焦点/IME | **通过**：点击聚焦 + CDP 错误 busNote |
 | CI `npm test` / quality | **通过**：`npm run test:windows` |
-| 完整 JA3 impersonate | **非目标** |
+| 完整 JA3 impersonate | **非目标**（本批只做金标/inventory 基础） |
+
+---
+
+## JA3 金标基础（后续批次）
+
+| 项 | 状态 |
+|----|------|
+| 多版本 `pending-capture` 矩阵（Chrome 120…150 等） | **已落地** `src-tauri/testdata/tls-golden/entries/` |
+| 外部源 inventory（≥3 GitHub/工具） | **已落地** `fingerprint-reference/sources-inventory.json` |
+| 低成本 capture 脚本（缺工具诚实 skip） | **已落地** `scripts/tls-golden-capture.mjs` / `npm run tls-golden:capture` |
+| 诚实门禁 `npm run test:tls-golden` | **通过**；`ja3Parity` 仍为 false |
+| 真栈 tool/browser-matched 升格 | **未做**（需 curl-impersonate 类引擎 + ClientHello 探针） |
 
 ---
 
@@ -140,8 +152,8 @@
 
 | 项 | 说明 |
 |----|------|
-| 完整真浏览器 JA3 / BoringSSL impersonate | 见 `docs/plan-real-browser-ja3-impersonate.md` |
-| 全量 Playwright GUI 点击 | 以 pillar 结构测试 + live 代理/sidecar 为准 |
+| 完整真浏览器 JA3 / BoringSSL impersonate | 见 `docs/plan-real-browser-ja3-impersonate.md`；Phase 0 金标/inventory 已部分完成 |
+| 全量 Playwright GUI 点击 | 以 pillar 结构测试 + live 代理/sidecar 为准；JA3 身份用 golden pipeline，不靠 GUI 矩阵 |
 
 ---
 
@@ -153,6 +165,8 @@ npm run test:windows:default
 npm run test:egress
 npm run test:mitm-smoke
 npm run test:agent-sidecar
+npm run test:tls-golden
+npm run tls-golden:capture:dry
 ```
 
 功能支柱机器清单：`src/e2eFeaturePillars.ts` + `tests/e2e-feature-pillars.test.ts`。

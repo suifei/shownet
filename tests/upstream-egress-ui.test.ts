@@ -34,7 +34,8 @@ describe("upstream egress probe and env import (P1)", () => {
 
     // 502 full error surface
     assert.match(traffic, /proxy-error-banner/);
-    assert.match(traffic, /代理错误（502）/);
+    // Dynamic status: 502/504 both use the same proxy-error banner wording.
+    assert.match(traffic, /代理错误（\{request\.status\}）|代理错误（502）/);
     assert.match(traffic, /overview-proxy-error/);
     assert.match(app, /capture:\/\/proxy-error/);
   });

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "lastReviewed": "2026-08-05",
+  "honesty": {
+    "toolMatchedIsNotBrowserMatched": true,
+    "noInventedJa3": true,
+    "noDocumentedJa3AsGolden": true
+  },
+  "sources": [
+    {
+      "id": "lexiforest-curl-impersonate",
+      "name": "lexiforest/curl-impersonate",
+      "kind": "fork",
+      "url": "https://github.com/lexiforest/curl-impersonate",
+      "secondaryUrls": [
+        "https://curl-impersonate.readthedocs.io/en/latest/fingerprints.html"
+      ],
+      "claimedFamilies": ["chrome", "chrome-android", "edge", "firefox", "safari", "safari-ios"],
+      "claimedVersionsNote": "Active fork of curl-impersonate. Ships browser profile binaries/presets (chromeNNN, firefoxNNN, safari*). Exact majors move with releases; use upstream fingerprint docs / `curl-cffi list` rather than assuming a fixed set. Preferred low-cost capture path for tool-matched goldens.",
+      "captureCost": "low-tool",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": [
+        "curl_chrome120",
+        "curl_chrome124",
+        "curl_chrome131",
+        "curl_chrome133",
+        "curl-impersonate",
+        "curl_chrome"
+      ],
+      "lastReviewed": "2026-08-05",
+      "notes": "Do not copy JA3 strings from issues/blogs into goldens. Capture ClientHello via tool self-connect to a local probe, then fill entries/* only after measurement."
+    },
+    {
+      "id": "lexiforest-curl-cffi",
+      "name": "lexiforest/curl_cffi",
+      "kind": "library",
+      "url": "https://github.com/lexiforest/curl_cffi",
+      "secondaryUrls": [
+        "https://curl-cffi.readthedocs.io/en/latest/impersonate/_index.html",
+        "https://pypi.org/project/curl-cffi/"
+      ],
+      "claimedFamilies": ["chrome", "chrome-android", "edge", "firefox", "safari", "safari-ios"],
+      "claimedVersionsNote": "Python binding to the lexiforest curl-impersonate fork. Supports impersonate=chromeNNN / safari* / firefox* presets; skipped majors mean 'reuse previous TLS fingerprint with updated headers'. CLI: `curl-cffi` (list/update since ~v0.15). Low-cost path on Windows without full browser installers.",
+      "captureCost": "low-tool",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": ["curl-cffi", "python -m curl_cffi"],
+      "lastReviewed": "2026-08-05",
+      "notes": "Tool JA3 may differ slightly from real Chrome; tool-matched only."
+    },
+    {
+      "id": "lwthiker-curl-impersonate",
+      "name": "lwthiker/curl-impersonate",
+      "kind": "cli-tool",
+      "url": "https://github.com/lwthiker/curl-impersonate",
+      "secondaryUrls": [
+        "https://github.com/lwthiker/curl-impersonate/releases"
+      ],
+      "claimedFamilies": ["chrome", "edge", "firefox", "safari"],
+      "claimedVersionsNote": "Original project (last major release series ~0.6.x). Historical profiles around Chrome ~116 and Firefox ~117 era in browsers.json; still useful as a reference CLI shape and older goldens, but prefer lexiforest fork for current majors.",
+      "captureCost": "low-tool",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": ["curl_chrome110", "curl_ff109", "curl-impersonate-chrome"],
+      "lastReviewed": "2026-08-05",
+      "notes": "Inventory only — do not treat archived majors as current browser-matched."
+    },
+    {
+      "id": "refraction-utls",
+      "name": "refraction-networking/utls",
+      "kind": "library",
+      "url": "https://github.com/refraction-networking/utls",
+      "secondaryUrls": [
+        "https://pkg.go.dev/github.com/refraction-networking/utls"
+      ],
+      "claimedFamilies": ["chrome", "firefox", "safari", "other"],
+      "claimedVersionsNote": "Go library with HelloChrome_NNN / HelloFirefox_NNN / HelloIOS_* ClientHello IDs (e.g. Chrome 120/131/133-class parrots in recent tags). Fingerprints live in u_parrots.go — library-level, not a browser capture.",
+      "captureCost": "medium-library",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": [],
+      "lastReviewed": "2026-08-05",
+      "notes": "Useful for cross-checking extension/cipher ordering notes. Capture still requires emitting a real ClientHello against a probe."
+    },
+    {
+      "id": "wreq-rquest-class",
+      "name": "wreq / rquest-class Rust stacks",
+      "kind": "library",
+      "url": "https://github.com/0x676e67/wreq",
+      "secondaryUrls": [
+        "https://crates.io/crates/wreq",
+        "https://github.com/0x676e67/rquest"
+      ],
+      "claimedFamilies": ["chrome", "firefox", "safari", "other"],
+      "claimedVersionsNote": "Rust HTTP clients built around BoringSSL/impersonate-style profiles (Chrome/Safari/Firefox majors vary by crate version). Relevant long-horizon for ShowNet MITM stack research; not wired as product engine today.",
+      "captureCost": "medium-library",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": [],
+      "lastReviewed": "2026-08-05",
+      "notes": "Inventory for implementers evaluating Phase-1 impersonate connectors. Shipping product still rustls-only with ja3Parity=false."
+    },
+    {
+      "id": "foxio-ja4",
+      "name": "FoxIO-LLC/ja4",
+      "kind": "fingerprint-db",
+      "url": "https://github.com/FoxIO-LLC/ja4",
+      "secondaryUrls": [
+        "https://github.com/FoxIO-LLC/ja4/blob/main/technical_details/JA4.md"
+      ],
+      "claimedFamilies": ["chrome", "firefox", "safari", "other"],
+      "claimedVersionsNote": "Authoritative JA4+ specification and reference implementations (not a browser impersonate client). Use for algorithm/canonical-string verification when recomputing ja4/ja4Raw from captured ClientHello. Does not ship Chrome major presets for outbound MITM.",
+      "captureCost": "high-browser",
+      "mayAuthoriseAlignment": "none",
+      "binaryHints": [],
+      "lastReviewed": "2026-08-05",
+      "notes": "Spec/reference only. Never paste example JA4 strings from docs into goldens as if they were measured captures."
+    },
+    {
+      "id": "salesforce-ja3",
+      "name": "salesforce/ja3",
+      "kind": "docs",
+      "url": "https://github.com/salesforce/ja3",
+      "secondaryUrls": [
+        "https://github.com/salesforce/ja3/blob/master/README.md"
+      ],
+      "claimedFamilies": ["other"],
+      "claimedVersionsNote": "Original JA3 standard (archived May 2025). Historical algorithm reference; FoxIO JA4 supersedes for new work. No current Chrome major matrix.",
+      "captureCost": "high-browser",
+      "mayAuthoriseAlignment": "none",
+      "binaryHints": [],
+      "lastReviewed": "2026-08-05",
+      "notes": "Archived. Use only for JA3 canonical algorithm cross-check, never as a golden source."
+    },
+    {
+      "id": "cycletls",
+      "name": "Danny-Dasilva/CycleTLS",
+      "kind": "library",
+      "url": "https://github.com/Danny-Dasilva/CycleTLS",
+      "secondaryUrls": [],
+      "claimedFamilies": ["chrome", "firefox", "safari", "other"],
+      "claimedVersionsNote": "Go/JS library that spoofs TLS JA3 fingerprints with configurable ClientHello. Useful as an alternate tool-capture path for custom ja3 strings; version coverage depends on user-supplied fingerprints, not a fixed browser matrix.",
+      "captureCost": "medium-library",
+      "mayAuthoriseAlignment": "tool-matched",
+      "binaryHints": [],
+      "lastReviewed": "2026-08-05",
+      "notes": "tool-matched only when ClientHello is actually captured against a probe; do not treat configured JA3 strings alone as goldens."
+    }
+  ]
+}

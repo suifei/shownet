@@ -42,11 +42,21 @@ src-tauri/testdata/tls-golden/
   schema.json        条目的 JSON Schema（draft 2020-12）
   entries/
     <presetId>--<platform>.json
+  fingerprint-reference/          # 低成本外部源清单（非金标本身）
+    README.md
+    sources-inventory.json        # ≥3 个 GitHub/工具源 + 版本覆盖备注
+    sources-inventory.schema.json
+    version-matrix.json           # 多版本 preset×platform 状态索引
 ```
 
 一个 `presetId` 在不同平台上是**不同的金标**，必须分开存档。
 例如 Chrome 150 桌面版与 Chrome Android 150 的 ClientHello 并不相同，
 禁止用桌面金标去判定 Android 预置（见计划 §4.4）。
+
+**多版本矩阵**：`entries/` 为 industry-floor Chrome majors（120/124/131/133/144/146/149/150 等）
+提供 `pending-capture` 占位；在采集完成前全部停留在 `recipe`。
+外部工具支持哪些版本见 `fingerprint-reference/sources-inventory.json`——
+**仅凭 inventory 不能**把任何预置升到 `tool-matched` / `browser-matched`。
 
 ---
 
@@ -63,8 +73,28 @@ src-tauri/testdata/tls-golden/
 
 ### 4.2 工具金标（开发期代理，`source: "tool-capture"`）
 
-对 `curl-impersonate --chrome150` 一类工具自连探针，解析其 ClientHello。
+对 `curl-impersonate` / `curl_cffi` 一类工具自连探针，解析其 ClientHello。
 可用于打通 Phase 1 链路，但**只能**支撑 `tool-matched`，不能升到 `browser-matched`。
+
+低成本刷新入口（优先工具，缺省时诚实 skip，不静默假绿）：
+
+```bash
+# 校验 inventory + 多版本矩阵；列出已安装工具
+npm run tls-golden:capture -- --dry-run
+
+# 尝试对某一 Chrome major 做工具侧观测（无二进制则打印 skip 行）
+npm run tls-golden:capture -- --preset chrome150 --platform desktop-windows
+
+# 门禁测试
+npm run test:tls-golden
+```
+
+脚本：`scripts/tls-golden-capture.mjs`。  
+完整 `status: captured` 仍需要本地 ClientHello 探针产出的 `clientHelloHex`；
+仅从公开 JA3 探针拿到 hash **不足以** 升格 alignment。
+
+外部源清单（避免为每个 major 下载完整浏览器）：
+`fingerprint-reference/sources-inventory.json`（curl-impersonate 系、curl_cffi、uTLS、wreq/rquest 等）。
 
 ### 4.3 禁止事项
 

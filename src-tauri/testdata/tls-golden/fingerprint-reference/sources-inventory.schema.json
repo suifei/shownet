@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shownet.local/schema/tls-fingerprint-sources-inventory.json",
+  "title": "ShowNet JA3/JA4 external sources inventory",
+  "description": "Machine-checkable inventory of GitHub repos and tools that publish browser TLS fingerprints. Used to locate goldens without downloading full browsers. Never treat inventory claims as captured goldens.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "lastReviewed", "honesty", "sources"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Inventory document version."
+    },
+    "lastReviewed": {
+      "type": "string",
+      "format": "date",
+      "description": "ISO date the inventory was last manually reviewed against upstream READMEs/releases."
+    },
+    "honesty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolMatchedIsNotBrowserMatched", "noInventedJa3", "noDocumentedJa3AsGolden"],
+      "properties": {
+        "toolMatchedIsNotBrowserMatched": {
+          "const": true,
+          "description": "tool-matched never authorises browser-matched wording."
+        },
+        "noInventedJa3": {
+          "const": true,
+          "description": "Never invent JA3 strings; only real captures may fill golden fields."
+        },
+        "noDocumentedJa3AsGolden": {
+          "const": true,
+          "description": "Catalog documentedJa3 is reference material only, never a golden."
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "url",
+          "claimedFamilies",
+          "claimedVersionsNote",
+          "captureCost",
+          "mayAuthoriseAlignment",
+          "lastReviewed"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "description": "Stable inventory id."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": ["cli-tool", "library", "fingerprint-db", "fork", "docs"],
+            "description": "How the source is typically consumed."
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https://",
+            "description": "Stable project or GitHub URL."
+          },
+          "secondaryUrls": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^https://" },
+            "description": "Docs, release pages, or related forks."
+          },
+          "claimedFamilies": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "chrome",
+                "chrome-android",
+                "edge",
+                "firefox",
+                "safari",
+                "safari-ios",
+                "other"
+              ]
+            }
+          },
+          "claimedVersionsNote": {
+            "type": "string",
+            "minLength": 8,
+            "description": "Human-readable note of which majors/profiles the source claims (not a ShowNet golden)."
+          },
+          "captureCost": {
+            "enum": ["low-tool", "medium-library", "high-browser"],
+            "description": "Relative cost to obtain a ClientHello via this source."
+          },
+          "mayAuthoriseAlignment": {
+            "enum": ["tool-matched", "none"],
+            "description": "Highest alignment a successful capture from this source may authorise. Real browsers are not listed here — use browser-capture for browser-matched."
+          },
+          "binaryHints": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Executable or package names to look for on PATH."
+          },
+          "lastReviewed": {
+            "type": "string",
+            "format": "date"
+          },
+          "notes": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

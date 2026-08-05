@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "description": "ShowNet multi-version golden matrix status. status is derived from entries/*.json; never invent fingerprints here.",
+  "lastReviewed": "2026-08-05",
+  "entriesRoot": "../entries",
+  "matrix": [
+    { "presetId": "chrome120", "platform": "desktop-windows", "major": 120, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome124", "platform": "desktop-windows", "major": 124, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome131", "platform": "desktop-windows", "major": 131, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome131", "platform": "desktop-macos", "major": 131, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome131", "platform": "desktop-linux", "major": 131, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome133", "platform": "desktop-windows", "major": 133, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome144", "platform": "desktop-windows", "major": 144, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome146", "platform": "desktop-windows", "major": 146, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome149", "platform": "desktop-windows", "major": 149, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome150", "platform": "desktop-windows", "major": 150, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome150", "platform": "desktop-macos", "major": 150, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome150", "platform": "desktop-linux", "major": 150, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome-android131", "platform": "android", "major": 131, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "chrome-android150", "platform": "android", "major": 150, "status": "pending-capture", "alignment": "recipe" },
+    { "presetId": "safari-ios18", "platform": "ios", "major": 18, "status": "pending-capture", "alignment": "recipe" }
+  ],
+  "preferredCaptureOrder": [
+    "chrome150--desktop-windows",
+    "chrome133--desktop-windows",
+    "chrome131--desktop-windows",
+    "chrome124--desktop-windows",
+    "chrome120--desktop-windows"
+  ],
+  "notes": "Fill goldens only via scripts/tls-golden-capture.mjs or documented browser-capture. Inventory sources cannot alone promote alignment."
+}

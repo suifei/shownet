@@ -1,0 +1,24 @@
+{
+  "presetId": "chrome133",
+  "platform": "desktop-windows",
+  "family": "chrome",
+  "major": 133,
+  "stack": "chromium-boringssl",
+  "stackVersion": null,
+  "status": "pending-capture",
+  "alignment": "recipe",
+  "source": {
+    "kind": "pending",
+    "tool": null,
+    "environment": null,
+    "capturedAt": null
+  },
+  "golden": {
+    "ja3": null,
+    "ja3Raw": null,
+    "ja4": null,
+    "ja4Raw": null,
+    "clientHelloHex": null
+  },
+  "notes": "Multi-version matrix stub. Capture via tool self-connect (curl-impersonate / curl_cffi) before any tool-matched claim. Never copy catalog documentedJa3."
+}

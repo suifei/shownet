@@ -147,6 +147,44 @@ impl GoldenEntry {
 /// fails if a file is added to the directory without being listed here — otherwise a
 /// new golden would silently never reach the gate.
 const EMBEDDED: &[(&str, &str)] = &[
+    // Multi-version desktop-windows industry floor (pending-capture stubs).
+    (
+        "chrome120--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome120--desktop-windows.json"),
+    ),
+    (
+        "chrome124--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome124--desktop-windows.json"),
+    ),
+    (
+        "chrome131--desktop-linux",
+        include_str!("../testdata/tls-golden/entries/chrome131--desktop-linux.json"),
+    ),
+    (
+        "chrome131--desktop-macos",
+        include_str!("../testdata/tls-golden/entries/chrome131--desktop-macos.json"),
+    ),
+    (
+        "chrome131--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome131--desktop-windows.json"),
+    ),
+    (
+        "chrome133--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome133--desktop-windows.json"),
+    ),
+    (
+        "chrome144--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome144--desktop-windows.json"),
+    ),
+    (
+        "chrome146--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome146--desktop-windows.json"),
+    ),
+    (
+        "chrome149--desktop-windows",
+        include_str!("../testdata/tls-golden/entries/chrome149--desktop-windows.json"),
+    ),
+    // P0 matrix: chrome150 multi-platform + mobile + iOS.
     (
         "chrome150--desktop-macos",
         include_str!("../testdata/tls-golden/entries/chrome150--desktop-macos.json"),
@@ -158,6 +196,10 @@ const EMBEDDED: &[(&str, &str)] = &[
     (
         "chrome150--desktop-linux",
         include_str!("../testdata/tls-golden/entries/chrome150--desktop-linux.json"),
+    ),
+    (
+        "chrome-android131--android",
+        include_str!("../testdata/tls-golden/entries/chrome-android131--android.json"),
     ),
     (
         "chrome-android150--android",
