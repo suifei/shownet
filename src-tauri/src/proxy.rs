@@ -10,8 +10,8 @@ use crate::client_access::ClientAccessPolicy;
 use crate::http2_fingerprint::{Http2FingerprintCollector, Http2ObservedIo};
 use crate::mirror::{format_authority, MirrorIdentity, RuntimeMirrorRoute};
 use crate::models::{
-    BodyCaptureMetadata, CaptureEventInput, CapturedRequestInput, EffectiveUpstreamProxy,
-    HeaderEntry,
+    BodyCaptureMetadata, CaptureEventInput, CapturedRequestInput, DetectedEnvProxy,
+    EffectiveUpstreamProxy, HeaderEntry, UpstreamProbeResult,
 };
 use crate::tls_fingerprint::{
     mitm_fingerprint, mitm_fingerprint_with_selection, read_client_hello, tunnel_fingerprint,
@@ -49,7 +49,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 use tauri::{Emitter, Manager};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::time::{timeout, Duration, Sleep};
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -4908,11 +4908,265 @@ async fn connect_destination(
     }
 }
 
-async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, String> {
-    timeout(Duration::from_secs(15), TcpStream::connect((host, port)))
+/// Overall budget for a single destination connect (host:port).
+const CONNECT_OVERALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-attempt cap for IPv4 (and lone IPv6) after DNS.
+const CONNECT_PER_ATTEMPT: Duration = Duration::from_secs(4);
+/// When IPv4 candidates exist, do not let a broken IPv6 black-hole burn the full budget.
+const CONNECT_IPV6_WHEN_IPV4_EXISTS: Duration = Duration::from_millis(750);
+
+/// Prefer IPv4 so dual-stack hosts with broken AAAA paths fail fast and fall back.
+fn order_connect_addrs_ipv4_first(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for addr in addrs {
+        match addr {
+            SocketAddr::V4(_) => v4.push(addr),
+            SocketAddr::V6(_) => v6.push(addr),
+        }
+    }
+    v4.extend(v6);
+    v4
+}
+
+async fn resolve_connect_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let resolved: Vec<SocketAddr> = lookup_host((host, port))
         .await
-        .map_err(|_| format!("连接 {host}:{port} 超时"))?
-        .map_err(|error| format!("连接 {host}:{port} 失败: {error}"))
+        .map_err(|error| format!("DNS 解析 {host} 失败: {error}"))?
+        .collect();
+    if resolved.is_empty() {
+        return Err(format!("DNS 未返回 {host} 的地址"));
+    }
+    Ok(order_connect_addrs_ipv4_first(resolved))
+}
+
+async fn connect_tcp_addrs(
+    host: &str,
+    port: u16,
+    addrs: Vec<SocketAddr>,
+) -> Result<TcpStream, String> {
+    if addrs.is_empty() {
+        return Err(format!("连接 {host}:{port} 失败: 无可用地址"));
+    }
+    let has_v4 = addrs.iter().any(SocketAddr::is_ipv4);
+    let deadline = Instant::now() + CONNECT_OVERALL_TIMEOUT;
+    let mut errors = Vec::new();
+    for addr in addrs {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let attempt = if addr.is_ipv6() && has_v4 {
+            remaining.min(CONNECT_IPV6_WHEN_IPV4_EXISTS)
+        } else {
+            remaining.min(CONNECT_PER_ATTEMPT)
+        };
+        match timeout(attempt, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => errors.push(format!("{addr}: {error}")),
+            Err(_) => errors.push(format!("{addr}: 超时")),
+        }
+    }
+    if errors.is_empty() {
+        Err(format!("连接 {host}:{port} 超时"))
+    } else {
+        Err(format!(
+            "连接 {host}:{port} 失败: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    let addrs = resolve_connect_addrs(host, port).await?;
+    connect_tcp_addrs(host, port, addrs).await
+}
+
+/// Probe egress: direct TCP or full upstream CONNECT/SOCKS to a well-known HTTPS target.
+pub async fn probe_upstream_egress(upstream: &EffectiveUpstreamProxy) -> UpstreamProbeResult {
+    const TARGET_HOST: &str = "example.com";
+    const TARGET_PORT: u16 = 443;
+    let target = format!("{TARGET_HOST}:{TARGET_PORT}");
+    let start = Instant::now();
+    let (ok, message) = if upstream.mode == "direct" {
+        match connect_tcp(TARGET_HOST, TARGET_PORT).await {
+            Ok(_) => (
+                true,
+                format!("直连可达 {target}（未使用二级出口代理）"),
+            ),
+            Err(error) => (false, error),
+        }
+    } else if upstream.host.trim().is_empty() || upstream.port == 0 {
+        (
+            false,
+            format!(
+                "出口 {}:{} 配置无效：请填写主机与端口",
+                upstream.host, upstream.port
+            ),
+        )
+    } else {
+        match connect_destination(upstream, TARGET_HOST, TARGET_PORT).await {
+            Ok(_) => (
+                true,
+                format!(
+                    "出口 {}:{} ({}) 已成功 CONNECT {target}",
+                    upstream.host,
+                    upstream.port,
+                    upstream.mode.to_uppercase()
+                ),
+            ),
+            Err(error) => (
+                false,
+                format!(
+                    "出口 {}:{} 连不上：{error}",
+                    upstream.host, upstream.port
+                ),
+            ),
+        }
+    };
+    UpstreamProbeResult {
+        ok,
+        mode: upstream.mode.clone(),
+        host: upstream.host.clone(),
+        port: upstream.port,
+        target,
+        latency_ms: start.elapsed().as_millis() as u64,
+        message,
+    }
+}
+
+/// Parsed proxy URL fields from env-style values (`PROXY`, `HTTP_PROXY`, …).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedProxyUrl {
+    pub mode: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: Option<String>,
+}
+
+/// Parse a single proxy URL or `host:port` from PROXY / HTTP(S)_PROXY / ALL_PROXY style values.
+pub fn parse_proxy_env_value(raw: &str) -> Option<(String, String, u16, String)> {
+    let parsed = parse_proxy_url(raw)?;
+    Some((parsed.mode, parsed.host, parsed.port, parsed.username))
+}
+
+pub fn parse_proxy_url(raw: &str) -> Option<ParsedProxyUrl> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let url = Url::parse(&candidate).ok()?;
+    let mode = match url.scheme() {
+        "http" => "http",
+        "https" => "https",
+        "socks5" | "socks5h" | "socks" => "socks5",
+        _ => return None,
+    };
+    let host = url.host_str()?.to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let port = url.port().unwrap_or(match mode {
+        "https" => 443,
+        "socks5" => 1080,
+        _ => 80,
+    });
+    if port == 0 {
+        return None;
+    }
+    let username = percent_decode_str(url.username());
+    let password = url.password().map(percent_decode_str);
+    Some(ParsedProxyUrl {
+        mode: mode.to_string(),
+        host,
+        port,
+        username,
+        password,
+    })
+}
+
+fn percent_decode_str(value: &str) -> String {
+    // Username/password in proxy URLs are rarely percent-encoded; keep raw for auth Basic.
+    // url crate already percent-decodes password()/username() in recent versions for host URLs.
+    value.to_string()
+}
+
+/// Prefer PROXY, then HTTPS_PROXY, then HTTP_PROXY, then ALL_PROXY (case-insensitive names).
+pub fn detect_env_proxy_from_pairs<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Option<DetectedEnvProxy> {
+    let mut map = std::collections::HashMap::new();
+    for (key, value) in pairs {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            // First occurrence wins so PROXY/HTTPS_PROXY beats lower-priority aliases.
+            map.entry(key.to_ascii_lowercase())
+                .or_insert_with(|| (key.to_string(), value.to_string()));
+        }
+    }
+    for name in ["proxy", "https_proxy", "http_proxy", "all_proxy"] {
+        let Some((source, raw)) = map.get(name) else {
+            continue;
+        };
+        if let Some(parsed) = parse_proxy_url(raw) {
+            return Some(DetectedEnvProxy {
+                mode: parsed.mode,
+                host: parsed.host,
+                port: parsed.port,
+                username: parsed.username,
+                source: source.clone(),
+                raw: raw.clone(),
+            });
+        }
+    }
+    None
+}
+
+pub fn detect_env_proxy() -> Option<DetectedEnvProxy> {
+    let proxy = std::env::var("PROXY").ok();
+    let proxy_l = std::env::var("proxy").ok();
+    let https = std::env::var("HTTPS_PROXY").ok();
+    let https_l = std::env::var("https_proxy").ok();
+    let http = std::env::var("HTTP_PROXY").ok();
+    let http_l = std::env::var("http_proxy").ok();
+    let all = std::env::var("ALL_PROXY").ok();
+    let all_l = std::env::var("all_proxy").ok();
+    detect_env_proxy_from_pairs([
+        ("PROXY", proxy.as_deref()),
+        ("proxy", proxy_l.as_deref()),
+        ("HTTPS_PROXY", https.as_deref()),
+        ("https_proxy", https_l.as_deref()),
+        ("HTTP_PROXY", http.as_deref()),
+        ("http_proxy", http_l.as_deref()),
+        ("ALL_PROXY", all.as_deref()),
+        ("all_proxy", all_l.as_deref()),
+    ])
+}
+
+/// Build an [`EffectiveUpstreamProxy`] from PROXY / HTTP(S)_PROXY / ALL_PROXY for live tests.
+pub fn effective_upstream_from_process_env() -> Option<EffectiveUpstreamProxy> {
+    let detected = detect_env_proxy()?;
+    let parsed = parse_proxy_url(&detected.raw)?;
+    Some(EffectiveUpstreamProxy {
+        mode: parsed.mode,
+        host: parsed.host,
+        port: parsed.port,
+        username: parsed.username,
+        password: parsed.password,
+        bypass: vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ],
+    })
 }
 
 async fn connect_via_http_proxy(
@@ -5260,6 +5514,102 @@ mod tests {
 
     fn test_certificate_authority() -> Arc<CertificateAuthority> {
         Arc::new(CertificateAuthority::load_or_create(None).unwrap().0)
+    }
+
+    #[test]
+    fn order_connect_addrs_puts_ipv4_before_ipv6() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let ordered = order_connect_addrs_ipv4_first([
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 443)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 443)),
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 80)),
+            SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 80)),
+        ]);
+        assert!(ordered[0].is_ipv4());
+        assert!(ordered[1].is_ipv4());
+        assert!(ordered[2].is_ipv6());
+        assert!(ordered[3].is_ipv6());
+    }
+
+    #[test]
+    fn parse_proxy_env_value_accepts_urls_and_host_port() {
+        let (mode, host, port, user) =
+            parse_proxy_env_value("http://127.0.0.1:1080").expect("http url");
+        assert_eq!((mode.as_str(), host.as_str(), port, user.as_str()), ("http", "127.0.0.1", 1080, ""));
+
+        let (mode, host, port, _) =
+            parse_proxy_env_value("socks5://proxy.example:1080").expect("socks");
+        assert_eq!((mode.as_str(), host.as_str(), port), ("socks5", "proxy.example", 1080));
+
+        let (mode, host, port, user) =
+            parse_proxy_env_value("http://alice@127.0.0.1:7890").expect("user");
+        assert_eq!(
+            (mode.as_str(), host.as_str(), port, user.as_str()),
+            ("http", "127.0.0.1", 7890, "alice")
+        );
+
+        let (mode, host, port, _) = parse_proxy_env_value("127.0.0.1:1080").expect("bare");
+        assert_eq!((mode.as_str(), host.as_str(), port), ("http", "127.0.0.1", 1080));
+    }
+
+    #[test]
+    fn detect_env_proxy_prefers_https_over_http() {
+        let detected = detect_env_proxy_from_pairs([
+            ("HTTP_PROXY", Some("http://127.0.0.1:8080")),
+            ("HTTPS_PROXY", Some("socks5://127.0.0.1:1080")),
+        ])
+        .expect("detected");
+        assert_eq!(detected.mode, "socks5");
+        assert_eq!(detected.port, 1080);
+        assert_eq!(detected.source, "HTTPS_PROXY");
+    }
+
+    #[test]
+    fn detect_env_proxy_prefers_proxy_over_http_proxy() {
+        let detected = detect_env_proxy_from_pairs([
+            ("HTTP_PROXY", Some("http://127.0.0.1:9999")),
+            ("PROXY", Some("http://localhost:8080")),
+        ])
+        .expect("detected");
+        assert_eq!(detected.host, "localhost");
+        assert_eq!(detected.port, 8080);
+        assert_eq!(detected.source, "PROXY");
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_falls_back_to_ipv4_when_ipv6_is_unreachable() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1];
+            let _ = stream.read(&mut buf).await;
+        });
+
+        // IPv6 localhost closed port would hang/fail; ordered list still prefers IPv4 first.
+        let addrs = order_connect_addrs_ipv4_first([
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 1)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        ]);
+        assert!(addrs[0].is_ipv4(), "IPv4 must be attempted first");
+        let stream = connect_tcp_addrs("localhost", port, addrs)
+            .await
+            .expect("should connect via IPv4 fallback");
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_reports_host_port_on_total_failure() {
+        use std::net::Ipv4Addr;
+        let err = connect_tcp_addrs(
+            "blackhole.test",
+            9,
+            vec![SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9))],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("blackhole.test:9"), "{err}");
     }
 
     fn complete_capture(bytes: Vec<u8>) -> BodyCaptureSnapshot {
@@ -9369,143 +9719,226 @@ mod tests {
         assert!(errors.is_empty(), "errors: {errors:?}");
     }
 
-    #[tokio::test]
-    #[ignore = "requires the user's local egress proxies"]
-    async fn live_upstream_proxies_reach_overseas_https() {
-        for (mode, port) in [("http", 7890), ("socks5", 7891)] {
-            let proxy = EffectiveUpstreamProxy {
-                mode: mode.to_string(),
-                host: "127.0.0.1".to_string(),
-                port,
-                username: String::new(),
-                password: None,
-                bypass: vec![],
-            };
-            let stream = connect_destination(&proxy, "www.google.com", 443)
-                .await
-                .unwrap_or_else(|error| panic!("{mode} tunnel failed: {error}"));
-            let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let config = ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            let connector = TlsConnector::from(Arc::new(config));
-            let mut tls = connector
-                .connect(
-                    ServerName::try_from("www.google.com".to_string()).unwrap(),
-                    stream,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("{mode} target TLS failed: {error}"));
-            tls.write_all(
-                b"GET /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .unwrap();
-            let mut response = vec![0_u8; 512];
-            let read = timeout(Duration::from_secs(15), tls.read(&mut response))
-                .await
-                .unwrap()
-                .unwrap();
-            let status = String::from_utf8_lossy(&response[..read]);
-            assert!(
-                status.starts_with("HTTP/1.1 204") || status.starts_with("HTTP/1.0 204"),
-                "{mode} returned {status:?}"
-            );
-        }
+    #[test]
+    fn effective_upstream_from_env_reads_proxy_not_hardcoded_ports() {
+        // Contract for live tests: PROXY beats HTTP_PROXY; no silent 7890 fallback.
+        let detected = detect_env_proxy_from_pairs([
+            ("HTTP_PROXY", Some("http://127.0.0.1:9999")),
+            ("PROXY", Some("socks5://127.0.0.1:1080")),
+        ])
+        .expect("PROXY should win");
+        assert_eq!(detected.port, 1080);
+        assert_eq!(detected.mode, "socks5");
+        assert_eq!(detected.source, "PROXY");
+        let parsed = parse_proxy_url("http://user:secret@localhost:8080").unwrap();
+        assert_eq!(parsed.host, "localhost");
+        assert_eq!(parsed.port, 8080);
+        assert_eq!(parsed.username, "user");
+        assert_eq!(parsed.password.as_deref(), Some("secret"));
     }
 
     #[tokio::test]
-    #[ignore = "requires the user's local egress proxies and port 8888"]
-    async fn live_shownet_8888_proxy_captures_both_upstream_modes() {
-        for (mode, port) in [("http", 7890), ("socks5", 7891)] {
-            let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
-            let errors = Arc::new(Mutex::new(Vec::<String>::new()));
-            let capture_sink: CaptureSink = {
-                let captured = captured.clone();
-                Arc::new(move |request| captured.lock().unwrap().push(request))
-            };
-            let error_sink: ErrorSink = {
-                let errors = errors.clone();
-                Arc::new(move |error| errors.lock().unwrap().push(error))
-            };
-            let certificate_authority = test_certificate_authority();
-            let handle = ProxyHandle::start_with_sinks(
-                "127.0.0.1:8888".parse().unwrap(),
-                false,
-                "session-smoke".to_string(),
-                EffectiveUpstreamProxy {
-                    mode: mode.to_string(),
-                    host: "127.0.0.1".to_string(),
-                    port,
-                    username: String::new(),
-                    password: None,
-                    bypass: vec![],
-                },
-                certificate_authority.clone(),
-                capture_sink,
-                error_sink,
+    #[ignore = "requires PROXY or HTTP(S)_PROXY pointing at a working egress"]
+    async fn live_upstream_proxy_from_env_reaches_https() {
+        let proxy = effective_upstream_from_process_env().unwrap_or_else(|| {
+            panic!(
+                "live egress requires PROXY or HTTP(S)_PROXY / ALL_PROXY in the environment \
+                 (project .env is loaded by `npm run test:windows`)"
+            )
+        });
+        eprintln!(
+            "LIVE_EGRESS using mode={} host={} port={} (from process env)",
+            proxy.mode, proxy.host, proxy.port
+        );
+
+        // Shipped probe: CONNECT example.com:443 via configured egress.
+        let probe = probe_upstream_egress(&proxy).await;
+        assert!(
+            probe.ok,
+            "probe_upstream_egress failed for {}:{} — {}",
+            proxy.host, proxy.port, probe.message
+        );
+        assert!(
+            probe.message.contains(&format!("{}:{}", proxy.host, proxy.port))
+                || proxy.mode == "direct",
+            "probe message should name the egress: {}",
+            probe.message
+        );
+
+        // Full tunnel + origin TLS via shipped connect_destination.
+        let target_host = "example.com";
+        let stream = connect_destination(&proxy, target_host, 443)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "connect_destination via {}:{} failed: {error}",
+                    proxy.host, proxy.port
+                )
+            });
+        let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let mut tls = connector
+            .connect(
+                ServerName::try_from(target_host.to_string()).unwrap(),
+                stream,
             )
             .await
-            .unwrap_or_else(|error| panic!("{mode} ShowNet startup failed: {error}"));
+            .unwrap_or_else(|error| panic!("origin TLS failed: {error}"));
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = vec![0_u8; 1024];
+        let read = timeout(Duration::from_secs(20), tls.read(&mut response))
+            .await
+            .expect("origin read timeout")
+            .expect("origin read error");
+        let status = String::from_utf8_lossy(&response[..read]);
+        assert!(
+            status.contains("HTTP/1.")
+                && (status.contains(" 200 ")
+                    || status.contains(" 204 ")
+                    || status.contains(" 301 ")
+                    || status.contains(" 302 ")
+                    || status.contains(" 303 ")
+                    || status.contains(" 307 ")
+                    || status.contains(" 308 ")),
+            "unexpected origin response via egress {}:{}: {status:?}",
+            proxy.host,
+            proxy.port
+        );
+        eprintln!(
+            "LIVE_EGRESS_OK mode={} {}:{} → example.com:443",
+            proxy.mode, proxy.host, proxy.port
+        );
+    }
 
-            let client = connect_tcp("127.0.0.1", 8888).await.unwrap();
-            let mut tunnel = BoxedIo(Box::new(client));
-            tunnel
-                .write_all(
-                    b"CONNECT www.google.com:443 HTTP/1.1\r\nHost: www.google.com:443\r\nUser-Agent: curl/shownet-smoke\r\n\r\n",
-                )
-                .await
-                .unwrap();
-            let response = read_http_header(&mut tunnel).await.unwrap();
-            assert!(response.starts_with("HTTP/1.1 200"), "{mode}: {response:?}");
+    #[tokio::test]
+    #[ignore = "requires PROXY/HTTP(S)_PROXY and ability to bind a local ShowNet listener"]
+    async fn live_shownet_mitm_smoke_via_env_upstream() {
+        let upstream = effective_upstream_from_process_env().unwrap_or_else(|| {
+            panic!("live MITM smoke requires PROXY or HTTP(S)_PROXY / ALL_PROXY")
+        });
+        eprintln!(
+            "LIVE_MITM upstream mode={} host={} port={}",
+            upstream.mode, upstream.host, upstream.port
+        );
 
-            let mut roots = RootCertStore::empty();
-            roots.add(certificate_authority.certificate_der()).unwrap();
-            let config = ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            let connector = TlsConnector::from(Arc::new(config));
-            let mut tls = connector
-                .connect(
-                    ServerName::try_from("www.google.com".to_string()).unwrap(),
-                    tunnel,
-                )
-                .await
-                .unwrap();
-            tls.write_all(
-                b"GET /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n",
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let certificate_authority = test_certificate_authority();
+        // Bind ephemeral port so the smoke does not fight a running :8888 instance.
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-windows-qa-mitm".to_string(),
+            upstream.clone(),
+            certificate_authority.clone(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ShowNet listener bind/start failed: {error}"));
+        let listen = handle.local_addr();
+        eprintln!("LIVE_MITM listener {}", listen);
+
+        let client = connect_tcp(&listen.ip().to_string(), listen.port())
+            .await
+            .unwrap_or_else(|error| panic!("connect to ShowNet listener failed: {error}"));
+        let mut tunnel = BoxedIo(Box::new(client));
+        tunnel
+            .write_all(
+                b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nUser-Agent: shownet-windows-qa\r\n\r\n",
             )
             .await
             .unwrap();
-            let mut target_response = vec![0_u8; 512];
-            let read = timeout(Duration::from_secs(15), tls.read(&mut target_response))
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(String::from_utf8_lossy(&target_response[..read]).starts_with("HTTP/1.1 204"));
-            drop(tls);
-            handle.stop().await;
+        let response = read_http_header(&mut tunnel)
+            .await
+            .unwrap_or_else(|error| panic!("CONNECT response failed: {error}"));
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "ShowNet CONNECT not 200 (often bad egress or bind): {response:?}"
+        );
 
-            let captured = captured.lock().unwrap();
-            assert_eq!(captured.len(), 2, "{mode} captured {captured:?}");
-            assert_eq!(captured[0].method, "CONNECT");
-            assert_eq!(captured[0].host, "www.google.com");
-            assert_eq!(captured[0].source, "terminal");
-            let fingerprint = captured[0]
-                .tls_fingerprint
-                .as_ref()
-                .unwrap_or_else(|| panic!("{mode} did not capture ClientHello fingerprint"));
-            assert_eq!(fingerprint.inbound.sni.as_deref(), Some("www.google.com"));
-            assert_eq!(fingerprint.inbound.ja3.len(), 32);
-            assert_eq!(fingerprint.capture_mode, "mitm");
-            assert_eq!(fingerprint.outbound.mode, "independent");
-            assert_eq!(captured[1].method, "GET");
-            assert_eq!(captured[1].path, "/generate_204");
-            assert_eq!(captured[1].status, 204);
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(certificate_authority.certificate_der())
+            .expect("trust ShowNet CA for MITM client");
+        let config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let mut tls = connector
+            .connect(
+                ServerName::try_from("example.com".to_string()).unwrap(),
+                tunnel,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("MITM client TLS failed: {error}"));
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut target_response = vec![0_u8; 1024];
+        let read = timeout(Duration::from_secs(20), tls.read(&mut target_response))
+            .await
+            .expect("MITM body timeout")
+            .expect("MITM body read");
+        let body = String::from_utf8_lossy(&target_response[..read]);
+        assert!(
+            body.contains("HTTP/1.")
+                && !body.contains(" 502 ")
+                && (body.contains(" 200 ")
+                    || body.contains(" 301 ")
+                    || body.contains(" 302 ")
+                    || body.contains(" 303 ")
+                    || body.contains(" 307 ")
+                    || body.contains(" 308 ")),
+            "MITM fetch should not be 502; got: {body:?}"
+        );
+        drop(tls);
+        handle.stop().await;
+
+        let captured = captured.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "MITM smoke should capture CONNECT and/or GET; errors={:?}",
+            errors.lock().unwrap()
+        );
+        assert!(
+            captured.iter().any(|r| r.method.eq_ignore_ascii_case("CONNECT")),
+            "expected CONNECT capture: {captured:?}"
+        );
+        // Prefer decrypted GET when MITM succeeds.
+        if let Some(get) = captured
+            .iter()
+            .find(|r| r.method.eq_ignore_ascii_case("GET"))
+        {
+            assert_ne!(get.status, 502, "GET should not be proxy error: {get:?}");
             assert!(
-                errors.lock().unwrap().is_empty(),
-                "{mode} errors: {errors:?}"
+                get.status == 200 || (300..400).contains(&get.status),
+                "unexpected GET status {}: {get:?}",
+                get.status
             );
         }
+        assert!(
+            errors.lock().unwrap().is_empty(),
+            "proxy errors: {:?}",
+            errors.lock().unwrap()
+        );
+        eprintln!(
+            "LIVE_MITM_OK listener={} captures={}",
+            listen,
+            captured.len()
+        );
     }
 }

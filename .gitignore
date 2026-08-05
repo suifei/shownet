@@ -16,3 +16,4 @@ docs/*.md
 docs/**/*.md
 docs/scorecard-aws-waf-fixture.json
 docs/scorecard-session-ee2a709d.json
+.env

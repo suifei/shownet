@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 import { constants as fsConstants } from "node:fs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+
+/** Paths we rewrite during the sidecar build (must not trip the dirty-tree guard).
+ * Declared before top-level await so ensurePinnedSource can see them. */
+const EPHEMERAL_SOURCE_PATHS = [
+  "bin/protoc",
+  "bin/protoc.exe",
+  "crates/build/xai-proto-build/src/lib.rs",
+  ".cargo/config.toml",
+];
+
 const sourceMetadata = JSON.parse(await readFile(resolve(root, "third-party/grok-build/SOURCE.json"), "utf8"));
 validateSourceMetadata(sourceMetadata);
 const GROK_REPOSITORY = sourceMetadata.repository;
@@ -149,14 +159,6 @@ function hostTarget() {
   return target;
 }
 
-/** Paths we rewrite during the sidecar build (must not trip the dirty-tree guard). */
-const EPHEMERAL_SOURCE_PATHS = [
-  "bin/protoc",
-  "bin/protoc.exe",
-  "crates/build/xai-proto-build/src/lib.rs",
-  ".cargo/config.toml",
-];
-
 /**
  * Force Windows release links without PDBs so MSVC does not hit LNK4319.
  * Upstream grok-build already has .cargo/config.toml and notes that rustflags
@@ -203,16 +205,13 @@ incremental = false
 
 function resetEphemeralPatches(directory) {
   // Restore tracked files we may have overwritten on a previous run.
-  try {
-    run("git", ["checkout", "HEAD", "--", ...EPHEMERAL_SOURCE_PATHS], directory);
-  } catch {
-    // Fresh clone or path missing — fine.
-  }
+  // Checkout one path at a time — some (e.g. bin/protoc.exe) are not in the tree.
   for (const relative of EPHEMERAL_SOURCE_PATHS) {
-    // Drop untracked copies (e.g. protoc.exe we inject on Windows).
-    const full = join(directory, relative);
-    // only remove if untracked; checkout already restored tracked
-    void full;
+    try {
+      run("git", ["checkout", "HEAD", "--", relative], directory);
+    } catch {
+      // Path not in HEAD or checkout dirty — ignore.
+    }
   }
 }
 

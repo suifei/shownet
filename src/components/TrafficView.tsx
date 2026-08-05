@@ -1003,6 +1003,12 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
           <span>{request.risk === "critical" ? "发现敏感凭据或签名参数" : request.risk === "warning" ? "该请求需要关注" : "AI 已标记为协议关键请求"}</span>
         </div>
       )}
+      {request.status === 502 && request.responseBody?.trim() && (
+        <div className="risk-banner risk-banner--warning proxy-error-banner" role="alert">
+          <CircleAlert size={15} />
+          <span><strong>代理错误（502）</strong>{request.responseBody.trim()}</span>
+        </div>
+      )}
       <div className="detail-tabs">
         {tabs.map((item) => (
           <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}>
@@ -1061,7 +1067,14 @@ function RequestOverview({ request }: { request: RequestRecord }) {
   const server = headerValue(request.responseHeaders, "server") ?? "未提供";
   const contentType = headerValue(request.responseHeaders, "content-type") ?? "未提供";
   const url = `${request.tls === "明文" ? "http" : "https"}://${request.host}${request.path}${request.query ? `?${request.query}` : ""}`;
+  const proxyError = request.status === 502 && request.responseBody?.trim() ? request.responseBody.trim() : "";
   return <div className="request-overview">
+    {proxyError && (
+      <section className="overview-proxy-error" role="alert">
+        <h3>代理错误详情</h3>
+        <pre>{proxyError}</pre>
+      </section>
+    )}
     <dl className="overview-grid">
       <div className="is-wide"><dt>完整 URL</dt><dd>{url}</dd></div>
       <div><dt>状态</dt><dd>{request.status}</dd></div>

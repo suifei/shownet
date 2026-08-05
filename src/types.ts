@@ -1231,6 +1231,26 @@ export interface UpstreamProxySettings {
   bypass: string[];
 }
 
+export interface UpstreamProbeResult {
+  ok: boolean;
+  mode: string;
+  host: string;
+  port: number;
+  target: string;
+  latencyMs: number;
+  message: string;
+}
+
+/** Parsed from process env HTTP(S)_PROXY / ALL_PROXY — not applied automatically. */
+export interface DetectedEnvProxy {
+  mode: UpstreamProxyMode | string;
+  host: string;
+  port: number;
+  username: string;
+  source: string;
+  raw: string;
+}
+
 export type TlsInterceptionMode = "intercept_all" | "bypass_selected" | "bypass_all";
 
 export interface TlsInterceptionSettings {

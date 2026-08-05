@@ -349,6 +349,7 @@ function App() {
   const liveDisplayPausedRef = useRef(false);
   const liveDisplaySyncingRef = useRef(false);
   const liveDisplaySyncBufferRef = useRef(new Map<string, { item: RequestListItem; created: boolean }>());
+  const lastProxyErrorToastAt = useRef(0);
 
   useDismissibleLayer(sessionToolsOpen, sessionToolsRef, () => setSessionToolsOpen(false));
 
@@ -865,6 +866,15 @@ function App() {
           }
         }),
         listen("capture://breakpoints-changed", () => void refreshBreakpointQueue()),
+        listen<string>("capture://proxy-error", (event) => {
+          const message = String(event.payload ?? "").trim();
+          if (!message || disposed) return;
+          // Surface full egress / connect failures (e.g. 连接 host:port 超时) without flooding.
+          const now = Date.now();
+          if (now - lastProxyErrorToastAt.current < 2500) return;
+          lastProxyErrorToastAt.current = now;
+          setToast(message.length > 220 ? `${message.slice(0, 220)}…` : message);
+        }),
       ]);
       if (disposed) listeners.forEach((unlisten) => unlisten());
       else unlisteners.push(...listeners);
@@ -1441,7 +1451,19 @@ function App() {
             />
           )}
           {activeView === "analysis" && <AnalysisView sessionId={activeSession.id} requests={requests} initialRequestIds={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.requestIds : undefined} scopeRequestId={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.id : undefined} onScopeConsumed={() => setAnalysisRequestScope(null)} onOpenEvidenceRequest={(requestId) => { setEvidenceRequestId(requestId); setActiveView("traffic"); }} onConfigureAi={() => { setSettingsTab("ai"); setActiveView("settings"); }} onNotify={setToast} autoRunId={analysisAutoRun?.sessionId === activeSession.id ? analysisAutoRun.id : undefined} onAutoRunConsumed={() => setAnalysisAutoRun(null)} />}
-          {activeView === "browser" && <BrowserView capturing={capturing} sessionId={activeSession.id} onAnalyzeCryptoLab={() => void analyzeCryptoLab(activeSession.id)} />}
+          {/* Keep BrowserView mounted so switching nav tabs does not stop proxy Chrome / drop CDP state. */}
+          <div
+            className={`workspace-view-keep-alive ${activeView === "browser" ? "is-active" : "is-hidden"}`}
+            hidden={activeView !== "browser"}
+            aria-hidden={activeView !== "browser"}
+          >
+            <BrowserView
+              active={activeView === "browser"}
+              capturing={capturing}
+              sessionId={activeSession.id}
+              onAnalyzeCryptoLab={() => void analyzeCryptoLab(activeSession.id)}
+            />
+          </div>
           {activeView === "skills" && <SkillsView sessionId={activeSession.id} requests={requests} />}
           {activeView === "settings" && (
             <SettingsView

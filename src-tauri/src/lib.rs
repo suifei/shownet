@@ -61,7 +61,8 @@ use models::{
     CollectionExportResult, CollectionImportCommitInput, CollectionImportPreview,
     CollectionImportResult, CollectionSyncCommitInput, CollectionSyncPreview, CollectionSyncResult,
     ConnectionDiagnostics, CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput,
-    EnvironmentInput, EnvironmentRecord, EnvironmentVariableInput, FollowupAnalysisInput,
+    EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord, EnvironmentVariableInput,
+    FollowupAnalysisInput,
     McpClientSettings, McpClientSettingsInput, McpClientTestResult, McpRecentClient,
     McpServerSettings, McpServerSettingsInput, McpServerStatus, ProxyBrowserStatus, ReplayBatch,
     ReplayBatchInput, RequestAnnotation, RequestAnnotationInput, RequestCollection,
@@ -72,7 +73,8 @@ use models::{
     RequestWindowQuery, ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus,
     RulePreviewResult, SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit,
     StartAnalysisInput, StorageStats, SystemProxySettings, SystemProxySettingsInput,
-    UpdateCheckResult, UpstreamProxySettings, UpstreamProxySettingsInput,
+    DetectedEnvProxy, UpdateCheckResult, UpstreamProbeResult, UpstreamProxySettings,
+    UpstreamProxySettingsInput,
 };
 use proxy::{ProxyHandle, ReverseProxyHandle};
 use serde::{Deserialize, Serialize};
@@ -2739,6 +2741,40 @@ fn save_upstream_proxy_settings(
 }
 
 #[tauri::command]
+fn detect_env_upstream_proxy() -> Option<DetectedEnvProxy> {
+    proxy::detect_env_proxy()
+}
+
+/// Probe current form draft when `settings` is provided; otherwise probe saved egress.
+#[tauri::command]
+async fn probe_upstream_proxy(
+    settings: Option<UpstreamProxySettingsInput>,
+    state: State<'_, AppState>,
+) -> Result<UpstreamProbeResult, String> {
+    let effective = if let Some(input) = settings {
+        let stored = state.storage.effective_upstream_proxy()?;
+        let password = if input.clear_password {
+            None
+        } else if let Some(password) = input.password.filter(|value| !value.is_empty()) {
+            Some(password)
+        } else {
+            stored.password
+        };
+        EffectiveUpstreamProxy {
+            mode: input.mode,
+            host: input.host.trim().to_string(),
+            port: input.port,
+            username: input.username.trim().to_string(),
+            password,
+            bypass: input.bypass,
+        }
+    } else {
+        state.storage.effective_upstream_proxy()?
+    };
+    Ok(proxy::probe_upstream_egress(&effective).await)
+}
+
+#[tauri::command]
 fn append_capture_event(
     event: CaptureEventInput,
     app: tauri::AppHandle,
@@ -3456,7 +3492,8 @@ fn validate_output_directory(path: String) -> Result<PathBuf, String> {
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
         let action = match event.id().as_ref() {
@@ -3733,6 +3770,8 @@ pub fn run() {
             generate_request_code,
             get_upstream_proxy_settings,
             save_upstream_proxy_settings,
+            detect_env_upstream_proxy,
+            probe_upstream_proxy,
             get_system_proxy_settings,
             save_system_proxy_settings,
             retry_system_proxy_recovery,

@@ -42,9 +42,14 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { QRCodeCanvas } from "qrcode.react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { AiAnalysisSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
+import type { AiAnalysisSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
+import {
+  mergeStaticCdnBypassRules,
+  STATIC_CDN_BYPASS_PRESET,
+  staticCdnBypassRulesPresent,
+} from "../tlsBypassPresets";
 import qqGroupQr from "../assets/qq-group-fridare.jpg";
 import { useEscapeDismiss } from "../useDismissibleLayer";
 
@@ -217,6 +222,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const [qrOpen, setQrOpen] = useState(false);
   const [upstream, setUpstream] = useState(defaultUpstream);
   const [upstreamPassword, setUpstreamPassword] = useState("");
+  const [envProxyHint, setEnvProxyHint] = useState<DetectedEnvProxy | null>(null);
+  const [probingUpstream, setProbingUpstream] = useState(false);
   const [outboundTls, setOutboundTls] = useState<OutboundTlsProfileStatus | null>(null);
   const [savingOutboundTls, setSavingOutboundTls] = useState(false);
   const [tlsInterception, setTlsInterception] = useState(defaultTlsInterception);
@@ -314,7 +321,16 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   useEffect(() => {
     if (!isTauri()) return;
     invoke<UpstreamProxySettings>("get_upstream_proxy_settings")
-      .then(setUpstream)
+      .then((settings) => {
+        setUpstream(settings);
+        if (settings.mode === "direct") {
+          void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
+            .then(setEnvProxyHint)
+            .catch(() => setEnvProxyHint(null));
+        } else {
+          setEnvProxyHint(null);
+        }
+      })
       .catch((error) => onNotify(`读取出口代理失败：${String(error)}`));
     invoke<OutboundTlsProfileStatus>("get_outbound_tls_profile")
       .then(setOutboundTls)
@@ -662,6 +678,58 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     accessRules: parseClientAccessRules(accessRulesDraft),
   }, `${clientAccessModeLabel(accessMode)}已应用`);
 
+  const upstreamProbeInput = () => ({
+    mode: upstream.mode,
+    host: upstream.host,
+    port: upstream.port,
+    username: upstream.username,
+    password: upstreamPassword || null,
+    clearPassword: false,
+    bypass: upstream.bypass,
+  });
+
+  const runUpstreamProbe = async (afterSave = false) => {
+    if (!isTauri()) {
+      onNotify(afterSave ? "出口代理配置已保存（预览模式跳过探测）" : "预览模式无法探测出口代理");
+      return;
+    }
+    setProbingUpstream(true);
+    try {
+      const result = await invoke<UpstreamProbeResult>("probe_upstream_proxy", {
+        settings: afterSave ? null : upstreamProbeInput(),
+      });
+      if (result.ok) {
+        onNotify(
+          afterSave
+            ? `出口代理已保存 · 探测成功（${result.latencyMs}ms）→ ${result.target}`
+            : `出口探测成功（${result.latencyMs}ms）：${result.message}`,
+        );
+      } else {
+        onNotify(result.message);
+      }
+    } catch (error) {
+      onNotify(`出口探测失败：${String(error)}`);
+    } finally {
+      setProbingUpstream(false);
+    }
+  };
+
+  const importEnvUpstream = () => {
+    if (!envProxyHint) return;
+    const mode = (["http", "https", "socks5"].includes(envProxyHint.mode)
+      ? envProxyHint.mode
+      : "http") as UpstreamProxyMode;
+    setUpstream((current) => ({
+      ...current,
+      mode,
+      host: envProxyHint.host,
+      port: envProxyHint.port,
+      username: envProxyHint.username || current.username,
+    }));
+    setEnvProxyHint(null);
+    onNotify(`已从 ${envProxyHint.source} 导入 ${envProxyHint.host}:${envProxyHint.port}（${mode}），请确认后保存`);
+  };
+
   const saveUpstream = async () => {
     setSavingUpstream(true);
     try {
@@ -672,19 +740,22 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         return;
       }
       const saved = await invoke<UpstreamProxySettings>("save_upstream_proxy_settings", {
-        settings: {
-          mode: upstream.mode,
-          host: upstream.host,
-          port: upstream.port,
-          username: upstream.username,
-          password: upstreamPassword || null,
-          clearPassword: false,
-          bypass: upstream.bypass,
-        },
+        settings: upstreamProbeInput(),
       });
       setUpstream(saved);
       setUpstreamPassword("");
-      onNotify("出口代理配置已加密保存");
+      if (saved.mode === "direct") {
+        onNotify("出口代理配置已加密保存（直连）");
+        void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
+          .then(setEnvProxyHint)
+          .catch(() => setEnvProxyHint(null));
+      } else {
+        setEnvProxyHint(null);
+        // Auto-probe after save so wrong host/port is immediately visible.
+        setSavingUpstream(false);
+        await runUpstreamProbe(true);
+        return;
+      }
     } catch (error) {
       onNotify(`保存出口代理失败：${String(error)}`);
     } finally {
@@ -694,6 +765,38 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 
   const selectTlsInterceptionMode = (mode: TlsInterceptionMode) => {
     setTlsInterception((current) => ({ ...current, mode }));
+  };
+
+  const persistTlsInterception = async (
+    next: TlsInterceptionSettings,
+    notify?: string,
+  ): Promise<boolean> => {
+    setSavingTlsInterception(true);
+    try {
+      if (!isTauri()) {
+        setTlsInterception(next);
+        setTlsBypassRules(next.bypass.join("\n"));
+        onNotify(notify ?? "HTTPS 解密策略已保存，新连接立即生效");
+        return true;
+      }
+      const saved = await invoke<TlsInterceptionSettings>("save_tls_interception_settings", { settings: next });
+      setTlsInterception(saved);
+      setTlsBypassRules(saved.bypass.join("\n"));
+      onNotify(
+        notify
+          ?? (saved.mode === "intercept_all"
+            ? "已恢复解密全部 HTTPS"
+            : saved.mode === "bypass_all"
+              ? "全部 HTTPS 已改为原样隧道"
+              : `已启用 ${saved.bypass.length} 条 HTTPS 绕行规则`),
+      );
+      return true;
+    } catch (error) {
+      onNotify(`保存 HTTPS 解密策略失败：${String(error)}`);
+      return false;
+    } finally {
+      setSavingTlsInterception(false);
+    }
   };
 
   const saveTlsInterception = async () => {
@@ -716,23 +819,31 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       bypass,
       showBypassedConnections: tlsInterception.showBypassedConnections,
     };
-    setSavingTlsInterception(true);
-    try {
-      if (!isTauri()) {
-        setTlsInterception(next);
-        setTlsBypassRules(next.bypass.join("\n"));
-        onNotify("HTTPS 解密策略已保存，新连接立即生效");
-        return;
-      }
-      const saved = await invoke<TlsInterceptionSettings>("save_tls_interception_settings", { settings: next });
-      setTlsInterception(saved);
-      setTlsBypassRules(saved.bypass.join("\n"));
-      onNotify(saved.mode === "intercept_all" ? "已恢复解密全部 HTTPS" : saved.mode === "bypass_all" ? "全部 HTTPS 已改为原样隧道" : `已启用 ${saved.bypass.length} 条 HTTPS 绕行规则`);
-    } catch (error) {
-      onNotify(`保存 HTTPS 解密策略失败：${String(error)}`);
-    } finally {
-      setSavingTlsInterception(false);
+    await persistTlsInterception(next);
+  };
+
+  /** One-click: merge static CDN preset, switch to bypass_selected, persist. */
+  const applyStaticCdnBypassPreset = async () => {
+    if (tlsInterception.mode === "bypass_all") {
+      onNotify("当前为全部绕行，静态 CDN 预设无需单独启用");
+      return;
     }
+    const currentRules = tlsBypassRules
+      .split(/[\n,]+/)
+      .map((rule) => rule.trim())
+      .filter(Boolean);
+    const bypass = mergeStaticCdnBypassRules(currentRules);
+    const next: TlsInterceptionSettings = {
+      mode: "bypass_selected",
+      bypass,
+      showBypassedConnections: tlsInterception.showBypassedConnections,
+    };
+    setTlsInterception(next);
+    setTlsBypassRules(bypass.join("\n"));
+    await persistTlsInterception(
+      next,
+      `已启用推荐静态 CDN 绕行（${STATIC_CDN_BYPASS_PRESET.join("、")}）。这些域名不解密正文，可修复百度等站图裂/脚本失效。`,
+    );
   };
 
   const clearUpstreamPassword = async () => {
@@ -1295,6 +1406,23 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
             </SettingsSection>
 
             <SettingsSection title="出口代理">
+              <p className="upstream-proxy-help">
+                ShowNet <strong>不会</strong>自动继承系统或环境变量里的 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>。
+                抓包后访问外网时，必须在此单独配置二级出口；端口填错（例如 8080 而非 1080）会导致 502 与「连接超时」。
+                不要把出口设成 ShowNet 自身监听端口（如 8888）。
+              </p>
+              {envProxyHint && upstream.mode === "direct" && (
+                <div className="settings-notice upstream-env-import" role="status">
+                  <CircleAlert size={15} />
+                  <span>
+                    检测到环境变量 <code>{envProxyHint.source}</code> = <code>{envProxyHint.raw}</code>
+                    （{envProxyHint.host}:{envProxyHint.port}）。当前为直连，可一键导入为出口代理。
+                  </span>
+                  <button type="button" className="secondary-button" onClick={importEnvUpstream}>
+                    一键导入
+                  </button>
+                </div>
+              )}
               <div className="upstream-proxy-heading">
                 <div className="upstream-mode-control" aria-label="出口代理类型">
                   {([
@@ -1306,7 +1434,17 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                     <button
                       key={mode}
                       className={upstream.mode === mode ? "is-active" : ""}
-                      onClick={() => setUpstream((current) => ({ ...current, mode }))}
+                      onClick={() => {
+                        setUpstream((current) => ({ ...current, mode }));
+                        if (!isTauri()) return;
+                        if (mode === "direct") {
+                          void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
+                            .then(setEnvProxyHint)
+                            .catch(() => setEnvProxyHint(null));
+                        } else {
+                          setEnvProxyHint(null);
+                        }
+                      }}
                     >
                       {label}
                     </button>
@@ -1437,7 +1575,23 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               <label className="settings-text-field"><span>直连域名</span><input value={upstream.bypass.join(", ")} onChange={(event) => setUpstream((current) => ({ ...current, bypass: event.target.value.split(",").map((item) => item.trim()) }))} /></label>
               <div className="upstream-actions">
                 <span><Database size={13} />SQLite · AES-256-GCM</span>
-                <button className="save-settings-button" onClick={saveUpstream} disabled={savingUpstream}><Save size={15} />{savingUpstream ? "保存中" : "保存出口代理"}</button>
+                <div className="upstream-actions__buttons">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void runUpstreamProbe(false)}
+                    disabled={probingUpstream || savingUpstream}
+                    aria-label="探测出口连通性"
+                    title="经当前表单配置 CONNECT example.com:443"
+                  >
+                    <RadioTower size={14} />
+                    {probingUpstream ? "探测中" : "探测连通性"}
+                  </button>
+                  <button className="save-settings-button" onClick={() => void saveUpstream()} disabled={savingUpstream || probingUpstream}>
+                    <Save size={15} />
+                    {savingUpstream ? "保存中" : "保存出口代理"}
+                  </button>
+                </div>
               </div>
             </SettingsSection>
 
@@ -1459,6 +1613,22 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title="不解密任何 HTTPS"><ShieldOff size={14} />全部绕行</button>
                 </div>
                 <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
+                <div className="tls-static-cdn-preset">
+                  <button
+                    type="button"
+                    className={`secondary-button tls-static-cdn-preset__button ${staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected" ? "is-applied" : ""}`}
+                    onClick={() => void applyStaticCdnBypassPreset()}
+                    disabled={savingTlsInterception || tlsInterception.mode === "bypass_all"}
+                    aria-label="推荐：绕过常见静态 CDN"
+                    title="写入 *.bdstatic.com / *.bcebos.com 并切换为绕行指定；这些域名将不解密正文"
+                  >
+                    <ShieldCheck size={14} />
+                    {staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected"
+                      ? "已启用推荐静态 CDN 绕行"
+                      : "推荐：绕过常见静态 CDN（修复百度等站图裂/脚本）"}
+                  </button>
+                  <small>命中域名保持浏览器端到端 TLS，ShowNet 只记隧道元数据，<strong>不解密正文</strong>。主站（如 www.baidu.com）仍解密。</small>
+                </div>
                 {tlsInterception.mode === "bypass_selected" && <label className="tls-bypass-editor"><span>保持原始 TLS 的域名</span><textarea aria-label="HTTPS 绕行域名" value={tlsBypassRules} onChange={(event) => setTlsBypassRules(event.target.value)} placeholder={"*.bank.example\napi.secure.example"} spellCheck={false} /><small>每行一个，支持 * 和 ?。也会匹配 ClientHello 中的 SNI。</small></label>}
                 {tlsInterception.mode === "bypass_all" && <div className="tls-bypass-warning"><CircleAlert size={14} /><span>这会关闭 HTTPS 正文分析；HTTP 抓包不受影响。</span></div>}
                 {tlsInterception.mode !== "intercept_all" && <label className="settings-switch-row tls-bypass-visibility"><span><strong>在流量列表显示绕行连接</strong><small>{tlsInterception.showBypassedConnections ? "连接会标记为“未解密”，正文不可见" : "只隐藏成功连接；连接失败仍会保留用于排查"}</small></span><input type="checkbox" checked={tlsInterception.showBypassedConnections} onChange={(event) => setTlsInterception((current) => ({ ...current, showBypassedConnections: event.target.checked }))} /><i /></label>}

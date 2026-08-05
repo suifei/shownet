@@ -5,6 +5,13 @@ use std::net::IpAddr;
 pub const MAX_TLS_BYPASS_RULES: usize = 128;
 pub const MAX_TLS_BYPASS_RULE_BYTES: usize = 253;
 
+/// Built-in static CDN hosts that often return 400 under rustls MITM (e.g. Baidu JSP3).
+/// Wildcards cover both apex-style hosts and nested CDNs such as `pss.bdstatic.com`.
+/// These domains stay end-to-end TLS when bypassed (no request/response body decryption).
+/// Mirrored in the renderer (`src/tlsBypassPresets.ts`); exercised by unit tests.
+#[allow(dead_code)]
+pub const STATIC_CDN_BYPASS_PRESET: &[&str] = &["*.bdstatic.com", "*.bcebos.com"];
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsInterceptionMode {
@@ -88,6 +95,32 @@ impl TlsInterceptionSettings {
 
 fn show_bypassed_connections_by_default() -> bool {
     true
+}
+
+/// Merge the static CDN preset into settings, switching to `bypass_selected` when needed.
+/// Does not change `bypass_all` (already tunnels every host). Dedupes against existing rules.
+/// Renderer applies the same merge client-side; this helper is the authoritative matching contract.
+#[allow(dead_code)]
+pub fn apply_static_cdn_bypass_preset(
+    settings: &TlsInterceptionSettings,
+) -> Result<TlsInterceptionSettings, String> {
+    if settings.mode == TlsInterceptionMode::BypassAll {
+        return Ok(settings.clone());
+    }
+    let mut bypass = settings.bypass.clone();
+    for rule in STATIC_CDN_BYPASS_PRESET {
+        if !bypass
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(rule))
+        {
+            bypass.push((*rule).to_string());
+        }
+    }
+    normalize_tls_interception_settings(TlsInterceptionSettings {
+        mode: TlsInterceptionMode::BypassSelected,
+        bypass,
+        show_bypassed_connections: settings.show_bypassed_connections,
+    })
 }
 
 pub fn normalize_tls_interception_settings(
@@ -330,5 +363,59 @@ mod tests {
         let decision = hidden.decision("api.example.com", None);
         assert!(decision.bypass);
         assert!(!decision.record_successful_tunnel);
+    }
+
+    #[test]
+    fn static_cdn_preset_bypasses_baidu_cdn_hosts_without_mitm() {
+        let settings = apply_static_cdn_bypass_preset(&TlsInterceptionSettings::default()).unwrap();
+        assert_eq!(settings.mode, TlsInterceptionMode::BypassSelected);
+        assert!(settings.bypass.iter().any(|r| r == "*.bdstatic.com"));
+        assert!(settings.bypass.iter().any(|r| r == "*.bcebos.com"));
+
+        // CONNECT / SNI hosts from the Baidu broken-static evidence should tunnel.
+        for host in [
+            "pss.bdstatic.com",
+            "psstatic.cdn.bcebos.com",
+            "img.bcebos.com",
+            "ss0.bdstatic.com",
+        ] {
+            let decision = settings.decision(host, None);
+            assert!(decision.bypass, "expected bypass for {host}");
+            assert!(decision.record_successful_tunnel);
+        }
+        // Main site HTML still decrypts so search/API remain visible.
+        assert!(!settings.decision("www.baidu.com", None).bypass);
+        assert!(!settings.decision("www.baidu.com", Some("www.baidu.com")).bypass);
+    }
+
+    #[test]
+    fn static_cdn_preset_merges_without_duplicates_and_skips_bypass_all() {
+        let existing = normalize_tls_interception_settings(TlsInterceptionSettings {
+            mode: TlsInterceptionMode::BypassSelected,
+            bypass: vec!["*.bdstatic.com".into(), "api.secure.example".into()],
+            show_bypassed_connections: true,
+        })
+        .unwrap();
+        let merged = apply_static_cdn_bypass_preset(&existing).unwrap();
+        assert_eq!(
+            merged
+                .bypass
+                .iter()
+                .filter(|r| r.as_str() == "*.bdstatic.com")
+                .count(),
+            1
+        );
+        assert!(merged.bypass.iter().any(|r| r == "*.bcebos.com"));
+        assert!(merged.bypass.iter().any(|r| r == "api.secure.example"));
+
+        let all = normalize_tls_interception_settings(TlsInterceptionSettings {
+            mode: TlsInterceptionMode::BypassAll,
+            bypass: vec![],
+            show_bypassed_connections: false,
+        })
+        .unwrap();
+        let unchanged = apply_static_cdn_bypass_preset(&all).unwrap();
+        assert_eq!(unchanged.mode, TlsInterceptionMode::BypassAll);
+        assert!(unchanged.bypass.is_empty());
     }
 }

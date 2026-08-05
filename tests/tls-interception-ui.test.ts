@@ -28,6 +28,28 @@ describe("HTTPS interception settings", () => {
     assert.match(lib, /save_tls_interception_settings,/);
   });
 
+  it("offers a one-click static CDN bypass preset for Baidu-style MITM 400s", async () => {
+    const [settings, presets, rust, styles] = await Promise.all([
+      readFile(new URL("../src/components/SettingsView.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../src/tlsBypassPresets.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src-tauri/src/tls_interception.rs", import.meta.url), "utf8"),
+      readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+    ]);
+
+    assert.match(presets, /\*\.bdstatic\.com/);
+    assert.match(presets, /\*\.bcebos\.com/);
+    assert.match(presets, /mergeStaticCdnBypassRules/);
+    assert.match(rust, /STATIC_CDN_BYPASS_PRESET/);
+    assert.match(rust, /"\*\.bdstatic\.com"/);
+    assert.match(rust, /"\*\.bcebos\.com"/);
+    assert.match(rust, /fn apply_static_cdn_bypass_preset/);
+    assert.match(rust, /static_cdn_preset_bypasses_baidu_cdn_hosts_without_mitm/);
+    assert.match(settings, /applyStaticCdnBypassPreset/);
+    assert.match(settings, /aria-label="推荐：绕过常见静态 CDN"/);
+    assert.match(settings, /不解密正文/);
+    assert.match(styles, /\.tls-static-cdn-preset/);
+  });
+
   it("uses Codex blue for normal policy state and stacks controls on narrow screens", async () => {
     const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
 

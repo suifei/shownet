@@ -29,6 +29,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
 import { useDismissibleLayer } from "../useDismissibleLayer";
@@ -43,6 +44,8 @@ import {
 import type { BrowserHookEvent, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
+  /** When false the view stays mounted (keep-alive) but is not the active workspace. */
+  active: boolean;
   capturing: boolean;
   sessionId: string;
   onAnalyzeCryptoLab: () => void;
@@ -80,7 +83,7 @@ type CdpSend = (method: string, params?: Record<string, unknown>, onResult?: Cdp
 type LabStatusPayload = { phase?: string; status?: number; endpoint?: string; message?: string };
 type BrowserFileDropState = { phase: "ready" | "delivered"; count: number } | null;
 
-export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: BrowserViewProps) {
+export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }: BrowserViewProps) {
   const [address, setAddress] = useState("https://example.com");
   const [currentUrl, setCurrentUrl] = useState(address);
   const [externalPage, setExternalPage] = useState<string | null>(null);
@@ -163,6 +166,7 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
     return () => { disposed = true; void unlisten?.(); };
   }, [desktop, pausedDisplay, sessionId]);
 
+  // True unmount only (app exit): stop Chrome. View switches keep this component mounted.
   useEffect(() => () => {
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
@@ -172,6 +176,7 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
     if (desktop) void invoke("stop_proxy_browser").catch(() => undefined);
   }, [desktop]);
 
+  // Stop capture tears down the isolated proxy Chrome (documented default). Switching nav tabs does not.
   useEffect(() => {
     if (capturing || !proxyBrowser?.running) return;
     cdpSendRef.current?.("Page.stopScreencast");
@@ -186,7 +191,7 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
   }, [capturing, proxyBrowser?.running]);
 
   useEffect(() => {
-    if (!proxyBrowser?.running || !browserSurfaceRef.current) return;
+    if (!active || !proxyBrowser?.running || !browserSurfaceRef.current) return;
     const surface = browserSurfaceRef.current;
     let resizeTimer = 0;
     const syncSize = () => {
@@ -207,11 +212,21 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
     const observer = new ResizeObserver(syncSize);
     observer.observe(surface);
     syncSize();
+    // Returning to the browser tab after keep-alive hide: re-assert screencast so frames resume.
+    if (cdpSendRef.current) {
+      cdpSendRef.current("Page.startScreencast", {
+        format: "jpeg",
+        quality: 78,
+        maxWidth: 1800,
+        maxHeight: 1200,
+        everyNthFrame: 1,
+      });
+    }
     return () => {
       window.clearTimeout(resizeTimer);
       observer.disconnect();
     };
-  }, [proxyBrowser?.running]);
+  }, [active, proxyBrowser?.running]);
 
   useEffect(() => {
     const receiveHook = (message: MessageEvent) => {
@@ -901,6 +916,25 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
     setBusNote("当前地址已复制");
   };
 
+  const openInSystemBrowser = async () => {
+    const target = currentUrl.trim();
+    if (!target) {
+      setBrowserError("当前没有可打开的地址");
+      return;
+    }
+    try {
+      if (desktop) {
+        await openUrl(target);
+      } else {
+        // Preview / non-desktop: opener is unavailable; keep a best-effort fallback.
+        window.open(target, "_blank", "noopener,noreferrer");
+      }
+      setBusNote("已在系统浏览器中打开");
+    } catch (error) {
+      setBrowserError(`无法在系统浏览器中打开：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const closeCurrentPage = () => {
     setBrowserMenuOpen(false);
     if (desktop && proxyBrowser?.running) {
@@ -959,7 +993,7 @@ export function BrowserView({ capturing, sessionId, onAnalyzeCryptoLab }: Browse
           </button>
           <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "CDP" : "Chrome"}</span></button>
           <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title="脚本 Hook 面板"><Braces size={16} /><span>{hookEvents.length}</span></button>
-          <button className="icon-button" onClick={() => window.open(currentUrl, "_blank", "noopener,noreferrer")} title="在系统浏览器中打开"><ExternalLink size={16} /></button>
+          <button className="icon-button" onClick={() => void openInSystemBrowser()} disabled={!currentUrl.trim()} title="在系统浏览器中打开" aria-label="在系统浏览器中打开"><ExternalLink size={16} /></button>
         </div>
         <div className="browser-viewport">
           {desktop ? (

@@ -1199,6 +1199,31 @@ pub struct EffectiveUpstreamProxy {
     pub bypass: Vec<String>,
 }
 
+/// Result of probing ShowNet egress (direct or via configured upstream proxy).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamProbeResult {
+    pub ok: bool,
+    pub mode: String,
+    pub host: String,
+    pub port: u16,
+    pub target: String,
+    pub latency_ms: u64,
+    pub message: String,
+}
+
+/// Parsed from process environment HTTP(S)_PROXY / ALL_PROXY (not used automatically by ShowNet).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedEnvProxy {
+    pub mode: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub source: String,
+    pub raw: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredCertificateAuthority {

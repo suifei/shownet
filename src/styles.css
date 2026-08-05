@@ -888,6 +888,17 @@ kbd {
   overflow: hidden;
 }
 
+/* Keep-alive views stay mounted; hide without unmounting (BrowserView must not stop Chrome on tab switch). */
+.workspace-view-keep-alive {
+  height: 100%;
+  min-height: 0;
+}
+
+.workspace-view-keep-alive.is-hidden,
+.workspace-view-keep-alive[hidden] {
+  display: none !important;
+}
+
 .section-kicker {
   display: block;
   margin-bottom: 4px;
@@ -2642,6 +2653,44 @@ kbd {
   color: var(--accent-ink);
   background: var(--accent-bg);
   border-color: var(--accent-border);
+}
+
+.proxy-error-banner span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.proxy-error-banner strong {
+  font-weight: 700;
+}
+
+.overview-proxy-error {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  color: var(--warning-ink);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+}
+
+.overview-proxy-error h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.overview-proxy-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "DM Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .detail-tabs {
@@ -6206,6 +6255,28 @@ kbd {
 .model-discovery-help.is-ready { color: var(--success-ink); }
 .model-discovery-help.is-fallback { color: var(--warning-ink); }
 
+.upstream-proxy-help {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.upstream-proxy-help code {
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.upstream-env-import {
+  align-items: flex-start;
+}
+
+.upstream-env-import code {
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+}
+
 .upstream-proxy-heading,
 .upstream-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .upstream-mode-control { display: inline-flex; align-items: center; height: 34px; padding: 3px; background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: 10px; }
@@ -6217,7 +6288,9 @@ kbd {
 .upstream-actions { min-height: 36px; }
 .upstream-actions > span { display: inline-flex; align-items: center; gap: 5px; color: var(--text-subtle); font-size: 11px; }
 .upstream-actions > span svg { color: var(--text-secondary); }
-.upstream-actions .save-settings-button { margin: 0; }
+.upstream-actions__buttons { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.upstream-actions .save-settings-button,
+.upstream-actions .secondary-button { margin: 0; }
 
 .certificate-status { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; min-height: 78px; gap: 11px; padding: 11px; background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: 10px; }
 .certificate-status.is-installed { background: var(--success-bg); border-color: var(--success-border); }
@@ -6248,6 +6321,11 @@ kbd {
 .tls-interception-modes button.is-danger.is-active { color: var(--danger-ink); box-shadow: inset 0 -2px #d05b50, 0 1px 2px rgba(25,34,41,.08); }
 .tls-interception-modes button:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: -2px; }
 .tls-interception-policy > p { min-height: 15px; margin: 8px 1px 0; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+.tls-static-cdn-preset { display: grid; gap: 6px; margin-top: 10px; }
+.tls-static-cdn-preset__button { justify-content: flex-start; width: 100%; max-width: 100%; white-space: normal; text-align: left; line-height: 1.35; height: auto; min-height: 32px; padding: 8px 12px; }
+.tls-static-cdn-preset__button.is-applied { color: var(--codex-accent-ink); background: var(--codex-accent-softest); border-color: var(--codex-accent-border); }
+.tls-static-cdn-preset > small { color: var(--text-subtle); font-size: 11px; line-height: 1.5; }
+.tls-static-cdn-preset > small strong { color: var(--text-secondary); font-weight: 600; }
 .tls-bypass-editor { display: flex; min-width: 0; flex-direction: column; gap: 5px; margin-top: 9px; }
 .tls-bypass-editor > span { color: var(--text-secondary); font-size: 12px; font-weight: 600; }
 .tls-bypass-editor textarea { width: 100%; min-height: 84px; padding: 8px 9px; resize: vertical; color: var(--accent-ink); font-family: "DM Mono", monospace; font-size: 12px; line-height: 1.55; background: var(--surface-panel); border: 1px solid var(--accent-border); border-radius: 9px; outline: 0; }
