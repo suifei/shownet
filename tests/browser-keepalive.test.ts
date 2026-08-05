@@ -41,4 +41,12 @@ describe("embedded browser keep-alive (P2)", () => {
     // Capture-stop path.
     assert.match(browser, /void invoke\("stop_proxy_browser"\)\.catch\(\(error\) => setBrowserError/);
   });
+
+  it("restores remote focus on click for keyboard/IME (P5)", async () => {
+    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
+    assert.match(browser, /ensureRemotePageFocus/);
+    assert.match(browser, /Emulation\.setFocusEmulationEnabled/);
+    assert.match(browser, /imeInputRef\.current\?\.focus/);
+    assert.match(browser, /browser-statusbar__hint/);
+  });
 });

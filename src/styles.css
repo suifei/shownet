@@ -5550,6 +5550,15 @@ kbd {
 .capture-corner strong { color: var(--danger-ink); font-size: 11px; }
 .capture-corner small { color: var(--text-faint); font-size: 11px; }
 
+.browser-statusbar__hint {
+  color: var(--warning-ink);
+  font-size: 11px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .browser-statusbar {
   display: flex;
   align-items: center;

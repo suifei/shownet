@@ -88,12 +88,33 @@
 
 ---
 
+### P0-B · MITM 出站对严格 CDN 强制 HTTP/1.1
+
+| 项 | 内容 |
+|----|------|
+| **现象** | 未绕行时 `*.bdstatic.com` / `*.bcebos.com` 在 rustls MITM + H2 下仍易 400。 |
+| **根因** | 出站默认 ALPN 优先 h2，部分 CDN 对 MITM H2 指纹更严。 |
+| **修复** | 对上述后缀主机 **强制 HTTP/1.1-only ALPN** 并禁用 origin H2 应用层（与绕行预设互补；优先仍建议绕行）。 |
+| **关键文件** | `src-tauri/src/tls_outbound.rs`、`src-tauri/src/proxy.rs` |
+
+---
+
+### P5 · 内嵌浏览器点击后键盘/中文输入不生效
+
+| 项 | 内容 |
+|----|------|
+| **现象** | 静态资源恢复后，screencast 上点击输入框仍可能无法键入。 |
+| **根因** | Headless CDP 焦点未同步到远端 document；本机 IME 捕获面未聚焦。 |
+| **修复** | 指针按下时 `ensureRemotePageFocus`（`Emulation.setFocusEmulationEnabled` + body focus）并聚焦 IME textarea；百度等页状态条提示 CDN 绕行。 |
+| **关键文件** | `src/components/BrowserView.tsx`、`src/styles.css` |
+
+---
+
 ## 未在本批修复（刻意非目标）
 
 | 项 | 说明 |
 |----|------|
 | 完整真浏览器 JA3 / BoringSSL impersonate | 见 `docs/plan-real-browser-ja3-impersonate.md` |
-| P0-B MITM 出站 H2 细修 | 以 CDN 绕行优先换可用性 |
 | 全量 Playwright GUI 点击 | 以 pillar 结构测试 + live 代理/sidecar 为准 |
 
 ---

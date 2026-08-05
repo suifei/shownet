@@ -571,6 +571,17 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     return mapScreencastPoint(clientX, clientY, bounds, frame, clampToFrame);
   };
 
+  /** Keep page focus in CDP so clicks + keyboard land on the remote document (P5). */
+  const ensureRemotePageFocus = () => {
+    const send = cdpSendRef.current;
+    if (!send) return;
+    send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    send("Runtime.evaluate", {
+      expression: `(() => { try { if (document.body && document.activeElement === document.body) return; document.body?.focus?.({ preventScroll: true }); } catch (_) {} })()`,
+      returnByValue: true,
+    });
+  };
+
   const dispatchPointer = (type: "mousePressed" | "mouseMoved" | "mouseReleased", event: PointerEvent<HTMLDivElement>) => {
     const pointerActive = activePointerRef.current === event.pointerId || event.buttons !== 0;
     const point = framePoint(event.clientX, event.clientY, type === "mouseReleased" || pointerActive);
@@ -578,7 +589,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     lastPointerPointRef.current = point;
     event.preventDefault();
     if (type === "mousePressed") {
+      // Focus remote document (CDP) + local IME capture surface for Chinese composition (P5).
+      ensureRemotePageFocus();
       imeInputRef.current?.focus({ preventScroll: true });
+      event.currentTarget.focus({ preventScroll: true });
       event.currentTarget.setPointerCapture(event.pointerId);
       activePointerRef.current = event.pointerId;
       activePointerButtonRef.current = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
@@ -1066,6 +1080,11 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <span><FlaskConical size={13} />{labState === "complete" ? "已转交内置 Agent" : labState === "error" ? "场景验证失败" : labState === "running" ? "加密场景运行中" : "Crypto Lab"}</span>
           <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
           <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
+          {/baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl) && (
+            <span className="browser-statusbar__hint" title="若图裂/脚本失效：设置 → HTTPS 解密 → 推荐静态 CDN 绕行">
+              图裂时启用静态 CDN 绕行
+            </span>
+          )}
           <span className="browser-statusbar__right">100%</span>
         </div>
       </div>

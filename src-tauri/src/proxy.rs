@@ -1551,10 +1551,13 @@ async fn handle_connect(
             .map(RuntimeMirrorRoute::identity_target)
             .map(|(host, _)| host.to_string())
             .unwrap_or_else(|| host.clone());
+        // Strict static CDNs often 400 under rustls H2 MITM; force HTTP/1.1 ALPN when still decrypting.
+        let force_http11 = tls_outbound::origin_force_http11_for_host(&tls_identity_host);
         let verified = match connect_verified_tls_measured(
             upstream_stream,
             &tls_identity_host,
             outbound_profile,
+            force_http11,
         )
         .await
         {
@@ -1641,7 +1644,8 @@ async fn handle_connect(
         }
         let dedicated_sender_factory =
             dedicated_request_sender_factory(upstream.clone(), outbound_profile);
-        let sender = match handshake_origin_https(upstream_tls, true).await {
+        let prefer_origin_h2 = !force_http11;
+        let sender = match handshake_origin_https(upstream_tls, prefer_origin_h2).await {
             Ok(sender) => sender,
             Err(error) => {
                 error_sink(format!("目标 HTTPS 应用层握手失败: {error}"));
@@ -1870,7 +1874,7 @@ async fn connect_verified_tls(
     host: &str,
     profile: OutboundTlsProfile,
 ) -> Result<tokio_rustls::client::TlsStream<BoxedIo>, String> {
-    Ok(connect_verified_tls_measured(stream, host, profile)
+    Ok(connect_verified_tls_measured(stream, host, profile, false)
         .await?
         .stream)
 }
@@ -1879,8 +1883,13 @@ async fn connect_verified_tls_measured(
     stream: BoxedIo,
     host: &str,
     profile: OutboundTlsProfile,
+    force_http11: bool,
 ) -> Result<VerifiedTlsConnect, String> {
-    let config = tls_outbound::build_client_config(profile);
+    let config = if force_http11 {
+        tls_outbound::build_client_config_http11_only(profile)
+    } else {
+        tls_outbound::build_client_config(profile)
+    };
     let server_name = ServerName::try_from(host.trim_matches(['[', ']']).to_string())
         .map_err(|_| format!("目标 TLS 主机名无效: {host}"))?;
     let (capturing, capture) = CapturingIo::new(stream);
@@ -4257,9 +4266,12 @@ async fn forward_http(
         .map(|(host, _)| host)
         .unwrap_or(&host);
     let mut sender = if scheme == "https" {
-        let tls =
-            connect_verified_tls(stream, tls_identity_host, tls_outbound::global_profile()).await?;
-        handshake_origin_https(tls, !websocket).await?
+        let force_http11 = tls_outbound::origin_force_http11_for_host(tls_identity_host);
+        let profile = tls_outbound::global_profile();
+        let tls = connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11)
+            .await?
+            .stream;
+        handshake_origin_https(tls, !websocket && !force_http11).await?
     } else {
         let (http1_sender, connection) =
             hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
@@ -7246,6 +7258,12 @@ mod tests {
             cfg.alpn_protocols.first().map(|p| p.as_slice()),
             Some(&b"h2"[..])
         );
+        // Strict CDN helper forces HTTP/1.1-only ALPN when still MITMing.
+        let h1 = tls_outbound::build_client_config_http11_only(OutboundTlsProfile::ChromeLike);
+        assert_eq!(h1.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert!(tls_outbound::origin_force_http11_for_host("pss.bdstatic.com"));
+        assert!(tls_outbound::origin_force_http11_for_host("psstatic.cdn.bcebos.com"));
+        assert!(!tls_outbound::origin_force_http11_for_host("www.baidu.com"));
     }
 
     fn ja3_measure_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -7344,7 +7362,7 @@ mod tests {
         });
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let stream = BoxedIo(Box::new(tcp));
-        let verified = connect_verified_tls_measured(stream, host, profile)
+        let verified = connect_verified_tls_measured(stream, host, profile, false)
             .await
             .expect("tls connect for catalog preset");
         let ja3 = verified

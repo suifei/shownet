@@ -446,8 +446,43 @@ pub fn build_client_config(profile: OutboundTlsProfile) -> Arc<ClientConfig> {
     })
 }
 
+/// Origin ClientConfig with ALPN forced to HTTP/1.1 only (same cipher recipe as profile).
+/// Used for hosts that reject rustls H2 MITM (e.g. some Baidu static CDNs returning 400).
+pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<ClientConfig> {
+    let preset_id = preset_id_for_profile(profile);
+    build_client_config_for_preset_with_alpn(&preset_id, AlpnRecipe::Http11Only).unwrap_or_else(
+        |_| {
+            build_client_config_for_preset_with_alpn("default", AlpnRecipe::Http11Only)
+                .expect("default preset exists")
+        },
+    )
+}
+
+/// Hosts that frequently return HTTP 400 under rustls MITM when H2 is negotiated.
+/// Prefer product bypass (`STATIC_CDN_BYPASS_PRESET`); when still MITM'd, force HTTP/1.1 ALPN.
+pub fn origin_force_http11_for_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    const SUFFIXES: &[&str] = &[".bdstatic.com", ".bcebos.com"];
+    const EXACT: &[&str] = &["bdstatic.com", "bcebos.com"];
+    EXACT.iter().any(|exact| host == *exact)
+        || SUFFIXES
+            .iter()
+            .any(|suffix| host.ends_with(suffix) || host == &suffix[1..])
+}
+
 /// Build MITM origin ClientConfig from a versioned catalog preset id.
 pub fn build_client_config_for_preset(preset_id: &str) -> Result<Arc<ClientConfig>, String> {
+    let preset = tls_clienthello_catalog::get_preset(preset_id)?;
+    build_client_config_for_preset_with_alpn(preset_id, preset.alpn)
+}
+
+fn build_client_config_for_preset_with_alpn(
+    preset_id: &str,
+    alpn: AlpnRecipe,
+) -> Result<Arc<ClientConfig>, String> {
     let preset = tls_clienthello_catalog::get_preset(preset_id)?;
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for certificate in additional_roots() {
@@ -460,7 +495,7 @@ pub fn build_client_config_for_preset(preset_id: &str) -> Result<Arc<ClientConfi
         .with_safe_default_protocol_versions()
         .map_err(|e| format!("rustls protocol versions: {e}"))?;
     let mut config = builder.with_root_certificates(roots).with_no_client_auth();
-    config.alpn_protocols = match preset.alpn {
+    config.alpn_protocols = match alpn {
         AlpnRecipe::H2Http11 => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         AlpnRecipe::Http11Only => vec![b"http/1.1".to_vec()],
         AlpnRecipe::H2Only => vec![b"h2".to_vec()],
@@ -559,6 +594,17 @@ mod tests {
             signature_algorithms: vec![],
             grease,
         }
+    }
+
+    #[test]
+    fn origin_force_http11_matches_baidu_static_cdn_hosts() {
+        assert!(origin_force_http11_for_host("pss.bdstatic.com"));
+        assert!(origin_force_http11_for_host("ss0.bdstatic.com"));
+        assert!(origin_force_http11_for_host("psstatic.cdn.bcebos.com"));
+        assert!(!origin_force_http11_for_host("www.baidu.com"));
+        assert!(!origin_force_http11_for_host("example.com"));
+        let cfg = build_client_config_http11_only(OutboundTlsProfile::ChromeLike);
+        assert_eq!(cfg.alpn_protocols, vec![b"http/1.1".to_vec()]);
     }
 
     #[test]
