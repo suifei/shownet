@@ -11,6 +11,9 @@ It is **not** a golden store. Captured fingerprints still live only in `../entri
 | `sources-inventory.json` | Machine-checkable list of external sources (min 3) |
 | `sources-inventory.schema.json` | Structural contract for the inventory |
 | `version-matrix.json` | Which ShowNet preset majors have entry stubs / capture status |
+| `detector-sites.json` | Public JA3/JA4 **detector** endpoints (BrowserLeaks, peet.ws, Scrapfly, …) |
+| `detector-sites.schema.json` | Structural contract for detector inventory |
+| `fixtures/` | Offline canned JSON shapes for detector parsers |
 
 ## Honesty (must stay true in the JSON)
 
@@ -41,3 +44,21 @@ See `scripts/tls-golden-capture.mjs` and the parent README §4.
 | `none` | Spec/docs only (JA3/JA4 standards); never fills goldens |
 
 Low-cost (`captureCost: low-tool`) entries are preferred for bulk Chrome majors without browser installers.
+
+## Public detector validation (not product parity)
+
+Hit industry JA3/JA4 checker APIs to see what a TLS client stack looks like to the outside world:
+
+```bash
+# Offline: parse fixtures (CI-safe)
+npm run tls-detector:offline
+
+# Live: Node TLS stack against BrowserLeaks / peet.ws / … (honest skip on block)
+npm run tls-detector:validate
+
+# Prefer curl_cffi when installed
+node scripts/tls-detector-validate.mjs --client tool --preset chrome150
+```
+
+**Honesty:** `pass` means the detector returned a parseable JA3/JA4 for *this* client.
+It is **not** “100% Chrome browser parity” and does **not** set `ja3Parity=true`.

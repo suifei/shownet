@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "lastReviewed": "2026-08-05",
+  "honesty": {
+    "detectorPassIsNotBrowserParity": true,
+    "noSilentHundredPercentWithoutStack": true,
+    "noDocumentedJa3AsGolden": true
+  },
+  "detectors": [
+    {
+      "id": "browserleaks-tls-json",
+      "name": "BrowserLeaks TLS JSON",
+      "url": "https://tls.browserleaks.com/json",
+      "uiUrl": "https://browserleaks.com/tls",
+      "responseFormat": "json",
+      "fields": {
+        "ja3": ["ja3_hash"],
+        "ja3Raw": ["ja3_text"],
+        "ja4": ["ja4"],
+        "ja4Raw": ["ja4_r"],
+        "extra": ["ja3n_hash", "akamai_hash"]
+      },
+      "signals": ["ja3", "ja3n", "ja4", "akamai"],
+      "priority": "primary",
+      "notes": "Industry-standard public checker. Preferred primary endpoint for automated matrix rows.",
+      "lastReviewed": "2026-08-05"
+    },
+    {
+      "id": "peet-tls-api-all",
+      "name": "tls.peet.ws TrackMe API (all)",
+      "url": "https://tls.peet.ws/api/all",
+      "uiUrl": "https://tls.peet.ws/",
+      "responseFormat": "json",
+      "fields": {
+        "ja3": ["tls.ja3_hash"],
+        "ja3Raw": ["tls.ja3"],
+        "ja4": ["tls.ja4"],
+        "ja4Raw": ["tls.ja4_r"],
+        "extra": ["tls.peetprint_hash", "http2"]
+      },
+      "signals": ["ja3", "ja4", "h2", "peetprint"],
+      "priority": "primary",
+      "notes": "Comprehensive JSON: JA3/JA4 + HTTP/2 + peetprint. High-signal for stack research.",
+      "lastReviewed": "2026-08-05"
+    },
+    {
+      "id": "scrapfly-fp-ja3",
+      "name": "Scrapfly JA3/JA4 tools API",
+      "url": "https://tools.scrapfly.io/api/fp/ja3",
+      "uiUrl": "https://scrapfly.io/web-scraping-tools/ja3-fingerprint",
+      "responseFormat": "json",
+      "fields": {
+        "ja3": ["ja3", "ja3_hash", "fingerprint"],
+        "ja3Raw": ["ja3_text", "ja3_string"],
+        "ja4": ["ja4", "ja4_hash"],
+        "ja4Raw": ["ja4_text"],
+        "extra": ["scrapfly_fp"]
+      },
+      "signals": ["ja3", "ja4"],
+      "priority": "primary",
+      "notes": "Widely cited in scraping anti-bot literature. May rate-limit or block some datacenter IPs — honest skip required.",
+      "lastReviewed": "2026-08-05"
+    },
+    {
+      "id": "tlsinfo-me-json",
+      "name": "tlsinfo.me / thumbprint JSON",
+      "url": "https://tlsinfo.me/json",
+      "uiUrl": "https://tlsinfo.me/",
+      "responseFormat": "json",
+      "fields": {
+        "ja3": [],
+        "ja3Raw": [],
+        "ja4": ["ja4"],
+        "ja4Raw": ["ja4_r"],
+        "extra": ["ja4h", "ja4_o", "tls_version"]
+      },
+      "signals": ["ja4", "ja4h"],
+      "priority": "secondary",
+      "notes": "JA4-focused public service (JA3 may be absent). Complements BrowserLeaks/peet.",
+      "lastReviewed": "2026-08-05"
+    },
+    {
+      "id": "ja3-zone-check",
+      "name": "check.ja3.zone",
+      "url": "https://check.ja3.zone/",
+      "uiUrl": "https://check.ja3.zone/",
+      "responseFormat": "json",
+      "fields": {
+        "ja3": ["hash"],
+        "ja3Raw": ["fingerprint"],
+        "ja4": [],
+        "ja4Raw": [],
+        "extra": ["ciphers", "protocol"]
+      },
+      "signals": ["ja3"],
+      "priority": "secondary",
+      "notes": "Simple JA3 hash + raw fingerprint JSON. Useful cross-check against BrowserLeaks ja3_hash.",
+      "lastReviewed": "2026-08-05"
+    }
+  ]
+}

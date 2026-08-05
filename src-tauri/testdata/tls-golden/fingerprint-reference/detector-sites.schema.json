@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shownet.local/schema/tls-ja3-detector-sites.json",
+  "title": "ShowNet public JA3/JA4 detector site inventory",
+  "description": "Industry-standard public endpoints that report client TLS fingerprints. Used to validate outbound stacks without installing browsers. Inventory alone never authorises ja3Parity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "lastReviewed", "honesty", "detectors"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "lastReviewed": { "type": "string", "format": "date" },
+    "honesty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "detectorPassIsNotBrowserParity",
+        "noSilentHundredPercentWithoutStack",
+        "noDocumentedJa3AsGolden"
+      ],
+      "properties": {
+        "detectorPassIsNotBrowserParity": { "const": true },
+        "noSilentHundredPercentWithoutStack": { "const": true },
+        "noDocumentedJa3AsGolden": { "const": true }
+      }
+    },
+    "detectors": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "url",
+          "uiUrl",
+          "responseFormat",
+          "fields",
+          "signals",
+          "priority",
+          "lastReviewed"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "url": { "type": "string", "pattern": "^https://" },
+          "uiUrl": { "type": "string", "pattern": "^https://" },
+          "responseFormat": { "enum": ["json", "html"] },
+          "fields": {
+            "type": "object",
+            "required": ["ja3", "ja4"],
+            "properties": {
+              "ja3": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "JSON paths (dot notation) to JA3 hash or raw string."
+              },
+              "ja3Raw": { "type": "array", "items": { "type": "string" } },
+              "ja4": { "type": "array", "items": { "type": "string" } },
+              "ja4Raw": { "type": "array", "items": { "type": "string" } },
+              "extra": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "signals": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": ["ja3", "ja3n", "ja4", "ja4h", "h2", "peetprint", "akamai"]
+            }
+          },
+          "priority": {
+            "enum": ["primary", "secondary", "optional"],
+            "description": "primary = industry standard for CI-oriented validation"
+          },
+          "notes": { "type": ["string", "null"] },
+          "lastReviewed": { "type": "string", "format": "date" }
+        }
+      }
+    }
+  }
+}

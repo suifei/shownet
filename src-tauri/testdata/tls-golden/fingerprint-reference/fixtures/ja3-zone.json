@@ -1,0 +1,7 @@
+{
+  "hash": "11111111111111111111111111111111",
+  "fingerprint": "771,4865-4866,0-23,29-23,0",
+  "ciphers": "TLS_AES_128_GCM_SHA256",
+  "protocol": "TLSv1.3",
+  "user_agent": "fixture"
+}
