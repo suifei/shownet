@@ -252,19 +252,42 @@ pub fn alignment_for(preset_id: &str) -> AlignmentLevel {
         .unwrap_or_default()
 }
 
-/// The gate: a measured JA3 promotes a preset only on an exact match against a
-/// usable golden. Any mismatch, or no golden at all, stays at `Recipe`.
+/// The gate: a measurement promotes a preset only on an exact match against a
+/// usable golden. Prefer JA3 when stable; also accept JA4 because modern Chrome
+/// permutes ClientHello extension order (JA3 changes, JA4 stays stable).
+/// Any mismatch, or no golden at all, stays at `Recipe`.
 pub fn evaluate(preset_id: &str, measured_ja3: &str) -> AlignmentLevel {
+    evaluate_measured(preset_id, measured_ja3, None)
+}
+
+/// Same gate with optional JA4. When `measured_ja4` is provided and equals the
+/// golden JA4, the capture may authorise its alignment level even if JA3 differs
+/// due to extension-order permutation / residual GREASE placement.
+pub fn evaluate_measured(
+    preset_id: &str,
+    measured_ja3: &str,
+    measured_ja4: Option<&str>,
+) -> AlignmentLevel {
     let Some(entry) = golden_for(preset_id, current_platform()) else {
         return AlignmentLevel::Recipe;
     };
     if !entry.is_usable() {
         return AlignmentLevel::Recipe;
     }
-    match entry.golden.ja3.as_deref() {
-        Some(golden) if golden.eq_ignore_ascii_case(measured_ja3) => entry.authorised_level(),
-        _ => AlignmentLevel::Recipe,
+    if let Some(golden) = entry.golden.ja3.as_deref() {
+        if golden.eq_ignore_ascii_case(measured_ja3) {
+            return entry.authorised_level();
+        }
     }
+    if let (Some(golden_ja4), Some(measured)) = (entry.golden.ja4.as_deref(), measured_ja4) {
+        if !golden_ja4.is_empty()
+            && !measured.is_empty()
+            && golden_ja4.eq_ignore_ascii_case(measured)
+        {
+            return entry.authorised_level();
+        }
+    }
+    AlignmentLevel::Recipe
 }
 
 /// Status surface for `tls_outbound::status_json` and the Agent tools.
@@ -367,6 +390,34 @@ mod tests {
         let documented = crate::tls_clienthello_catalog::catalog_documented_ja3("chrome150")
             .expect("chrome150 has a documented ja3");
         assert_eq!(evaluate("chrome150", documented), AlignmentLevel::Recipe);
+    }
+
+    #[test]
+    fn ja4_match_authorises_when_ja3_differs() {
+        let entry = golden_for("chrome150", "desktop-windows");
+        let Some(entry) = entry else {
+            return; // non-windows host in CI matrix
+        };
+        if !entry.is_usable() {
+            return;
+        }
+        let golden_ja4 = entry.golden.ja4.as_deref().expect("tool golden has ja4");
+        // Wrong JA3, correct JA4 → still matched (extension-order / GREASE drift).
+        let level = evaluate_measured(
+            "chrome150",
+            "ffffffffffffffffffffffffffffffff",
+            Some(golden_ja4),
+        );
+        assert_eq!(level, entry.authorised_level());
+        // Wrong JA3 and wrong JA4 → recipe.
+        assert_eq!(
+            evaluate_measured(
+                "chrome150",
+                "ffffffffffffffffffffffffffffffff",
+                Some("t00d0000h0_deadbeef_deadbeef")
+            ),
+            AlignmentLevel::Recipe
+        );
     }
 
     #[test]

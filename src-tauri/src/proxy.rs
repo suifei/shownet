@@ -1616,12 +1616,12 @@ async fn handle_connect(
         if let Some(measured) = verified.measured_ja3 {
             // Parity needs both halves: a real impersonate stack must be active, and
             // the measured ClientHello must match a golden captured from the target
-            // client. The comparand is the golden store rather than
-            // tls_impersonate::profile_target_ja3 — that target is a hand-assembled
-            // offline template no real TLS stack emits, so comparing against it made
-            // parity false by collision-improbability rather than by contract.
+            // client. Match JA3 when stable; fall back to JA4 because modern Chrome
+            // permutes extension order (JA3 drifts, JA4 stays stable).
             let preset_id = crate::tls_outbound::preset_id_for_profile(outbound_profile);
-            let alignment = crate::tls_golden::evaluate(&preset_id, &measured);
+            let measured_ja4 = verified.measured_ja4.as_deref();
+            let alignment =
+                crate::tls_golden::evaluate_measured(&preset_id, &measured, measured_ja4);
             let parity =
                 crate::tls_outbound::real_impersonate_stack_available() && alignment.is_matched();
             fingerprint.outbound.ja3 = Some(measured.clone());
@@ -1629,8 +1629,9 @@ async fn handle_connect(
             fingerprint.outbound.engine =
                 Some(crate::tls_outbound::active_engine().as_str().into());
             fingerprint.outbound.note = format!(
-                "{} measuredJa3={measured} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
+                "{} measuredJa3={measured} measuredJa4={} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
                 fingerprint.outbound.note,
+                measured_ja4.unwrap_or("-"),
                 outbound_profile.as_str(),
                 alignment.as_str(),
                 parity
@@ -1867,6 +1868,7 @@ fn capture_connect_record(
 struct VerifiedTlsConnect {
     stream: tokio_rustls::client::TlsStream<BoxedIo>,
     measured_ja3: Option<String>,
+    measured_ja4: Option<String>,
 }
 
 async fn connect_verified_tls(
@@ -1901,14 +1903,15 @@ async fn connect_verified_tls_measured(
     .await
     .map_err(|_| format!("目标 TLS 握手超时: {host}"))?
     .map_err(|error| format!("目标 TLS 证书校验或握手失败 {host}: {error}"))?;
-    let measured_ja3 = capture.lock().ok().and_then(|bytes| {
+    let measured = capture.lock().ok().and_then(|bytes| {
         crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
             .ok()
-            .map(|fp| fp.ja3)
+            .map(|fp| (fp.ja3, fp.ja4))
     });
     Ok(VerifiedTlsConnect {
         stream: tls,
-        measured_ja3,
+        measured_ja3: measured.as_ref().map(|(j, _)| j.clone()),
+        measured_ja4: measured.map(|(_, j4)| j4),
     })
 }
 

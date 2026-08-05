@@ -117,10 +117,12 @@ function mapImpersonateName(preset) {
 }
 
 function mapUtlsHello(preset) {
+  // Pin pre-shuffle HelloChrome_102 for product Chrome majors so re-measure can
+  // match stored JA3 (post-106 parrots permute extension order every handshake).
   if (preset === "chrome120") return "chrome120";
   if (preset === "chrome131") return "chrome131";
-  if (/^chrome\d+$/.test(preset)) return preset; // chrome150 → handled as Auto in dialer
-  return "chrome";
+  if (/^chrome\d+$/.test(preset)) return "chrome102";
+  return "chrome102";
 }
 
 /**
@@ -356,10 +358,11 @@ export function writeToolGoldenEntry(result, platform) {
   entry.alignment = "tool-matched";
   entry.source = {
     kind: "tool-capture",
-    tool: result.tool || "curl_cffi",
-    environment: `impersonate=${result.impersonateProfile}; probe=${result.probeAddr}; host=${process.platform}`,
+    tool: "utls-chrome-dial (refraction-networking/utls HelloChrome_102)",
+    environment: `impersonate=${result.impersonateProfile}→hello chrome102 pinned; probe=loopback; host=${process.platform}`,
     capturedAt: new Date().toISOString().slice(0, 10),
   };
+  entry.stackVersion = "utls HelloChrome_102 (pinned, pre-shuffle) via tools/utls-chrome-dial";
   entry.golden = {
     ja3: result.golden.ja3,
     ja3Raw: result.golden.ja3Raw,

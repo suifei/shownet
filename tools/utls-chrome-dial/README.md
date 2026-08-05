@@ -28,6 +28,10 @@ HTTPS GET forces ALPN `http/1.1` so the response can be read without HTTP/2 fram
 That slightly changes the JA3 relative to a pure h2 Chrome parrot; JA4 still shows a
 Chrome-class profile. Prefer probe capture (`-addr`) for goldens that keep full ALPN.
 
+Product majors such as `chrome150` map to **HelloChrome_102** (pre-shuffle). Chrome 106+
+parrots permute extension order every handshake so JA3 never re-validates; 102 keeps
+JA3 stable for golden equality checks. The golden gate also accepts JA4 equality.
+
 ## Honesty
 
 This is a **tool** stack (uTLS), not a real browser capture. Goldens must use

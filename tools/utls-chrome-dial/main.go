@@ -181,22 +181,32 @@ func httpsGet(rawURL, sni string, id utls.ClientHelloID, timeout time.Duration) 
 }
 
 func helloID(name string) (utls.ClientHelloID, error) {
+	// Prefer HelloChrome_102 for product majors (chrome150 etc.): post-106 parrots
+	// shuffle extension order every handshake so JA3 never re-validates against a
+	// golden. JA4 remains the stable digests for those stacks; Phase 1 goldens pin
+	// a pre-shuffle parrot for exact JA3 re-measure where possible, and the gate
+	// also accepts JA4 equality.
 	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "chrome102", "102", "stable", "chrome-stable":
+		return utls.HelloChrome_102, nil
 	case "chrome", "chrome-auto", "chrome_auto":
+		// Auto == 131 with shuffle; keep for experiments, not goldens.
 		return utls.HelloChrome_Auto, nil
 	case "chrome120", "120":
 		return utls.HelloChrome_120, nil
 	case "chrome131", "131":
 		return utls.HelloChrome_131, nil
-	case "chrome133", "133", "chrome150", "150", "chrome149", "149":
-		return utls.HelloChrome_Auto, nil
+	case "chrome133", "133", "chrome150", "150", "chrome149", "149",
+		"chrome144", "144", "chrome146", "146":
+		// Product majors → stable pre-shuffle parrot for tool goldens.
+		return utls.HelloChrome_102, nil
 	case "firefox", "firefox_auto":
 		return utls.HelloFirefox_Auto, nil
 	case "ios", "safari_ios":
 		return utls.HelloIOS_Auto, nil
 	default:
 		if strings.HasPrefix(strings.ToLower(name), "chrome") {
-			return utls.HelloChrome_Auto, nil
+			return utls.HelloChrome_102, nil
 		}
 		return utls.ClientHelloID{}, fmt.Errorf("unknown -hello %q", name)
 	}

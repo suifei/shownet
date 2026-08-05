@@ -72,4 +72,47 @@ describe("Phase 1 tool impersonate measure", () => {
     assert.match(pkg.scripts["tls-impersonate:measure"], /tls-impersonate-measure/);
     assert.match(pkg.scripts["tls-detector:tool"], /--client tool/);
   });
+
+  it("re-measure without --write-golden equals stored tool golden digests", async () => {
+    const mod = await import(pathToFileURL(measureScript).href);
+    const tool = mod.detectImpersonateTool();
+    if (!tool.kind) {
+      // Honest skip when no tool binary — not a silent green equality claim.
+      console.log("re-measure skipped: tool not installed");
+      return;
+    }
+    const entry = JSON.parse(readFileSync(goldenPath, "utf8"));
+    if (entry.status !== "captured" || entry.source.kind !== "tool-capture") {
+      console.log("re-measure skipped: no tool-capture golden committed");
+      return;
+    }
+    assert.ok(entry.golden.ja3 && entry.golden.ja4 && entry.golden.clientHelloHex);
+
+    // Real path: drive measure twice without writing; digests must match the golden.
+    const first = await mod.measureToolClientHello({ preset: "chrome150", waitSeconds: 20 });
+    const second = await mod.measureToolClientHello({ preset: "chrome150", waitSeconds: 20 });
+    assert.equal(first.ok, true, first.reason || "first measure failed");
+    assert.equal(second.ok, true, second.reason || "second measure failed");
+
+    assert.equal(
+      first.golden.ja4,
+      entry.golden.ja4,
+      "first re-measure JA4 must equal committed golden JA4",
+    );
+    assert.equal(
+      second.golden.ja4,
+      entry.golden.ja4,
+      "second re-measure JA4 must equal committed golden JA4",
+    );
+    assert.equal(
+      first.golden.ja3,
+      entry.golden.ja3,
+      "first re-measure JA3 must equal committed golden JA3 (pinned non-shuffle Hello)",
+    );
+    assert.equal(
+      second.golden.ja3,
+      first.golden.ja3,
+      "JA3 must be stable across two re-measures with the pinned HelloID",
+    );
+  });
 });
