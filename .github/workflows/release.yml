@@ -25,7 +25,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  SHOWNET_UPDATE_MANIFEST_URL: https://claudegpt.org/shownet/latest.json
 
 jobs:
   quality:
@@ -304,9 +303,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      SHOWNET_UPDATE_PUBLISH_URL: ${{ secrets.SHOWNET_UPDATE_PUBLISH_URL }}
-      SHOWNET_UPDATE_PUBLISH_TOKEN: ${{ secrets.SHOWNET_UPDATE_PUBLISH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -341,19 +337,10 @@ jobs:
           release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           mac_url="${release_base}/$(jq -rn --arg value "$mac_name" '$value|@uri')"
           win_url="${release_base}/$(jq -rn --arg value "$win_name" '$value|@uri')"
-          notes="$(git tag -l "$tag" --format='%(contents)' | head -c 12000 || true)"
-          if [ -z "$notes" ]; then
-            notes="ShowNet ${version} desktop builds (macOS aarch64 DMG + Windows x86_64 portable ZIP)."
-          fi
-          published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          jq -n \
-            --arg version "$version" \
-            --arg notes "$notes" \
-            --arg publishedAt "$published_at" \
-            --arg macUrl "$mac_url" \
-            --arg windowsUrl "$win_url" \
-            '{version:$version,notes:$notes,publishedAt:$publishedAt,platforms:{"darwin-aarch64":{url:$macUrl},"windows-x86_64":{url:$windowsUrl}}}' \
-            > release-assets/latest.json
+          # No latest.json: the app reads the GitHub release directly, so a second
+          # statement of "what the latest version is" could only drift from it.
+          echo "macOS asset:  $mac_url"
+          echo "Windows asset: $win_url"
           (cd release-assets && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
       - name: Ensure git tag exists (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
@@ -376,16 +363,3 @@ jobs:
           generate_release_notes: true
           files: release-assets/**/*
           fail_on_unmatched_files: true
-      - name: Publish latest.json to ClaudeGPT.org
-        shell: bash
-        run: |
-          if [ -z "${SHOWNET_UPDATE_PUBLISH_URL:-}" ] || [ -z "${SHOWNET_UPDATE_PUBLISH_TOKEN:-}" ]; then
-            echo "ClaudeGPT.org manifest publishing is not configured; latest.json remains on the GitHub release."
-            exit 0
-          fi
-          curl --fail --show-error --silent \
-            --request PUT \
-            --header "Authorization: Bearer $SHOWNET_UPDATE_PUBLISH_TOKEN" \
-            --header "Content-Type: application/json" \
-            --data-binary @release-assets/latest.json \
-            "$SHOWNET_UPDATE_PUBLISH_URL"
