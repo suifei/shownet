@@ -16,14 +16,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SUPPORTED_LANGUAGES: &[&str] = &[
-    "python",
-    "javascript",
-    "typescript",
-    "go",
-    "java",
-    "csharp",
-];
+const SUPPORTED_LANGUAGES: &[&str] =
+    &["python", "javascript", "typescript", "go", "java", "csharp"];
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1069,7 +1063,9 @@ fn java_agent_registry(steps: &[(&str, &str, &str)]) -> String {
         "import java.util.LinkedHashMap;\nimport java.util.Map;\nimport java.util.function.Function;\n\n{AGENT_FILE_HEADER}\npublic final class AgentSteps {{\n    private AgentSteps() {{}}\n\n    public static Map<String, Function<Request, String>> all() {{\n        Map<String, Function<Request, String>> steps = new LinkedHashMap<>();\n"
     );
     for (name, source, entry_point) in steps {
-        let class = java_candidate_name(source, 0).trim_end_matches(".java").to_string();
+        let class = java_candidate_name(source, 0)
+            .trim_end_matches(".java")
+            .to_string();
         out.push_str(&format!(
             "        steps.put({name:?}, request -> {{\n            try {{\n                return {class}.{entry_point}(request);\n            }} catch (Exception exception) {{\n                throw new RuntimeException(exception);\n            }}\n        }});\n"
         ));
@@ -1083,7 +1079,9 @@ fn csharp_agent_registry(steps: &[(&str, &str, &str)]) -> String {
         "namespace ShowNetReplay;\n\n{AGENT_FILE_HEADER}\npublic static class AgentSteps\n{{\n    public static IReadOnlyDictionary<string, Func<Request, string>> All {{ get; }} =\n        new Dictionary<string, Func<Request, string>>\n        {{\n"
     );
     for (name, _, entry_point) in steps {
-        out.push_str(&format!("            [{name:?}] = Candidate.{entry_point},\n"));
+        out.push_str(&format!(
+            "            [{name:?}] = Candidate.{entry_point},\n"
+        ));
     }
     out.push_str("        };\n}\n");
     out
@@ -2373,7 +2371,6 @@ const difficulty=1; const t="awswaf";
         assert!(err.contains("不支持的重播语言"));
     }
 
-
     #[test]
     fn builds_every_supported_replay_language() {
         let storage = storage();
@@ -2519,7 +2516,11 @@ const difficulty=1; const t="awswaf";
     /// is what the operator runs.
     #[test]
     fn verification_in_one_language_does_not_license_emitting_another() {
-        let reconstruction = reconstruction_with_agent_step("javascript", "function computeSignature(r) { return 'x'; }", "verified");
+        let reconstruction = reconstruction_with_agent_step(
+            "javascript",
+            "function computeSignature(r) { return 'x'; }",
+            "verified",
+        );
         let emitted = render_agent_algorithms(&reconstruction, "python");
         assert!(
             emitted.contains("AGENT_STEPS: Dict[str, Any] = {}"),
@@ -2533,7 +2534,14 @@ const difficulty=1; const t="awswaf";
     #[test]
     fn the_runtime_input_shape_matches_the_verified_input_shape() {
         let source = render_replay_source_for_shape_test();
-        for key in ["\"method\"", "\"host\"", "\"path\"", "\"query\"", "\"headers\"", "\"body\""] {
+        for key in [
+            "\"method\"",
+            "\"host\"",
+            "\"path\"",
+            "\"query\"",
+            "\"headers\"",
+            "\"body\"",
+        ] {
             assert!(
                 source.contains(&format!("{key}:")),
                 "agent_step_input must supply {key}, which ground truth includes"
@@ -2596,7 +2604,9 @@ const difficulty=1; const t="awswaf";
     #[test]
     fn the_package_ships_the_verification_verdict_and_says_what_it_means() {
         let storage = storage();
-        let session = storage.create_session(Some("verify-surface".into())).unwrap();
+        let session = storage
+            .create_session(Some("verify-surface".into()))
+            .unwrap();
         let sid = session.id.clone();
         storage
             .store_request(base(&sid, "api.example.com", "/v1/order"))
@@ -2620,7 +2630,9 @@ const difficulty=1; const t="awswaf";
             "the file must say why the claim is off: {parsed}"
         );
         assert!(
-            parsed["note"].as_str().is_some_and(|note| note.contains("Only the second")),
+            parsed["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("Only the second")),
             "the file must distinguish the template claim from the verified claim: {parsed}"
         );
     }
@@ -2757,7 +2769,9 @@ const difficulty=1; const t="awswaf";
                 reconstruction.pipeline[0].implementations[0].entry_point =
                     "ComputeSignature".into();
             }
-            let entry = reconstruction.pipeline[0].implementations[0].entry_point.clone();
+            let entry = reconstruction.pipeline[0].implementations[0]
+                .entry_point
+                .clone();
             let emitted = format!(
                 "{}{}",
                 render_agent_algorithms(&reconstruction, language),
@@ -2824,7 +2838,12 @@ const difficulty=1; const t="awswaf";
 
     #[test]
     fn emitted_go_agent_steps_compile_and_produce_the_real_answer() {
-        if !std::process::Command::new("go").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if !std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return;
         }
         let mut reconstruction = reconstruction_with_agent_step("go", GO_AGENT, "verified");
@@ -2860,7 +2879,12 @@ const difficulty=1; const t="awswaf";
 
     #[test]
     fn emitted_java_agent_steps_compile_and_produce_the_real_answer() {
-        if !std::process::Command::new("javac").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if !std::process::Command::new("javac")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return;
         }
         let reconstruction = reconstruction_with_agent_step("java", JAVA_AGENT, "verified");
@@ -2874,7 +2898,11 @@ const difficulty=1; const t="awswaf";
                 "import java.util.LinkedHashMap;\n\npublic class Main {\n    public static void main(String[] args) {\n        Request input = new Request(\"POST\", \"h\", \"/v1/order\", null, new LinkedHashMap<>(), null);\n        AgentSteps.all().forEach((name, step) -> System.out.println(name + \"=\" + step.apply(input)));\n    }\n}\n",
             )],
         );
-        let names: Vec<String> = files.iter().map(|(name, _)| name.clone()).chain(["Main.java".to_string()]).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(["Main.java".to_string()])
+            .collect();
         let compile = std::process::Command::new("javac")
             .args(&names)
             .current_dir(&dir)
@@ -2903,7 +2931,12 @@ const difficulty=1; const t="awswaf";
 
     #[test]
     fn emitted_csharp_agent_steps_compile_and_produce_the_real_answer() {
-        if !std::process::Command::new("dotnet").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if !std::process::Command::new("dotnet")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return;
         }
         let mut reconstruction = reconstruction_with_agent_step("csharp", CSHARP_AGENT, "verified");
@@ -2943,7 +2976,11 @@ const difficulty=1; const t="awswaf";
     /// emitted, in any of them.
     #[test]
     fn unverified_agent_code_is_withheld_in_every_compiled_language() {
-        for (language, source) in [("go", GO_AGENT), ("java", JAVA_AGENT), ("csharp", CSHARP_AGENT)] {
+        for (language, source) in [
+            ("go", GO_AGENT),
+            ("java", JAVA_AGENT),
+            ("csharp", CSHARP_AGENT),
+        ] {
             for verdict in ["failed", "unverifiable"] {
                 let reconstruction = reconstruction_with_agent_step(language, source, verdict);
                 let emitted = agent_step_files(&reconstruction, language)

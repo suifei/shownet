@@ -437,7 +437,11 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
-        return VerificationReport::unverifiable("python", &python, "verification run failed to start");
+        return VerificationReport::unverifiable(
+            "python",
+            &python,
+            "verification run failed to start",
+        );
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let Some(line) = stdout.lines().last() else {
@@ -453,7 +457,10 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             &python,
             &format!(
                 "verification run produced no parsable result: {}",
-                String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("")
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
             ),
         );
     };
@@ -565,7 +572,10 @@ fn cases_payload(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
 /// Read the driver's verdict line. Drivers print exactly one JSON object last;
 /// anything a compiler wrote before it is ignored.
 fn outcomes_from_stdout(stdout: &str) -> Option<Vec<CaseOutcome>> {
-    let line = stdout.lines().rev().find(|line| line.trim_start().starts_with('{'))?;
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))?;
     let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     Some(
         parsed
@@ -724,12 +734,21 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
-        return VerificationReport::unverifiable("java", "java", "verification run failed to start");
+        return VerificationReport::unverifiable(
+            "java",
+            "java",
+            "verification run failed to start",
+        );
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     match outcomes_from_stdout(&stdout) {
         Some(outcomes) => VerificationReport::unverifiable("java", "java", "").settle(outcomes),
-        None => build_failure("java", "java", cases, &String::from_utf8_lossy(&output.stderr)),
+        None => build_failure(
+            "java",
+            "java",
+            cases,
+            &String::from_utf8_lossy(&output.stderr),
+        ),
     }
 }
 
@@ -749,7 +768,11 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         );
     }
     let Some(dir) = staging_dir("csharp") else {
-        return VerificationReport::unverifiable("csharp", "dotnet", "could not stage the candidate");
+        return VerificationReport::unverifiable(
+            "csharp",
+            "dotnet",
+            "could not stage the candidate",
+        );
     };
 
     // The project file is written directly rather than via `dotnet new`, which
@@ -765,11 +788,22 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         });
     if staged.is_err() {
         std::fs::remove_dir_all(&dir).ok();
-        return VerificationReport::unverifiable("csharp", "dotnet", "could not stage the candidate");
+        return VerificationReport::unverifiable(
+            "csharp",
+            "dotnet",
+            "could not stage the candidate",
+        );
     }
 
     let output = std::process::Command::new("dotnet")
-        .args(["run", "--project", "verify.csproj", "-v", "quiet", "--nologo"])
+        .args([
+            "run",
+            "--project",
+            "verify.csproj",
+            "-v",
+            "quiet",
+            "--nologo",
+        ])
         .current_dir(&dir)
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .env("DOTNET_NOLOGO", "1")
@@ -790,10 +824,7 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             "csharp",
             "dotnet",
             cases,
-            &format!(
-                "{}\n{stdout}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
+            &format!("{}\n{stdout}", String::from_utf8_lossy(&output.stderr)),
         ),
     }
 }
@@ -820,7 +851,11 @@ fn java_cases_literal(cases: &[GroundTruthCase]) -> String {
             .map(|map| {
                 map.iter()
                     .map(|(key, value)| {
-                        format!("{}, {}", quote(key), quote(value.as_str().unwrap_or_default()))
+                        format!(
+                            "{}, {}",
+                            quote(key),
+                            quote(value.as_str().unwrap_or_default())
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -1141,7 +1176,10 @@ mod tests {
         assert_eq!(report.verdict, "failed", "{report:?}");
         assert_eq!(report.failed, 1);
         assert!(
-            report.cases[0].actual.as_deref().is_some_and(|actual| actual.len() == 64),
+            report.cases[0]
+                .actual
+                .as_deref()
+                .is_some_and(|actual| actual.len() == 64),
             "a wrong answer of the right shape must still be recorded: {report:?}"
         );
     }
@@ -1181,7 +1219,10 @@ mod tests {
         let report = verify(&Implementation::new("javascript", source), &cases);
         assert_eq!(report.verdict, "failed", "{report:?}");
         assert!(
-            report.cases[0].error.as_deref().is_some_and(|e| e.contains("no secret")),
+            report.cases[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no secret")),
             "the thrown reason must survive into the report: {report:?}"
         );
     }
@@ -1275,7 +1316,8 @@ def computeSignature(payload):
         let Some(_) = python_interpreter() else {
             return;
         };
-        let source = "import a_module_that_does_not_exist\n\ndef computeSignature(p):\n    return 'x'\n";
+        let source =
+            "import a_module_that_does_not_exist\n\ndef computeSignature(p):\n    return 'x'\n";
         let cases = vec![case("c1", "hook", json!({"data": "x"}), "aaaaaaaaaaaaaaaa")];
         let report = verify(&Implementation::new("python", source), &cases);
         assert_eq!(report.verdict, "failed", "{report:?}");
@@ -1290,8 +1332,7 @@ def computeSignature(payload):
     // tell them apart is worse than no runtime, because it launders a guess into
     // a claim.
 
-    const HMAC_EXPECTED: &str =
-        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+    const HMAC_EXPECTED: &str = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
 
     fn hmac_case() -> Vec<GroundTruthCase> {
         vec![case(
@@ -1463,7 +1504,11 @@ public static class Candidate
     /// unchecked Java into an export.
     #[test]
     fn a_missing_toolchain_withholds_the_claim() {
-        for (language, source) in [("go", GO_GOOD), ("java", JAVA_GOOD), ("csharp", CSHARP_GOOD)] {
+        for (language, source) in [
+            ("go", GO_GOOD),
+            ("java", JAVA_GOOD),
+            ("csharp", CSHARP_GOOD),
+        ] {
             let report = verify(&Implementation::new(language, source), &[]);
             assert_eq!(
                 report.verdict, "unverifiable",

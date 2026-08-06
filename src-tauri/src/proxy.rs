@@ -4988,10 +4988,7 @@ async fn connect_tcp_addrs(
     if errors.is_empty() {
         Err(format!("连接 {host}:{port} 超时"))
     } else {
-        Err(format!(
-            "连接 {host}:{port} 失败: {}",
-            errors.join("; ")
-        ))
+        Err(format!("连接 {host}:{port} 失败: {}", errors.join("; ")))
     }
 }
 
@@ -5008,10 +5005,7 @@ pub async fn probe_upstream_egress(upstream: &EffectiveUpstreamProxy) -> Upstrea
     let start = Instant::now();
     let (ok, message) = if upstream.mode == "direct" {
         match connect_tcp(TARGET_HOST, TARGET_PORT).await {
-            Ok(_) => (
-                true,
-                format!("直连可达 {target}（未使用二级出口代理）"),
-            ),
+            Ok(_) => (true, format!("直连可达 {target}（未使用二级出口代理）")),
             Err(error) => (false, error),
         }
     } else if upstream.host.trim().is_empty() || upstream.port == 0 {
@@ -5035,10 +5029,7 @@ pub async fn probe_upstream_egress(upstream: &EffectiveUpstreamProxy) -> Upstrea
             ),
             Err(error) => (
                 false,
-                format!(
-                    "出口 {}:{} 连不上：{error}",
-                    upstream.host, upstream.port
-                ),
+                format!("出口 {}:{} 连不上：{error}", upstream.host, upstream.port),
             ),
         }
     };
@@ -5550,11 +5541,17 @@ mod tests {
     fn parse_proxy_env_value_accepts_urls_and_host_port() {
         let (mode, host, port, user) =
             parse_proxy_env_value("http://127.0.0.1:1080").expect("http url");
-        assert_eq!((mode.as_str(), host.as_str(), port, user.as_str()), ("http", "127.0.0.1", 1080, ""));
+        assert_eq!(
+            (mode.as_str(), host.as_str(), port, user.as_str()),
+            ("http", "127.0.0.1", 1080, "")
+        );
 
         let (mode, host, port, _) =
             parse_proxy_env_value("socks5://proxy.example:1080").expect("socks");
-        assert_eq!((mode.as_str(), host.as_str(), port), ("socks5", "proxy.example", 1080));
+        assert_eq!(
+            (mode.as_str(), host.as_str(), port),
+            ("socks5", "proxy.example", 1080)
+        );
 
         let (mode, host, port, user) =
             parse_proxy_env_value("http://alice@127.0.0.1:7890").expect("user");
@@ -5564,7 +5561,10 @@ mod tests {
         );
 
         let (mode, host, port, _) = parse_proxy_env_value("127.0.0.1:1080").expect("bare");
-        assert_eq!((mode.as_str(), host.as_str(), port), ("http", "127.0.0.1", 1080));
+        assert_eq!(
+            (mode.as_str(), host.as_str(), port),
+            ("http", "127.0.0.1", 1080)
+        );
     }
 
     #[test]
@@ -7264,8 +7264,12 @@ mod tests {
         // Strict CDN helper forces HTTP/1.1-only ALPN when still MITMing.
         let h1 = tls_outbound::build_client_config_http11_only(OutboundTlsProfile::ChromeLike);
         assert_eq!(h1.alpn_protocols, vec![b"http/1.1".to_vec()]);
-        assert!(tls_outbound::origin_force_http11_for_host("pss.bdstatic.com"));
-        assert!(tls_outbound::origin_force_http11_for_host("psstatic.cdn.bcebos.com"));
+        assert!(tls_outbound::origin_force_http11_for_host(
+            "pss.bdstatic.com"
+        ));
+        assert!(tls_outbound::origin_force_http11_for_host(
+            "psstatic.cdn.bcebos.com"
+        ));
         assert!(!tls_outbound::origin_force_http11_for_host("www.baidu.com"));
     }
 
@@ -9780,7 +9784,9 @@ mod tests {
             proxy.host, proxy.port, probe.message
         );
         assert!(
-            probe.message.contains(&format!("{}:{}", proxy.host, proxy.port))
+            probe
+                .message
+                .contains(&format!("{}:{}", proxy.host, proxy.port))
                 || proxy.mode == "direct",
             "probe message should name the egress: {}",
             probe.message
@@ -9936,7 +9942,9 @@ mod tests {
             errors.lock().unwrap()
         );
         assert!(
-            captured.iter().any(|r| r.method.eq_ignore_ascii_case("CONNECT")),
+            captured
+                .iter()
+                .any(|r| r.method.eq_ignore_ascii_case("CONNECT")),
             "expected CONNECT capture: {captured:?}"
         );
         // Prefer decrypted GET when MITM succeeds.

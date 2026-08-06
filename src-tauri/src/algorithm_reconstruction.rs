@@ -1090,7 +1090,9 @@ mod tests {
         assert!(spec.pipeline[0].implementations.is_empty());
         assert!(spec.verification.is_empty());
         assert!(
-            spec.notes.iter().any(|note| note.contains("supplied no implementation")),
+            spec.notes
+                .iter()
+                .any(|note| note.contains("supplied no implementation")),
             "the capture had cases but nothing to run: {:?}",
             spec.notes
         );

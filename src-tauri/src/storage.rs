@@ -233,8 +233,7 @@ impl Storage {
             // restore "解密全部" in Settings. Existing DBs with a stored key are unchanged.
             None => {
                 let seeded = apply_static_cdn_bypass_preset(&TlsInterceptionSettings::default())?;
-                let value =
-                    serde_json::to_string(&seeded).map_err(|error| error.to_string())?;
+                let value = serde_json::to_string(&seeded).map_err(|error| error.to_string())?;
                 connection
                     .execute(
                         "INSERT INTO app_settings(key, value_json, updated_at) VALUES (?1, ?2, ?3)

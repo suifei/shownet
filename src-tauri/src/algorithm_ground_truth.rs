@@ -252,7 +252,13 @@ mod tests {
     use super::*;
     use crate::models::HeaderEntry;
 
-    fn hook(sequence: i64, kind: &str, name: &str, input: Value, output: Value) -> BrowserHookEvent {
+    fn hook(
+        sequence: i64,
+        kind: &str,
+        name: &str,
+        input: Value,
+        output: Value,
+    ) -> BrowserHookEvent {
         BrowserHookEvent {
             id: format!("h{sequence}"),
             session_id: "s".into(),
@@ -358,7 +364,10 @@ mod tests {
         assert_eq!(truth.end_to_end_cases(), 1);
         assert_eq!(case.expected, "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(case.input["method"], json!("POST"));
-        assert_eq!(case.input["headers"]["content-type"], json!("application/json"));
+        assert_eq!(
+            case.input["headers"]["content-type"],
+            json!("application/json")
+        );
     }
 
     /// The whole point of the case is that the candidate has to *produce* the
@@ -386,7 +395,10 @@ mod tests {
     fn a_capture_with_nothing_to_compare_says_so() {
         let truth = collect(&[], &[], &[]);
         assert!(truth.is_empty());
-        assert!(!truth.skipped.is_empty(), "an empty result must be explained");
+        assert!(
+            !truth.skipped.is_empty(),
+            "an empty result must be explained"
+        );
     }
 
     #[test]

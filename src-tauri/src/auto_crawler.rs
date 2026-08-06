@@ -1343,9 +1343,12 @@ if __name__ == "__main__":
                 .join(", "),
             outbound_label = shape.outbound_fidelity_label,
             tls_preset = shape.outbound_tls_profile,
-            documented_ja3 = crate::tls_clienthello_catalog::catalog_documented_ja3(&shape.outbound_tls_profile)
-                .unwrap_or("not documented for this preset"),
-            documented_ja3_literal = match crate::tls_clienthello_catalog::catalog_documented_ja3(&shape.outbound_tls_profile) {
+            documented_ja3 =
+                crate::tls_clienthello_catalog::catalog_documented_ja3(&shape.outbound_tls_profile)
+                    .unwrap_or("not documented for this preset"),
+            documented_ja3_literal = match crate::tls_clienthello_catalog::catalog_documented_ja3(
+                &shape.outbound_tls_profile
+            ) {
                 Some(hash) => format!("\"{hash}\""),
                 None => "None".to_string(),
             },
@@ -1360,15 +1363,13 @@ if __name__ == "__main__":
                 "False"
             },
         ),
-        "javascript" | "typescript" | "go" | "java" | "csharp" => {
-            render_native_client(
-                language,
-                replay,
-                shape,
-                fidelity_pretty.as_str(),
-                proxy_pretty.as_str(),
-            )
-        }
+        "javascript" | "typescript" | "go" | "java" | "csharp" => render_native_client(
+            language,
+            replay,
+            shape,
+            fidelity_pretty.as_str(),
+            proxy_pretty.as_str(),
+        ),
         other => {
             return Err(format!(
                 "unsupported auto-crawler language '{other}' (supported: python, javascript, typescript, go, java, csharp)"
@@ -2806,13 +2807,17 @@ mod tests {
             .unwrap();
         // Contract: a missing header or body key must fail validation, never soft-pass.
         assert!(
-            client.content.contains("ok = not missing_headers and not missing_body"),
+            client
+                .content
+                .contains("ok = not missing_headers and not missing_body"),
             "python client must fail offline validation on a missing header or body key"
         );
         // A header that is present but empty passes a name-only shape check and
         // still fails the site, so it has to be reported separately.
         assert!(
-            client.content.contains("\"unresolvedHeaders\": meta.get(\"unresolvedHeaders\")"),
+            client
+                .content
+                .contains("\"unresolvedHeaders\": meta.get(\"unresolvedHeaders\")"),
             "python client must report headers it could not resolve"
         );
     }
@@ -2862,7 +2867,10 @@ mod tests {
             stdout.contains("\"live\": \"skipped\""),
             "generated client must not send without SHOWNET_LIVE=1:\n{stdout}"
         );
-        assert!(stdout.contains("\"validation\""), "client must print its shape check:\n{stdout}");
+        assert!(
+            stdout.contains("\"validation\""),
+            "client must print its shape check:\n{stdout}"
+        );
         assert!(
             stdout.contains("\"dynamicFieldSource\""),
             "client must say where its dynamic header values came from:\n{stdout}"
@@ -2890,11 +2898,14 @@ mod tests {
             .unwrap();
 
         assert!(
-            client.content.contains("from replay import compute_dynamic_fields"),
+            client
+                .content
+                .contains("from replay import compute_dynamic_fields"),
             "client must call the reconstructed signer shipped beside it"
         );
 
-        let dir = std::env::temp_dir().join(format!("shownet-crawler-session-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("shownet-crawler-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         for file in &package.files {
             std::fs::write(dir.join(&file.name), &file.content).expect("write generated file");
@@ -2951,7 +2962,11 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
         });
 
         let seen = report["seen"].as_array().expect("seen list");
-        assert_eq!(seen.len(), 2, "both requests must reach the server: {report}");
+        assert_eq!(
+            seen.len(),
+            2,
+            "both requests must reach the server: {report}"
+        );
         assert!(
             seen[0].as_str().unwrap_or_default().is_empty(),
             "the first request has no cookie to send yet: {report}"
@@ -2959,7 +2974,10 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
         // The point of the whole session: what the server handed back on call one
         // is carried by call two without the caller doing anything.
         assert!(
-            seen[1].as_str().unwrap_or_default().contains("granted=by-server"),
+            seen[1]
+                .as_str()
+                .unwrap_or_default()
+                .contains("granted=by-server"),
             "the second request must carry the cookie the server set: {report}"
         );
         assert_eq!(
@@ -3023,7 +3041,10 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
             Some(false),
             "stdlib TLS must never claim a browser JA3: {tls}"
         );
-        assert!(tls["documentedJa3"].is_null(), "no hash may be claimed on the stdlib path: {tls}");
+        assert!(
+            tls["documentedJa3"].is_null(),
+            "no hash may be claimed on the stdlib path: {tls}"
+        );
         assert!(
             !tls["note"].as_str().unwrap_or_default().is_empty(),
             "the client must say why it is on this tier: {tls}"
@@ -3276,8 +3297,10 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
 
             let package = build_auto_crawler(&storage, &sid, language)
                 .unwrap_or_else(|error| panic!("{language} crawler: {error}"));
-            let dir = std::env::temp_dir()
-                .join(format!("shownet-crawler-build-{language}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "shownet-crawler-build-{language}-{}",
+                std::process::id()
+            ));
             std::fs::remove_dir_all(&dir).ok();
             std::fs::create_dir_all(&dir).expect("temp dir");
             for f in &package.files {
@@ -3309,7 +3332,12 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
                     .expect("csproj");
                     (
                         "dotnet",
-                        vec!["build".into(), "-v".into(), "quiet".into(), "--nologo".into()],
+                        vec![
+                            "build".into(),
+                            "-v".into(),
+                            "quiet".into(),
+                            "--nologo".into(),
+                        ],
                     )
                 }
             };
@@ -3324,7 +3352,10 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             std::fs::remove_dir_all(&dir).ok();
-            assert!(ok, "{language} crawler package must compile:\n{stderr}\n{stdout}");
+            assert!(
+                ok,
+                "{language} crawler package must compile:\n{stderr}\n{stdout}"
+            );
         }
     }
 

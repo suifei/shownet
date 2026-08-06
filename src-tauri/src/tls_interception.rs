@@ -384,7 +384,11 @@ mod tests {
         }
         // Main site HTML still decrypts so search/API remain visible.
         assert!(!settings.decision("www.baidu.com", None).bypass);
-        assert!(!settings.decision("www.baidu.com", Some("www.baidu.com")).bypass);
+        assert!(
+            !settings
+                .decision("www.baidu.com", Some("www.baidu.com"))
+                .bypass
+        );
     }
 
     #[test]

@@ -120,8 +120,8 @@ pub async fn measure_rustls_preset(preset_id: &str) -> Result<CapturedClientHell
     let probe = ClientHelloProbe::bind_loopback().await?;
     let addr = probe.local_addr()?;
     let sni = format!("probe.{preset_id}.local");
-    let server_name = ServerName::try_from(sni.clone())
-        .map_err(|error| format!("invalid SNI: {error}"))?;
+    let server_name =
+        ServerName::try_from(sni.clone()).map_err(|error| format!("invalid SNI: {error}"))?;
 
     let client = tokio::spawn(async move {
         let tcp = TcpStream::connect(addr).await?;
