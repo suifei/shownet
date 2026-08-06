@@ -21,12 +21,8 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "javascript",
     "typescript",
     "go",
-    "rust",
     "java",
     "csharp",
-    "c++",
-    "c",
-    "zig",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -54,6 +50,10 @@ pub struct AlgorithmReplayPackage {
     pub reconstruction_mode: String,
     pub reconstruction_confidence: String,
     pub can_emit_runnable_crypto: bool,
+    /// Whether the emitted crypto was executed against captured values and
+    /// reproduced them. Distinct from `can_emit_runnable_crypto`, which only
+    /// says ShowNet had a template for these step names.
+    pub crypto_verified: bool,
     pub provider_candidates: Value,
     pub protocol_schemas: Value,
     pub algorithm_reconstruction: Value,
@@ -86,12 +86,8 @@ pub fn normalize_language(language: &str) -> Result<String, String> {
         "js" | "node" | "nodejs" | "javascript" => "javascript",
         "ts" | "tsx" | "typescript" => "typescript",
         "golang" | "go" => "go",
-        "rs" | "rust" => "rust",
         "java" => "java",
         "c#" | "cs" | "csharp" => "csharp",
-        "c++" | "cpp" | "cxx" | "cc" | "cplusplus" => "c++",
-        "c" | "c11" | "c17" | "c23" => "c",
-        "zig" | "ziglang" => "zig",
         other if SUPPORTED_LANGUAGES.contains(&other) => other,
         other => {
             return Err(format!(
@@ -246,6 +242,7 @@ pub fn build_algorithm_replay_for_report(
         reconstruction_mode: reconstruction.reconstruction_mode.clone(),
         reconstruction_confidence: reconstruction.confidence.clone(),
         can_emit_runnable_crypto: reconstruction.can_emit_runnable_crypto,
+        crypto_verified: reconstruction.crypto_verified,
         provider_candidates,
         protocol_schemas,
         algorithm_reconstruction: reconstruction_value,
@@ -406,6 +403,22 @@ fn build_files(
         serde_json::to_string_pretty(&reconstruction_json).map_err(|error| error.to_string())?;
     let reconstruction_md =
         algorithm_reconstruction::render_reconstruction_markdown(reconstruction);
+    // Shipped as its own file rather than buried in ALGORITHM_SPEC.json: this is
+    // the answer to "is this code right", and the operator should not have to
+    // find it inside a document that describes what the code is supposed to do.
+    let verification_pretty = serde_json::to_string_pretty(&json!({
+        "cryptoVerified": reconstruction.crypto_verified,
+        "claimBasis": if reconstruction.crypto_verified {
+            "each emitted agent step reproduced values recorded in this capture"
+        } else if reconstruction.verification.is_empty() {
+            "no agent-written code was supplied, so nothing was executed; template steps are unverified by construction"
+        } else {
+            "agent-written code was executed and did not earn the claim — see runs[]"
+        },
+        "runs": reconstruction.verification,
+        "note": "`canEmitRunnableCrypto` says ShowNet has a template for these step names. `cryptoVerified` says the emitted code produced the values the site actually returned. Only the second is evidence about the site.",
+    }))
+    .map_err(|error| error.to_string())?;
 
     let replay_name = replay_filename(language);
     let replay_code = render_replay_source(
@@ -439,6 +452,12 @@ fn build_files(
             &reconstruction_pretty,
         ),
         file(
+            "VERIFICATION.json",
+            "algorithm-verification",
+            None,
+            &verification_pretty,
+        ),
+        file(
             "PROTOCOL_SCHEMA.json",
             "protocol-schema",
             None,
@@ -465,6 +484,21 @@ fn build_files(
             &replay_code,
         ),
     ];
+
+    if language == "go" {
+        files.push(file(
+            "replay_demo.go",
+            "replay-demo",
+            Some("go".into()),
+            GO_REPLAY_DEMO,
+        ));
+    }
+
+    // Compiled languages carry their agent code as separate compilation units
+    // rather than spliced into the replay file — see `agent_step_files`.
+    for (name, content) in agent_step_files(reconstruction, language) {
+        files.push(file(&name, "agent-step", Some(language.into()), &content));
+    }
 
     // Also keep the Node harness from signature_adapter for JS ecosystems.
     if matches!(language, "javascript" | "typescript") {
@@ -495,12 +529,8 @@ fn replay_filename(language: &str) -> String {
         "javascript" => "replay.js".into(),
         "typescript" => "replay.ts".into(),
         "go" => "replay.go".into(),
-        "rust" => "replay.rs".into(),
         "java" => "Replay.java".into(),
         "csharp" => "Replay.cs".into(),
-        "c++" => "replay.cpp".into(),
-        "c" => "replay.c".into(),
-        "zig" => "replay.zig".into(),
         other => format!("replay.{other}"),
     }
 }
@@ -734,6 +764,331 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Emit the agent's own code for steps the built-in catalogue has no template
+/// for — but only the ones that were executed against the capture and got the
+/// right answer.
+///
+/// This is what makes the agent seam more than decoration: without it a step
+/// named anything outside the fixed list degrades to a placeholder no matter how
+/// good the reconstruction was. The verification gate is what makes it safe:
+/// unreviewed model output is not run by the operator on the strength of the
+/// model's own confidence, only on the strength of it having reproduced values
+/// the site really returned.
+fn verified_agent_steps<'a>(
+    reconstruction: &'a AlgorithmReconstruction,
+    language: &str,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    reconstruction
+        .pipeline
+        .iter()
+        .filter_map(|step| {
+            let implementation = step
+                .implementations
+                .iter()
+                .find(|item| item.language.eq_ignore_ascii_case(language))?;
+            // The step's own verification run must have passed, in this
+            // language. A JS pass does not license emitting Python.
+            let verified = reconstruction.verification.iter().any(|report| {
+                report.step_id == step.id
+                    && report.language.eq_ignore_ascii_case(language)
+                    && report.is_verified()
+            });
+            verified.then_some((
+                step.name.as_str(),
+                implementation.source.as_str(),
+                implementation.entry_point.as_str(),
+            ))
+        })
+        .collect()
+}
+
+/// Inline agent code for the interpreted languages, whose templates carry an
+/// `{agent_algorithms}` slot. Compiled languages get their own files instead —
+/// see `agent_step_files`.
+fn render_agent_algorithms(reconstruction: &AlgorithmReconstruction, language: &str) -> String {
+    let verified_steps = verified_agent_steps(reconstruction, language);
+    match language {
+        "python" => render_agent_algorithms_python(&verified_steps),
+        "javascript" | "typescript" => render_agent_algorithms_js(&verified_steps, language),
+        _ => String::new(),
+    }
+}
+
+fn render_agent_algorithms_python(verified_steps: &[(&str, &str, &str)]) -> String {
+    if verified_steps.is_empty() {
+        return "# (no agent-written step passed verification against this capture)\n\
+                AGENT_STEPS: Dict[str, Any] = {}\n"
+            .to_string();
+    }
+
+    let mut out = String::from(
+        "# --- Agent-reconstructed steps ------------------------------------------\n\
+         # Written by the analysis agent, then executed against values this capture\n\
+         # recorded. Only steps that reproduced those values exactly appear here.\n\
+         # See VERIFICATION.json for the cases each one passed.\n\n",
+    );
+    let mut registry = Vec::new();
+    for (index, (name, source, entry_point)) in verified_steps.iter().enumerate() {
+        let module_alias = format!("_agent_step_{index}");
+        out.push_str(&format!("# step: {name}\n"));
+        // Namespaced in a function so two agent steps cannot collide on a helper
+        // name and silently take each other's implementation.
+        out.push_str(&format!("def {module_alias}_factory():\n"));
+        for line in source.lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+        out.push_str(&format!("    return {entry_point}\n\n"));
+        out.push_str(&format!("{module_alias} = {module_alias}_factory()\n\n"));
+        registry.push(format!("    {name:?}: {module_alias},"));
+    }
+    out.push_str("AGENT_STEPS: Dict[str, Any] = {\n");
+    out.push_str(&registry.join("\n"));
+    out.push_str("\n}\n");
+    out
+}
+
+fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &str) -> String {
+    let typed = language == "typescript";
+    let registry_type = if typed {
+        ": Record<string, (request: AgentStepInput) => string>"
+    } else {
+        ""
+    };
+    if verified_steps.is_empty() {
+        return format!(
+            "// (no agent-written step passed verification against this capture)\n\
+             export const AGENT_STEPS{registry_type} = {{}};\n"
+        );
+    }
+
+    // The candidate was verified against `shownet.*` primitives, because the
+    // verifier's sandbox has no WebCrypto. Node does, so the same surface is
+    // rebuilt on node:crypto here — same names, same encodings, so the code that
+    // passed verification is the code that runs.
+    let mut out = String::from(
+        "// --- Agent-reconstructed steps ------------------------------------------\n\
+         // Written by the analysis agent, then executed against values this capture\n\
+         // recorded. Only steps that reproduced those values exactly appear here.\n\
+         // See VERIFICATION.json for the cases each one passed.\n\n\
+         import { createHash, createHmac } from \"node:crypto\";\n\n\
+         const shownet = {\n\
+         \x20 sha256Hex: (data) => createHash(\"sha256\").update(String(data)).digest(\"hex\"),\n\
+         \x20 md5Hex: (data) => createHash(\"md5\").update(String(data)).digest(\"hex\"),\n\
+         \x20 hmacSha256Hex: (key, message) =>\n\
+         \x20   createHmac(\"sha256\", String(key)).update(String(message)).digest(\"hex\"),\n\
+         \x20 base64Encode: (data) => Buffer.from(String(data), \"utf8\").toString(\"base64\"),\n\
+         };\n\n",
+    );
+    if typed {
+        out = out.replace(
+            "const shownet = {",
+            "export type AgentStepInput = {\n\
+             \x20 method: string;\n\
+             \x20 host: string;\n\
+             \x20 path: string;\n\
+             \x20 query: string | null;\n\
+             \x20 headers: Record<string, string>;\n\
+             \x20 body: string | null;\n\
+             };\n\n\
+             const shownet = {",
+        );
+    }
+
+    let mut registry = Vec::new();
+    for (index, (name, source, entry_point)) in verified_steps.iter().enumerate() {
+        let alias = format!("_agentStep{index}");
+        out.push_str(&format!("// step: {name}\n"));
+        // Wrapped in an IIFE for the same reason as the Python factory: two
+        // agent steps must not be able to overwrite each other's helpers.
+        out.push_str(&format!("const {alias} = (() => {{\n"));
+        for line in source.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+        out.push_str(&format!("  return {entry_point};\n}})();\n\n"));
+        registry.push(format!("  {name:?}: {alias},"));
+    }
+    out.push_str(&format!("export const AGENT_STEPS{registry_type} = {{\n"));
+    out.push_str(&registry.join("\n"));
+    out.push_str("\n};\n");
+    out
+}
+
+/// The Go replay demo entry point, kept in its own file.
+///
+/// `package main` allows exactly one `func main`, and the auto-crawler package
+/// copies these replay files in beside its own client — which has one. Shipping
+/// the demo separately lets the crawler simply leave it out instead of editing
+/// generated source.
+const GO_REPLAY_DEMO: &str = r#"package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+func main() {
+	ctx := ReplayContext{
+		Domain:    getenv("SHOWNET_DOMAIN", "example.com"),
+		UserAgent: getenv("SHOWNET_UA", "ShowNet-Replay/1.0"),
+	}
+	req, err := BuildRequest(ctx)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(req)
+}
+"#;
+
+/// Agent code for languages that compile: emitted as their own files.
+///
+/// Inlining is wrong here — Java allows one public class per file, and splicing
+/// a Go candidate into another file would mean merging its imports by hand. The
+/// candidate is verified as a standalone compilation unit, so shipping it as one
+/// keeps the code that was checked byte-identical to the code that runs.
+fn agent_step_files(
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+) -> Vec<(String, String)> {
+    let steps = verified_agent_steps(reconstruction, language);
+    match language {
+        "go" => {
+            let mut files = vec![
+                ("shownet_request.go".into(), GO_REQUEST_TYPE.into()),
+                ("agent_steps.go".into(), go_agent_steps(&steps)),
+            ];
+            // The candidate itself, verbatim: it was verified as a standalone
+            // `package main` file and ships as one, so its imports stay intact.
+            for (index, (_, source, _)) in steps.iter().enumerate() {
+                files.push((format!("agent_candidate_{index}.go"), (*source).to_string()));
+            }
+            files
+        }
+        "java" => {
+            let mut files = vec![("Request.java".into(), JAVA_REQUEST_TYPE.into())];
+            files.push(("AgentSteps.java".into(), java_agent_registry(&steps)));
+            for (index, (_, source, _)) in steps.iter().enumerate() {
+                files.push((java_candidate_name(source, index), (*source).to_string()));
+            }
+            files
+        }
+        "csharp" => {
+            let mut files = vec![("Request.cs".into(), CSHARP_REQUEST_TYPE.into())];
+            files.push(("AgentSteps.cs".into(), csharp_agent_registry(&steps)));
+            for (index, (_, source, _)) in steps.iter().enumerate() {
+                files.push((format!("Candidate{index}.cs"), (*source).to_string()));
+            }
+            files
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Java ties the file name to the public type declared inside it.
+fn java_candidate_name(source: &str, index: usize) -> String {
+    let declared = source
+        .split("public class ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string);
+    match declared {
+        Some(name) if !name.is_empty() => format!("{name}.java"),
+        _ => format!("Candidate{index}.java"),
+    }
+}
+
+const GO_REQUEST_TYPE: &str = r#"package main
+
+// Request is the shape every agent step was verified against. It must stay
+// identical to the one ShowNet fed the step during verification: a field read
+// here that verification never supplied means the step runs unchecked.
+type Request struct {
+	Method  string            `json:"method"`
+	Host    string            `json:"host"`
+	Path    string            `json:"path"`
+	Query   string            `json:"query"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+"#;
+
+const JAVA_REQUEST_TYPE: &str = r#"import java.util.Map;
+
+/**
+ * The shape every agent step was verified against. It must stay identical to
+ * the one ShowNet fed the step during verification: a field read here that
+ * verification never supplied means the step runs unchecked.
+ */
+public record Request(
+    String method,
+    String host,
+    String path,
+    String query,
+    Map<String, String> headers,
+    String body) {}
+"#;
+
+const CSHARP_REQUEST_TYPE: &str = r#"namespace ShowNetReplay;
+
+/// <summary>
+/// The shape every agent step was verified against. It must stay identical to
+/// the one ShowNet fed the step during verification: a field read here that
+/// verification never supplied means the step runs unchecked.
+/// </summary>
+public sealed record Request(
+    string Method,
+    string Host,
+    string Path,
+    string? Query,
+    Dictionary<string, string> Headers,
+    string? Body);
+"#;
+
+const AGENT_FILE_HEADER: &str = "// Written by the analysis agent, then compiled and run against values this\n     // capture recorded. Only steps that reproduced those values appear here.\n     // See VERIFICATION.json for the cases each one passed.\n";
+
+fn go_agent_steps(steps: &[(&str, &str, &str)]) -> String {
+    let mut out = format!("package main\n\n{AGENT_FILE_HEADER}\n");
+    if steps.is_empty() {
+        out.push_str("// (no agent-written step passed verification against this capture)\n");
+        out.push_str("var AgentSteps = map[string]func(Request) string{}\n");
+        return out;
+    }
+    out.push_str("var AgentSteps = map[string]func(Request) string{\n");
+    for (name, _, entry_point) in steps {
+        out.push_str(&format!("\t{name:?}: {entry_point},\n"));
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn java_agent_registry(steps: &[(&str, &str, &str)]) -> String {
+    let mut out = format!(
+        "import java.util.LinkedHashMap;\nimport java.util.Map;\nimport java.util.function.Function;\n\n{AGENT_FILE_HEADER}\npublic final class AgentSteps {{\n    private AgentSteps() {{}}\n\n    public static Map<String, Function<Request, String>> all() {{\n        Map<String, Function<Request, String>> steps = new LinkedHashMap<>();\n"
+    );
+    for (name, source, entry_point) in steps {
+        let class = java_candidate_name(source, 0).trim_end_matches(".java").to_string();
+        out.push_str(&format!(
+            "        steps.put({name:?}, request -> {{\n            try {{\n                return {class}.{entry_point}(request);\n            }} catch (Exception exception) {{\n                throw new RuntimeException(exception);\n            }}\n        }});\n"
+        ));
+    }
+    out.push_str("        return steps;\n    }\n}\n");
+    out
+}
+
+fn csharp_agent_registry(steps: &[(&str, &str, &str)]) -> String {
+    let mut out = format!(
+        "namespace ShowNetReplay;\n\n{AGENT_FILE_HEADER}\npublic static class AgentSteps\n{{\n    public static IReadOnlyDictionary<string, Func<Request, string>> All {{ get; }} =\n        new Dictionary<string, Func<Request, string>>\n        {{\n"
+    );
+    for (name, _, entry_point) in steps {
+        out.push_str(&format!("            [{name:?}] = Candidate.{entry_point},\n"));
+    }
+    out.push_str("        };\n}\n");
+    out
+}
+
 fn render_replay_source(
     language: &str,
     harness: &SignatureAdapterHarness,
@@ -753,9 +1108,21 @@ fn render_replay_source(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let fields = harness.dynamic_fields.join(", ");
-    let inputs = harness.required_inputs.join(", ");
-    let gaps = evidence_gaps.join(" | ");
+    // Go, Java and C# embed this in `//` line comments, where an unprefixed
+    // continuation line is a syntax error rather than prose. Found by compiling
+    // the generated package — a text assertion cannot see it.
+    let endpoints_line_comment = endpoints
+        .lines()
+        .map(|line| format!("//{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Collapsed to one line each: these are interpolated into single-line
+    // comments in three of the six templates, where an embedded newline ends the
+    // comment and the rest becomes code.
+    let one_line = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let fields = one_line(harness.dynamic_fields.join(", "));
+    let inputs = one_line(harness.required_inputs.join(", "));
+    let gaps = one_line(evidence_gaps.join(" | "));
     let pow = protocol_schemas
         .pointer("/pow/challengeType")
         .and_then(Value::as_str)
@@ -785,6 +1152,7 @@ fn render_replay_source(
         .iter()
         .any(|step| step.name == "encrypt_signals_aes_gcm");
     let vmp = reconstruction.vmp_or_custom_vm;
+    let agent_algorithms = render_agent_algorithms(reconstruction, language);
     let py_bool = |value: bool| if value { "True" } else { "False" };
     let has_hmac_py = py_bool(has_hmac);
     let has_nb_py = py_bool(has_nb);
@@ -859,6 +1227,37 @@ class ReplayContext:
     nonce: Optional[str] = None
     client_machine_id: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+def agent_step_input(ctx: ReplayContext, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """The shape an agent step was verified against, rebuilt at run time.
+
+    This must stay identical to the input ShowNet fed the step during
+    verification. If the two drift, the step is being called with something it
+    was never checked on and the verified badge on it means nothing.
+    """
+    # Freshly generated per-request values go where the capture had them — in
+    # the headers — rather than as extra top-level keys. Adding keys here that
+    # verification never supplied would let a step read a field at run time that
+    # was absent when it was checked.
+    headers = {{k.lower(): v for k, v in (ctx.extra.get("headers") or {{}}).items()}}
+    for name, value in (
+        ("x-request-time", ctx.request_time),
+        ("x-request-nonce", ctx.nonce),
+        ("x-client-machine-id", ctx.client_machine_id),
+        ("user-agent", ctx.user_agent),
+    ):
+        if value and name not in headers:
+            headers[name] = value
+
+    return {{
+        "method": ctx.extra.get("method", "POST"),
+        "host": ctx.domain,
+        "path": ctx.path,
+        "query": ctx.extra.get("query"),
+        "headers": headers,
+        "body": ctx.extra.get("body"),
+    }}
 
 
 def load_json(path: str) -> Dict[str, Any]:
@@ -953,6 +1352,8 @@ def telemetry_payload(existing_token: Optional[str], session_storage: str = "nul
     }}
 
 
+{agent_algorithms}
+
 def compute_dynamic_fields(ctx: ReplayContext, manifest: Dict[str, Any], spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Materialize reconstructed steps. Partial/VMP steps stay explicit errors or hook-trace placeholders."""
     spec = spec or load_algorithm_spec()
@@ -966,7 +1367,13 @@ def compute_dynamic_fields(ctx: ReplayContext, manifest: Dict[str, Any], spec: O
     for step in pipeline:
         name = step.get("name") or ""
         status = step.get("status") or ""
-        if name == "compose_sign_base" and status == "reconstructed":
+        if name in AGENT_STEPS:
+            # A verified agent step wins over anything below: it was checked
+            # against this capture, while the branches below are generic
+            # templates that were not.
+            out[name] = AGENT_STEPS[name](agent_step_input(ctx, manifest))
+            out["_agentVerifiedSteps"] = sorted(set(out.get("_agentVerifiedSteps", []) + [name]))
+        elif name == "compose_sign_base" and status == "reconstructed":
             out["signBase"] = compose_sign_base(ctx, str(ctx.extra.get("businessSuffix", "")))
         elif name == "hmac_sign" and status == "reconstructed":
             base = out.get("signBase") or compose_sign_base(ctx)
@@ -1141,14 +1548,61 @@ export function loadManifest(path = "MANIFEST.json") {{
   return JSON.parse(readFileSync(path, "utf8"));
 }}
 
+{agent_algorithms}
+
 /**
- * Implement from ShowNet Hook / crypto snippet evidence.
- * Must return every dynamicFields entry. Read secrets from process.env only.
+ * Rebuild the request as the signer saw it. Must stay identical to the shape
+ * each agent step was verified against — a field read here that verification
+ * never supplied means the step is running unchecked.
+ */
+export function agentStepInput(context, manifest) {{
+  const headers = {{}};
+  for (const [name, value] of Object.entries(context.headers ?? {{}})) {{
+    headers[String(name).toLowerCase()] = value;
+  }}
+  for (const [name, value] of [
+    ["x-request-time", context.requestTime],
+    ["x-request-nonce", context.nonce],
+    ["x-client-machine-id", context.clientMachineId],
+    ["user-agent", context.userAgent],
+  ]) {{
+    if (value && !(name in headers)) headers[name] = value;
+  }}
+  const endpoint = (manifest.matchedRequests ?? [])[0] ?? {{}};
+  const url = endpoint.url ? new URL(endpoint.url) : null;
+  return {{
+    method: endpoint.method ?? "POST",
+    host: context.domain ?? url?.hostname ?? "",
+    path: url?.pathname ?? context.path ?? "/",
+    query: url?.search ? url.search.slice(1) : null,
+    headers,
+    body: context.body ?? null,
+  }};
+}}
+
+/**
+ * Runs the agent steps this capture verified. Any dynamic field with no
+ * verified step behind it is reported, not guessed: a plausible wrong value
+ * fails at the site with no clue why, while a named gap points straight at the
+ * step still to reconstruct. Read secrets from process.env only.
  */
 export async function computeDynamicFields(context, manifest) {{
-  throw new Error(
-    "Fill computeDynamicFields from authorized capture evidence before live validation",
-  );
+  const out = {{}};
+  const input = agentStepInput(context, manifest);
+  for (const [name, step] of Object.entries(AGENT_STEPS)) {{
+    out[name] = step(input);
+  }}
+  out._agentVerifiedSteps = Object.keys(AGENT_STEPS).sort();
+
+  const unresolved = (manifest.dynamicFields ?? []).filter((name) => !(name in out));
+  if (unresolved.length) {{
+    throw new Error(
+      `no verified reconstruction for: ${{unresolved.join(", ")}}. ` +
+        "Supply an implementation for these steps in the analysis report's " +
+        "algorithm-spec block, or fill them from authorized capture evidence.",
+    );
+  }}
+  return out;
 }}
 
 export async function buildRequest(context, compute = computeDynamicFields) {{
@@ -1217,14 +1671,63 @@ export function loadManifest(path = "MANIFEST.json"): Manifest {{
   return JSON.parse(readFileSync(path, "utf8")) as Manifest;
 }}
 
-/** Implement from ShowNet Hook / crypto snippet evidence. */
+{agent_algorithms}
+
+/**
+ * Rebuild the request as the signer saw it. Must stay identical to the shape
+ * each agent step was verified against — a field read here that verification
+ * never supplied means the step is running unchecked.
+ */
+export function agentStepInput(context: ReplayContext, manifest: Manifest): AgentStepInput {{
+  const headers: Record<string, string> = {{}};
+  for (const [name, value] of Object.entries((context.headers as Record<string, string>) ?? {{}})) {{
+    headers[String(name).toLowerCase()] = String(value);
+  }}
+  for (const [name, value] of [
+    ["x-request-time", context.requestTime],
+    ["x-request-nonce", context.nonce],
+    ["x-client-machine-id", context.clientMachineId],
+    ["user-agent", context.userAgent],
+  ] as Array<[string, unknown]>) {{
+    if (value && !(name in headers)) headers[name] = String(value);
+  }}
+  const endpoint = (manifest.matchedRequests ?? [])[0];
+  const url = endpoint?.url ? new URL(endpoint.url) : null;
+  return {{
+    method: endpoint?.method ?? "POST",
+    host: context.domain ?? url?.hostname ?? "",
+    path: url?.pathname ?? "/",
+    query: url?.search ? url.search.slice(1) : null,
+    headers,
+    body: (context.body as string | null) ?? null,
+  }};
+}}
+
+/**
+ * Runs the agent steps this capture verified. Any dynamic field with no
+ * verified step behind it is reported, not guessed. Read secrets from
+ * process.env only.
+ */
 export async function computeDynamicFields(
-  _context: ReplayContext,
-  _manifest: Manifest,
+  context: ReplayContext,
+  manifest: Manifest,
 ): Promise<Record<string, unknown>> {{
-  throw new Error(
-    "Fill computeDynamicFields from authorized capture evidence before live validation",
-  );
+  const out: Record<string, unknown> = {{}};
+  const input = agentStepInput(context, manifest);
+  for (const [name, step] of Object.entries(AGENT_STEPS)) {{
+    out[name] = step(input);
+  }}
+  out._agentVerifiedSteps = Object.keys(AGENT_STEPS).sort();
+
+  const unresolved = (manifest.dynamicFields ?? []).filter((name) => !(name in out));
+  if (unresolved.length) {{
+    throw new Error(
+      `no verified reconstruction for: ${{unresolved.join(", ")}}. ` +
+        "Supply an implementation for these steps in the analysis report's " +
+        "algorithm-spec block, or fill them from authorized capture evidence.",
+    );
+  }}
+  return out;
 }}
 
 export async function buildRequest(
@@ -1270,7 +1773,7 @@ export async function buildRequest(
 // PoW: {pow} | signal: {signal}
 //
 // Endpoints:
-{endpoints}
+{endpoints_line_comment}
 //
 // Dynamic fields: {fields}
 // Required inputs: {inputs}
@@ -1281,7 +1784,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"sort"
+	"strings"
 )
 
 type Manifest struct {{
@@ -1293,9 +1799,15 @@ type Manifest struct {{
 }}
 
 type ReplayContext struct {{
-	Domain        string
-	UserAgent     string
-	ExistingToken string
+	Domain          string
+	UserAgent       string
+	ExistingToken   string
+	Path            string
+	Body            string
+	RequestTime     string
+	Nonce           string
+	ClientMachineID string
+	Headers         map[string]string
 }}
 
 func loadManifest(path string) (*Manifest, error) {{
@@ -1310,9 +1822,68 @@ func loadManifest(path string) (*Manifest, error) {{
 	return &manifest, nil
 }}
 
-// ComputeDynamicFields must be implemented from authorized ShowNet evidence.
+// AgentStepInput rebuilds the request as each verified step was checked on.
+// It must stay identical to the shape used during verification: a field read
+// here that verification never supplied means the step runs unchecked.
+func AgentStepInput(ctx ReplayContext, manifest *Manifest) Request {{
+	headers := map[string]string{{}}
+	for name, value := range ctx.Headers {{
+		headers[strings.ToLower(name)] = value
+	}}
+	for _, pair := range [][2]string{{
+		{{"x-request-time", ctx.RequestTime}},
+		{{"x-request-nonce", ctx.Nonce}},
+		{{"x-client-machine-id", ctx.ClientMachineID}},
+		{{"user-agent", ctx.UserAgent}},
+	}} {{
+		if pair[1] != "" {{
+			if _, seen := headers[pair[0]]; !seen {{
+				headers[pair[0]] = pair[1]
+			}}
+		}}
+	}}
+	request := Request{{Method: "POST", Host: ctx.Domain, Path: ctx.Path, Headers: headers, Body: ctx.Body}}
+	if len(manifest.MatchedRequests) > 0 {{
+		endpoint := manifest.MatchedRequests[0]
+		if method, ok := endpoint["method"].(string); ok {{
+			request.Method = method
+		}}
+		if raw, ok := endpoint["url"].(string); ok {{
+			if parsed, err := url.Parse(raw); err == nil {{
+				request.Host = parsed.Hostname()
+				request.Path = parsed.Path
+				request.Query = parsed.RawQuery
+			}}
+		}}
+	}}
+	return request
+}}
+
+// ComputeDynamicFields runs the agent steps this capture verified. A dynamic
+// field with no verified step behind it is reported, not guessed: a plausible
+// wrong value fails at the site with no clue why, while a named gap points
+// straight at the step still to reconstruct.
 func ComputeDynamicFields(ctx ReplayContext, manifest *Manifest) (map[string]interface{{}}, error) {{
-	return nil, fmt.Errorf("fill ComputeDynamicFields from capture evidence before live validation")
+	out := map[string]interface{{}}{{}}
+	input := AgentStepInput(ctx, manifest)
+	verified := make([]string, 0, len(AgentSteps))
+	for name, step := range AgentSteps {{
+		out[name] = step(input)
+		verified = append(verified, name)
+	}}
+	sort.Strings(verified)
+	out["_agentVerifiedSteps"] = verified
+
+	missing := []string{{}}
+	for _, name := range manifest.DynamicFields {{
+		if _, ok := out[name]; !ok {{
+			missing = append(missing, name)
+		}}
+	}}
+	if len(missing) > 0 {{
+		return nil, fmt.Errorf("no verified reconstruction for: %s. Supply an implementation for these steps in the analysis report's algorithm-spec block", strings.Join(missing, ", "))
+	}}
+	return out, nil
 }}
 
 func BuildRequest(ctx ReplayContext) (map[string]interface{{}}, error) {{
@@ -1348,21 +1919,6 @@ func BuildRequest(ctx ReplayContext) (map[string]interface{{}}, error) {{
 	}}, nil
 }}
 
-func main() {{
-	ctx := ReplayContext{{
-		Domain:    getenv("SHOWNET_DOMAIN", "example.com"),
-		UserAgent: getenv("SHOWNET_UA", "ShowNet-Replay/1.0"),
-	}}
-	req, err := BuildRequest(ctx)
-	if err != nil {{
-		fmt.Println("error:", err)
-		return
-	}}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(req)
-}}
-
 func getenv(key, fallback string) string {{
 	if value := os.Getenv(key); value != "" {{
 		return value
@@ -1371,82 +1927,12 @@ func getenv(key, fallback string) string {{
 }}
 "#
         ),
-        "rust" => format!(
-            r#"// ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
-// Adapter: {adapter} ({vendor}) | hash: {hash}
-// PoW: {pow} | signal: {signal}
-// Endpoints:
-{endpoints}
-// Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
-
-use serde_json::{{json, Value}};
-use std::fs;
-
-pub struct ReplayContext {{
-    pub domain: String,
-    pub user_agent: String,
-    pub existing_token: Option<String>,
-}}
-
-pub fn load_manifest(path: &str) -> Result<Value, Box<dyn std::error::Error>> {{
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
-}}
-
-/// Implement from authorized ShowNet Hook / crypto evidence.
-pub fn compute_dynamic_fields(
-    _ctx: &ReplayContext,
-    _manifest: &Value,
-) -> Result<Value, Box<dyn std::error::Error>> {{
-    Err("fill compute_dynamic_fields from capture evidence before live validation".into())
-}}
-
-pub fn build_request(ctx: &ReplayContext) -> Result<Value, Box<dyn std::error::Error>> {{
-    let manifest = load_manifest("MANIFEST.json")?;
-    let dynamic = compute_dynamic_fields(ctx, &manifest)?;
-    let endpoint = manifest
-        .get("matchedRequests")
-        .and_then(|value| value.as_array())
-        .and_then(|items| items.first())
-        .ok_or("no matched endpoint")?;
-    Ok(json!({{
-        "url": endpoint.get("url"),
-        "method": endpoint.get("method"),
-        "headers": {{
-            "user-agent": ctx.user_agent,
-            "content-type": "application/json"
-        }},
-        "body": {{
-            "domain": ctx.domain,
-            "existing_token": ctx.existing_token,
-            "dynamic": dynamic
-        }},
-        "meta": {{
-            "adapterId": manifest.get("adapterId"),
-            "evidenceHash": manifest.get("evidenceHash")
-        }}
-    }}))
-}}
-
-fn main() {{
-    let ctx = ReplayContext {{
-        domain: std::env::var("SHOWNET_DOMAIN").unwrap_or_else(|_| "example.com".into()),
-        user_agent: std::env::var("SHOWNET_UA").unwrap_or_else(|_| "ShowNet-Replay/1.0".into()),
-        existing_token: std::env::var("SHOWNET_EXISTING_TOKEN").ok(),
-    }};
-    match build_request(&ctx) {{
-        Ok(value) => println!("{{}}", serde_json::to_string_pretty(&value).unwrap_or_default()),
-        Err(error) => eprintln!("error: {{error}}"),
-    }}
-}}
-"#
-        ),
         "java" => format!(
             r#"// ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
 // Adapter: {adapter} ({vendor}) | hash: {hash}
 // PoW: {pow} | signal: {signal}
 // Endpoints:
-{endpoints}
+{endpoints_line_comment}
 // Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
 
 import java.nio.file.Files;
@@ -1461,10 +1947,53 @@ public final class Replay {{
     return Files.readString(Path.of(path));
   }}
 
-  /** Implement from authorized ShowNet capture evidence. */
+  /**
+   * Rebuild the request as each verified step was checked on. Must stay
+   * identical to the shape used during verification: a field read here that
+   * verification never supplied means the step runs unchecked.
+   */
+  public static Request agentStepInput(Map<String, Object> context) {{
+    Map<String, String> headers = new java.util.LinkedHashMap<>();
+    Object raw = context.get("headers");
+    if (raw instanceof Map<?, ?> supplied) {{
+      supplied.forEach((key, value) ->
+          headers.put(String.valueOf(key).toLowerCase(java.util.Locale.ROOT), String.valueOf(value)));
+    }}
+    for (String[] pair : new String[][] {{
+        {{"x-request-time", (String) context.get("requestTime")}},
+        {{"x-request-nonce", (String) context.get("nonce")}},
+        {{"x-client-machine-id", (String) context.get("clientMachineId")}},
+        {{"user-agent", (String) context.get("userAgent")}},
+    }}) {{
+      if (pair[1] != null && !pair[1].isEmpty()) {{
+        headers.putIfAbsent(pair[0], pair[1]);
+      }}
+    }}
+    return new Request(
+        (String) context.getOrDefault("method", "POST"),
+        (String) context.getOrDefault("host", ""),
+        (String) context.getOrDefault("path", "/"),
+        (String) context.get("query"),
+        headers,
+        (String) context.get("body"));
+  }}
+
+  /**
+   * Runs the agent steps this capture verified. A dynamic field with no verified
+   * step behind it is reported, not guessed: a plausible wrong value fails at
+   * the site with no clue why, while a named gap points at the step still to
+   * reconstruct.
+   */
   public static Map<String, Object> computeDynamicFields(Map<String, Object> context) {{
-    throw new UnsupportedOperationException(
-        "Fill computeDynamicFields from capture evidence before live validation");
+    Map<String, Object> out = new HashMap<>();
+    Request input = agentStepInput(context);
+    AgentSteps.all().forEach((name, step) -> out.put(name, step.apply(input)));
+    out.put("_agentVerifiedSteps", AgentSteps.all().keySet().stream().sorted().toList());
+    if (AgentSteps.all().isEmpty()) {{
+      throw new UnsupportedOperationException(
+          "no agent-written step passed verification against this capture; see VERIFICATION.json, then supply an implementation in the analysis report's algorithm-spec block");
+    }}
+    return out;
   }}
 
   public static Map<String, Object> buildRequest(Map<String, Object> context) throws Exception {{
@@ -1495,25 +2024,84 @@ public final class Replay {{
 // Adapter: {adapter} ({vendor}) | hash: {hash}
 // PoW: {pow} | signal: {signal}
 // Endpoints:
-{endpoints}
+{endpoints_line_comment}
 // Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
 
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+
+// Same namespace as Request.cs, AgentSteps.cs and the agent candidates, so the
+// generated files form one compilation unit rather than three that cannot see
+// each other.
+namespace ShowNetReplay;
 
 public static class Replay
 {{
     public static JsonDocument LoadManifest(string path = "MANIFEST.json")
         => JsonDocument.Parse(File.ReadAllText(path));
 
-    // Implement from authorized ShowNet capture evidence.
+    /// <summary>
+    /// Rebuild the request as each verified step was checked on. Must stay
+    /// identical to the shape used during verification: a field read here that
+    /// verification never supplied means the step runs unchecked.
+    /// </summary>
+    public static Request AgentStepInput(Dictionary<string, object?> context)
+    {{
+        var headers = new Dictionary<string, string>();
+        if (context.TryGetValue("headers", out var raw) && raw is Dictionary<string, string> supplied)
+        {{
+            foreach (var pair in supplied)
+            {{
+                headers[pair.Key.ToLowerInvariant()] = pair.Value;
+            }}
+        }}
+        foreach (var (name, value) in new (string, object?)[]
+                 {{
+                     ("x-request-time", context.GetValueOrDefault("requestTime")),
+                     ("x-request-nonce", context.GetValueOrDefault("nonce")),
+                     ("x-client-machine-id", context.GetValueOrDefault("clientMachineId")),
+                     ("user-agent", context.GetValueOrDefault("userAgent")),
+                 }})
+        {{
+            if (value is string text && text.Length > 0 && !headers.ContainsKey(name))
+            {{
+                headers[name] = text;
+            }}
+        }}
+        return new Request(
+            context.GetValueOrDefault("method") as string ?? "POST",
+            context.GetValueOrDefault("host") as string ?? string.Empty,
+            context.GetValueOrDefault("path") as string ?? "/",
+            context.GetValueOrDefault("query") as string,
+            headers,
+            context.GetValueOrDefault("body") as string);
+    }}
+
+    /// <summary>
+    /// Runs the agent steps this capture verified. A dynamic field with no
+    /// verified step behind it is reported, not guessed.
+    /// </summary>
     public static Dictionary<string, object?> ComputeDynamicFields(
         Dictionary<string, object?> context,
         JsonDocument manifest)
-        => throw new NotImplementedException(
-            "Fill ComputeDynamicFields from capture evidence before live validation");
+    {{
+        if (AgentSteps.All.Count == 0)
+        {{
+            throw new NotImplementedException(
+                "no agent-written step passed verification against this capture; see VERIFICATION.json, then supply an implementation in the analysis report's algorithm-spec block");
+        }}
+        var input = AgentStepInput(context);
+        var out_ = new Dictionary<string, object?>();
+        foreach (var pair in AgentSteps.All)
+        {{
+            out_[pair.Key] = pair.Value(input);
+        }}
+        out_["_agentVerifiedSteps"] = AgentSteps.All.Keys.OrderBy(name => name).ToArray();
+        return out_;
+    }}
 
     public static Dictionary<string, object?> BuildRequest(Dictionary<string, object?> context)
     {{
@@ -1545,286 +2133,6 @@ public static class Replay
     }}
 }}
 "#
-        ),
-        "c++" => format!(
-            r##"// ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
-// Adapter: {adapter} ({vendor}) | hash: {hash}
-// PoW: {pow} | signal: {signal}
-// Endpoints:
-{endpoints}
-// Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
-//
-// Build: g++ -std=c++17 -O2 replay.cpp -o replay
-// Runtime deps: none required for the skeleton. Use nlohmann/json or similar to parse MANIFEST.json.
-
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-
-struct ReplayContext {{
-  std::string domain;
-  std::string user_agent;
-  std::string existing_token;
-}};
-
-static std::string getenv_or(const char* key, const char* fallback) {{
-  if (const char* value = std::getenv(key)) {{
-    return value;
-  }}
-  return fallback;
-}}
-
-static std::string load_manifest(const std::string& path = "MANIFEST.json") {{
-  std::ifstream input(path);
-  if (!input) {{
-    throw std::runtime_error("failed to open MANIFEST.json");
-  }}
-  std::ostringstream buffer;
-  buffer << input.rdbuf();
-  return buffer.str();
-}}
-
-// Implement from authorized ShowNet Hook / crypto evidence.
-// Must populate every dynamicFields entry from MANIFEST.json.
-static std::unordered_map<std::string, std::string> compute_dynamic_fields(
-    const ReplayContext& /*ctx*/,
-    const std::string& /*manifest_json*/) {{
-  throw std::runtime_error(
-      "Fill compute_dynamic_fields from capture evidence before live validation");
-}}
-
-static std::string build_request_json(const ReplayContext& ctx) {{
-  const std::string manifest = load_manifest();
-  auto dynamic = compute_dynamic_fields(ctx, manifest);
-  std::ostringstream out;
-  out << "{{"
-      << "\"domain\":\"" << ctx.domain << "\","
-      << "\"userAgent\":\"" << ctx.user_agent << "\","
-      << "\"existingToken\":\"" << ctx.existing_token << "\","
-      << "\"adapter\":\"{adapter}\","
-      << "\"evidenceHash\":\"{hash}\","
-      << "\"dynamic\":{{";
-  bool first = true;
-  for (const auto& [key, value] : dynamic) {{
-    if (!first) {{
-      out << ",";
-    }}
-    first = false;
-    out << "\"" << key << "\":\"" << value << "\"";
-  }}
-  out << "}},"
-      << "\"note\":\"Parse matchedRequests from MANIFEST.json and send with your HTTP client\""
-      << "}}";
-  return out.str();
-}}
-
-int main() {{
-  ReplayContext ctx{{
-      getenv_or("SHOWNET_DOMAIN", "example.com"),
-      getenv_or("SHOWNET_UA", "ShowNet-Replay/1.0"),
-      getenv_or("SHOWNET_EXISTING_TOKEN", ""),
-  }};
-  try {{
-    std::cout << build_request_json(ctx) << std::endl;
-  }} catch (const std::exception& error) {{
-    std::cerr << "error: " << error.what() << std::endl;
-    return 1;
-  }}
-  return 0;
-}}
-"##
-        ),
-        "c" => format!(
-            r##"/* ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
- * Adapter: {adapter} ({vendor}) | hash: {hash}
- * PoW: {pow} | signal: {signal}
- * Endpoints:
-{endpoints}
- * Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
- *
- * Build: cc -std=c11 -O2 replay.c -o replay
- * Skeleton only prints a JSON-ish request shell; fill compute_dynamic_fields and
- * parse MANIFEST.json with cJSON / yyjson before authorized live validation.
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-typedef struct {{
-  const char *domain;
-  const char *user_agent;
-  const char *existing_token;
-}} ReplayContext;
-
-static const char *getenv_or(const char *key, const char *fallback) {{
-  const char *value = getenv(key);
-  return (value && value[0]) ? value : fallback;
-}}
-
-static char *load_manifest(const char *path) {{
-  FILE *file = fopen(path, "rb");
-  if (!file) {{
-    return NULL;
-  }}
-  if (fseek(file, 0, SEEK_END) != 0) {{
-    fclose(file);
-    return NULL;
-  }}
-  long size = ftell(file);
-  if (size < 0) {{
-    fclose(file);
-    return NULL;
-  }}
-  rewind(file);
-  char *buffer = (char *)malloc((size_t)size + 1);
-  if (!buffer) {{
-    fclose(file);
-    return NULL;
-  }}
-  size_t read = fread(buffer, 1, (size_t)size, file);
-  fclose(file);
-  buffer[read] = '\0';
-  return buffer;
-}}
-
-/* Implement from authorized ShowNet capture evidence.
- * Return 0 on success and write key=value pairs into out (caller-owned).
- */
-static int compute_dynamic_fields(const ReplayContext *ctx, const char *manifest_json,
-                                  char *out, size_t out_len) {{
-  (void)ctx;
-  (void)manifest_json;
-  if (out && out_len) {{
-    out[0] = '\0';
-  }}
-  fprintf(stderr,
-          "Fill compute_dynamic_fields from capture evidence before live validation\n");
-  return -1;
-}}
-
-static int build_request(const ReplayContext *ctx) {{
-  char *manifest = load_manifest("MANIFEST.json");
-  if (!manifest) {{
-    fprintf(stderr, "failed to open MANIFEST.json\n");
-    return -1;
-  }}
-  char dynamic[4096];
-  if (compute_dynamic_fields(ctx, manifest, dynamic, sizeof(dynamic)) != 0) {{
-    free(manifest);
-    return -1;
-  }}
-  printf("{{\n");
-  printf("  \"domain\": \"%s\",\n", ctx->domain);
-  printf("  \"userAgent\": \"%s\",\n", ctx->user_agent);
-  printf("  \"existingToken\": \"%s\",\n",
-         ctx->existing_token ? ctx->existing_token : "");
-  printf("  \"adapter\": \"{adapter}\",\n");
-  printf("  \"evidenceHash\": \"{hash}\",\n");
-  printf("  \"dynamic\": \"%s\",\n", dynamic);
-  printf("  \"note\": \"Parse matchedRequests from MANIFEST.json before HTTP send\"\n");
-  printf("}}\n");
-  free(manifest);
-  return 0;
-}}
-
-int main(void) {{
-  ReplayContext ctx = {{
-      getenv_or("SHOWNET_DOMAIN", "example.com"),
-      getenv_or("SHOWNET_UA", "ShowNet-Replay/1.0"),
-      getenv_or("SHOWNET_EXISTING_TOKEN", ""),
-  }};
-  return build_request(&ctx) == 0 ? 0 : 1;
-}}
-"##
-        ),
-        "zig" => format!(
-            r##"//! ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
-//! Adapter: {adapter} ({vendor}) | hash: {hash}
-//! PoW: {pow} | signal: {signal}
-//! Endpoints:
-{endpoints}
-//! Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
-//!
-//! Build: zig build-exe replay.zig -O ReleaseSafe
-//! Parse MANIFEST.json with std.json after implementing computeDynamicFields.
-
-const std = @import("std");
-
-pub const ReplayContext = struct {{
-    domain: []const u8,
-    user_agent: []const u8,
-    existing_token: ?[]const u8 = null,
-}};
-
-pub fn loadManifest(allocator: std.mem.Allocator, path: []const u8) ![]u8 {{
-    return try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
-}}
-
-/// Implement from authorized ShowNet Hook / crypto evidence.
-pub fn computeDynamicFields(
-    allocator: std.mem.Allocator,
-    ctx: ReplayContext,
-    manifest_json: []const u8,
-) !std.StringHashMap([]const u8) {{
-    _ = allocator;
-    _ = ctx;
-    _ = manifest_json;
-    return error.NotImplemented;
-}}
-
-pub fn buildRequest(allocator: std.mem.Allocator, ctx: ReplayContext) ![]u8 {{
-    const manifest = try loadManifest(allocator, "MANIFEST.json");
-    defer allocator.free(manifest);
-    var dynamic = computeDynamicFields(allocator, ctx, manifest) catch |err| {{
-        if (err == error.NotImplemented) {{
-            return error.NotImplemented;
-        }}
-        return err;
-    }};
-    defer {{
-        var it = dynamic.iterator();
-        while (it.next()) |entry| {{
-            allocator.free(entry.value_ptr.*);
-        }}
-        dynamic.deinit();
-    }};
-
-    return try std.fmt.allocPrint(
-        allocator,
-        "{{\"domain\":\"{{s}}\",\"userAgent\":\"{{s}}\",\"adapter\":\"{adapter}\",\"evidenceHash\":\"{hash}\",\"note\":\"parse matchedRequests from MANIFEST.json\"}}",
-        .{{ ctx.domain, ctx.user_agent }},
-    );
-}}
-
-pub fn main() !void {{
-    var gpa = std.heap.GeneralPurposeAllocator(.{{}}){{}};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const domain = std.posix.getenv("SHOWNET_DOMAIN") orelse "example.com";
-    const ua = std.posix.getenv("SHOWNET_UA") orelse "ShowNet-Replay/1.0";
-    const ctx = ReplayContext{{
-        .domain = domain,
-        .user_agent = ua,
-        .existing_token = std.posix.getenv("SHOWNET_EXISTING_TOKEN"),
-    }};
-
-    const request = buildRequest(allocator, ctx) catch |err| {{
-        if (err == error.NotImplemented) {{
-            std.debug.print("Fill computeDynamicFields from capture evidence before live validation\n", .{{}});
-            return;
-        }}
-        return err;
-    }};
-    defer allocator.free(request);
-    std.debug.print("{{s}}\n", .{{request}});
-}}
-"##
         ),
         other => return Err(format!("未实现的语言模板: {other}")),
     };
@@ -2065,55 +2373,6 @@ const difficulty=1; const t="awswaf";
         assert!(err.contains("不支持的重播语言"));
     }
 
-    #[test]
-    fn builds_c_cpp_and_zig_replay_templates() {
-        let storage = storage();
-        let session = storage.create_session(Some("native-langs".into())).unwrap();
-        let sid = session.id.clone();
-        let mut sensor = base(&sid, "www.example.com", "/_bm/sensor");
-        sensor.method = "POST".into();
-        sensor.request_body = Some(r#"{"sensor_data":"1"}"#.into());
-        sensor.request_headers = vec![HeaderEntry {
-            name: "cookie".into(),
-            value: "_abck=1; bm_sz=2".into(),
-        }];
-        storage.store_request(sensor).unwrap();
-
-        assert_eq!(normalize_language("cpp").unwrap(), "c++");
-        assert_eq!(normalize_language("cxx").unwrap(), "c++");
-        assert_eq!(normalize_language("c11").unwrap(), "c");
-        assert_eq!(normalize_language("ziglang").unwrap(), "zig");
-
-        for (lang, filename, marker) in [
-            ("c++", "replay.cpp", "compute_dynamic_fields"),
-            ("cpp", "replay.cpp", "compute_dynamic_fields"),
-            ("c", "replay.c", "compute_dynamic_fields"),
-            ("zig", "replay.zig", "computeDynamicFields"),
-        ] {
-            let package = build_algorithm_replay(&storage, &sid, lang).unwrap();
-            assert!(
-                package.files.iter().any(|file| file.name == filename),
-                "lang={lang} missing {filename}"
-            );
-            let replay = package
-                .files
-                .iter()
-                .find(|file| file.role == "algorithm-replay")
-                .unwrap_or_else(|| panic!("lang={lang} missing algorithm-replay file"));
-            assert!(
-                replay.content.contains(marker),
-                "lang={lang} missing {marker}"
-            );
-            assert!(
-                replay.content.contains("MANIFEST.json"),
-                "lang={lang} should reference MANIFEST.json"
-            );
-            assert!(
-                !replay.content.contains("aws-waf-token="),
-                "lang={lang} leaked secret-like marker"
-            );
-        }
-    }
 
     #[test]
     fn builds_every_supported_replay_language() {
@@ -2132,12 +2391,8 @@ const difficulty=1; const t="awswaf";
             ("javascript", "replay.js"),
             ("typescript", "replay.ts"),
             ("go", "replay.go"),
-            ("rust", "replay.rs"),
             ("java", "Replay.java"),
             ("csharp", "Replay.cs"),
-            ("c++", "replay.cpp"),
-            ("c", "replay.c"),
-            ("zig", "replay.zig"),
         ];
         assert_eq!(supported_languages().len(), expected.len());
         for (language, filename) in expected {
@@ -2147,6 +2402,559 @@ const difficulty=1; const t="awswaf";
                 package.files.iter().any(|file| file.name == filename),
                 "language={language} missing {filename}"
             );
+        }
+    }
+
+    // --- Agent-written steps ------------------------------------------------
+
+    fn reconstruction_with_agent_step(
+        language: &str,
+        source: &str,
+        verdict: &str,
+    ) -> AlgorithmReconstruction {
+        use crate::algorithm_verification::{Implementation, VerificationReport};
+        let step = crate::algorithm_reconstruction::AlgorithmStep {
+            id: "1".into(),
+            name: "vendor_custom_sign".into(),
+            status: "reconstructed".into(),
+            formula: "sha256(method + path)".into(),
+            evidence: vec!["hook pair".into()],
+            implementation_hint: "agent".into(),
+            implementations: vec![Implementation {
+                language: language.into(),
+                source: source.into(),
+                entry_point: "computeSignature".into(),
+            }],
+        };
+        let mut report = VerificationReport::for_test(verdict);
+        report.step_id = "1".into();
+        report.step_name = "vendor_custom_sign".into();
+        report.language = language.into();
+        AlgorithmReconstruction {
+            reconstruction_mode: "pure_reconstructed".into(),
+            confidence: "high".into(),
+            algorithms: vec!["SHA-256".into()],
+            pipeline: vec![step],
+            vmp_or_custom_vm: false,
+            vmp_indicators: vec![],
+            hook_traces: vec![],
+            snippet_algorithms: vec![],
+            dynamic_fields: vec!["x-signature".into()],
+            required_env: vec![],
+            test_field_shapes: vec![],
+            report_spec_embedded: true,
+            can_emit_runnable_crypto: true,
+            verification: vec![report],
+            crypto_verified: verdict == "verified",
+            notes: vec![],
+        }
+    }
+
+    const AGENT_PY: &str = "import hashlib\n\ndef computeSignature(request):\n    base = request[\"method\"] + request[\"path\"]\n    return hashlib.sha256(base.encode()).hexdigest()\n";
+
+    /// The test that decides whether the agent seam is real: a step the built-in
+    /// catalogue has never heard of must reach the generated package and run.
+    #[test]
+    fn a_verified_agent_step_is_emitted_and_actually_executes() {
+        let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        let emitted = render_agent_algorithms(&reconstruction, "python");
+        assert!(
+            emitted.contains("vendor_custom_sign"),
+            "the step must be registered: {emitted}"
+        );
+
+        let Some(python) = test_python() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("shownet-agent-emit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let module = format!(
+            "from typing import Any, Dict\n{emitted}\n\
+             import json\n\
+             print(json.dumps({{k: v({{\"method\": \"POST\", \"path\": \"/v1/order\"}}) for k, v in AGENT_STEPS.items()}}))\n"
+        );
+        std::fs::write(dir.join("emitted.py"), module).expect("write");
+        let output = std::process::Command::new(&python)
+            .arg("emitted.py")
+            .current_dir(&dir)
+            .output()
+            .expect("run emitted module");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let expected = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(b"POST/v1/order")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert!(
+            stdout.contains(&expected),
+            "the emitted agent step must produce its real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The gate: code the agent wrote but that did not reproduce the capture
+    /// must not reach the package at all. Emitting it would hand the operator
+    /// unreviewed model output to run against a live site.
+    #[test]
+    fn an_unverified_agent_step_is_not_emitted() {
+        for verdict in ["failed", "unverifiable"] {
+            let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, verdict);
+            let emitted = render_agent_algorithms(&reconstruction, "python");
+            assert!(
+                !emitted.contains("hashlib"),
+                "{verdict} code must not be emitted: {emitted}"
+            );
+            assert!(
+                emitted.contains("AGENT_STEPS: Dict[str, Any] = {}"),
+                "the registry must still exist and be empty: {emitted}"
+            );
+        }
+    }
+
+    /// A JavaScript pass says nothing about the agent's Python port, and Python
+    /// is what the operator runs.
+    #[test]
+    fn verification_in_one_language_does_not_license_emitting_another() {
+        let reconstruction = reconstruction_with_agent_step("javascript", "function computeSignature(r) { return 'x'; }", "verified");
+        let emitted = render_agent_algorithms(&reconstruction, "python");
+        assert!(
+            emitted.contains("AGENT_STEPS: Dict[str, Any] = {}"),
+            "a javascript-only verification must not emit a python step: {emitted}"
+        );
+    }
+
+    /// The invariant that makes verification mean anything at run time: the dict
+    /// the step is called with in the generated client must carry the same keys
+    /// the verifier fed it. Drift here silently voids every verified badge.
+    #[test]
+    fn the_runtime_input_shape_matches_the_verified_input_shape() {
+        let source = render_replay_source_for_shape_test();
+        for key in ["\"method\"", "\"host\"", "\"path\"", "\"query\"", "\"headers\"", "\"body\""] {
+            assert!(
+                source.contains(&format!("{key}:")),
+                "agent_step_input must supply {key}, which ground truth includes"
+            );
+        }
+        // Ground truth supplies exactly these six and nothing else; an extra
+        // top-level key would be a field the step was never checked on.
+        let block = source
+            .split("def agent_step_input")
+            .nth(1)
+            .and_then(|rest| rest.split("def load_json").next())
+            .expect("agent_step_input is emitted");
+        let top_level = block.matches("        \"").count();
+        assert_eq!(
+            top_level, 6,
+            "agent_step_input returns keys verification never supplied:\n{block}"
+        );
+    }
+
+    fn render_replay_source_for_shape_test() -> String {
+        let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        let harness = crate::signature_adapter::SignatureAdapterHarness {
+            adapter_id: "generic-dynamic-signature".into(),
+            adapter_version: "1.0.0".into(),
+            vendor: "Generic".into(),
+            confidence: "medium".into(),
+            evidence_hash: "abc".into(),
+            matched_requests: vec![],
+            dynamic_fields: vec!["x-signature".into()],
+            cookie_names: vec![],
+            hook_names: vec![],
+            crypto_algorithms: vec!["SHA-256".into()],
+            fingerprint_dependencies: vec![],
+            required_inputs: vec![],
+            evidence_gaps: vec![],
+            language: "python".into(),
+            code: String::new(),
+        };
+        render_replay_source("python", &harness, &json!({}), &[], &reconstruction)
+            .expect("python replay source renders")
+    }
+
+    fn test_python() -> Option<String> {
+        for candidate in ["python3", "python"] {
+            if std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+            {
+                return Some(candidate.to_string());
+            }
+        }
+        None
+    }
+
+    /// The verdict has to reach the person who runs the code, not just sit in
+    /// the reconstruction struct. Without this file the operator sees "runnable
+    /// crypto: true" and has no way to learn it was never checked.
+    #[test]
+    fn the_package_ships_the_verification_verdict_and_says_what_it_means() {
+        let storage = storage();
+        let session = storage.create_session(Some("verify-surface".into())).unwrap();
+        let sid = session.id.clone();
+        storage
+            .store_request(base(&sid, "api.example.com", "/v1/order"))
+            .expect("seed");
+        let package = build_algorithm_replay(&storage, &sid, "python").expect("build");
+
+        let file = package
+            .files
+            .iter()
+            .find(|f| f.name == "VERIFICATION.json")
+            .expect("package ships VERIFICATION.json");
+        let parsed: Value = serde_json::from_str(&file.content).expect("valid json");
+
+        // No agent code was supplied here, so the claim must be off and the
+        // reason must be stated rather than left to inference.
+        assert_eq!(parsed["cryptoVerified"], json!(false));
+        assert!(
+            parsed["claimBasis"]
+                .as_str()
+                .is_some_and(|basis| basis.contains("nothing was executed")),
+            "the file must say why the claim is off: {parsed}"
+        );
+        assert!(
+            parsed["note"].as_str().is_some_and(|note| note.contains("Only the second")),
+            "the file must distinguish the template claim from the verified claim: {parsed}"
+        );
+    }
+
+    const AGENT_JS: &str = "function computeSignature(request) {\n  return shownet.hmacSha256Hex('Jefe', request.method + request.path);\n}\n";
+
+    /// Same standard the Python path is held to: the emitted JavaScript has to
+    /// run under node and produce the real answer, not merely contain the text.
+    #[test]
+    fn a_verified_agent_step_runs_in_the_emitted_javascript() {
+        let Some(node) = test_node() else {
+            return;
+        };
+        let reconstruction = reconstruction_with_agent_step("javascript", AGENT_JS, "verified");
+        let emitted = render_agent_algorithms(&reconstruction, "javascript");
+
+        let dir = std::env::temp_dir().join(format!("shownet-agent-js-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).expect("write");
+        std::fs::write(dir.join("steps.mjs"), &emitted).expect("write");
+        std::fs::write(
+            dir.join("drive.mjs"),
+            "import { AGENT_STEPS } from './steps.mjs';\n\
+             const input = { method: 'POST', host: 'h', path: '/v1/order', query: null, headers: {}, body: null };\n\
+             console.log(JSON.stringify(Object.fromEntries(Object.entries(AGENT_STEPS).map(([k, f]) => [k, f(input)]))));\n",
+        )
+        .expect("write");
+
+        let output = std::process::Command::new(&node)
+            .arg("drive.mjs")
+            .current_dir(&dir)
+            .output()
+            .expect("run emitted javascript");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // The reference answer, computed independently of the emitted code.
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let key = b"Jefe";
+            let mut padded = [0u8; 64];
+            padded[..key.len()].copy_from_slice(key);
+            let mut ipad = [0x36u8; 64];
+            let mut opad = [0x5cu8; 64];
+            for i in 0..64 {
+                ipad[i] ^= padded[i];
+                opad[i] ^= padded[i];
+            }
+            let mut inner = Sha256::new();
+            inner.update(ipad);
+            inner.update(b"POST/v1/order");
+            let inner = inner.finalize();
+            let mut outer = Sha256::new();
+            outer.update(opad);
+            outer.update(inner);
+            outer
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert!(
+            stdout.contains(&expected),
+            "the emitted javascript step must produce its real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The primitives the candidate was verified against must exist in the
+    /// emitted runtime under the same names. If boa's `shownet.*` surface and
+    /// node's differ, verification checked code that never runs.
+    #[test]
+    fn the_emitted_javascript_provides_the_primitives_verification_used() {
+        let reconstruction = reconstruction_with_agent_step("javascript", AGENT_JS, "verified");
+        let emitted = render_agent_algorithms(&reconstruction, "javascript");
+        for primitive in ["sha256Hex", "md5Hex", "hmacSha256Hex", "base64Encode"] {
+            assert!(
+                emitted.contains(primitive),
+                "{primitive} is offered to candidates during verification and must exist at run time"
+            );
+        }
+    }
+
+    /// A language whose template has nowhere to call agent code from must emit
+    /// none, rather than pasting Python or JavaScript into a Go file.
+    #[test]
+    fn languages_without_an_agent_seam_emit_nothing_rather_than_broken_code() {
+        let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        for language in ["go", "java", "csharp"] {
+            assert!(
+                render_agent_algorithms(&reconstruction, language).is_empty(),
+                "{language} has no agent seam yet and must not receive foreign syntax"
+            );
+        }
+    }
+
+    /// Unverified code must be withheld in JavaScript exactly as in Python.
+    #[test]
+    fn an_unverified_agent_step_is_not_emitted_in_javascript() {
+        for verdict in ["failed", "unverifiable"] {
+            let reconstruction = reconstruction_with_agent_step("javascript", AGENT_JS, verdict);
+            let emitted = render_agent_algorithms(&reconstruction, "javascript");
+            assert!(
+                !emitted.contains("hmacSha256Hex('Jefe'"),
+                "{verdict} code must not be emitted: {emitted}"
+            );
+        }
+    }
+
+    fn test_node() -> Option<String> {
+        std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|_| "node".to_string())
+    }
+
+    /// Every supported language must be able to receive verified agent code.
+    /// A language in the menu with no seam behind it is a promise the export
+    /// cannot keep — the operator picks it and gets a skeleton.
+    #[test]
+    fn every_supported_language_has_an_agent_seam() {
+        for language in SUPPORTED_LANGUAGES {
+            let reconstruction = match *language {
+                "go" => reconstruction_with_agent_step("go", GO_AGENT, "verified"),
+                "java" => reconstruction_with_agent_step("java", JAVA_AGENT, "verified"),
+                "csharp" => reconstruction_with_agent_step("csharp", CSHARP_AGENT, "verified"),
+                "python" => reconstruction_with_agent_step("python", AGENT_PY, "verified"),
+                other => reconstruction_with_agent_step(other, AGENT_JS, "verified"),
+            };
+            let mut reconstruction = reconstruction;
+            if matches!(*language, "go" | "csharp") {
+                reconstruction.pipeline[0].implementations[0].entry_point =
+                    "ComputeSignature".into();
+            }
+            let entry = reconstruction.pipeline[0].implementations[0].entry_point.clone();
+            let emitted = format!(
+                "{}{}",
+                render_agent_algorithms(&reconstruction, language),
+                agent_step_files(&reconstruction, language)
+                    .iter()
+                    .map(|(_, content)| content.clone())
+                    .collect::<String>()
+            );
+            assert!(
+                emitted.contains(&entry),
+                "{language} accepts verified agent code but emits none of it"
+            );
+            assert!(
+                emitted.contains(&reconstruction.pipeline[0].name),
+                "{language} must register the step under its name so the client can call it"
+            );
+        }
+    }
+
+    // --- Compiled-language agent steps --------------------------------------
+    //
+    // Held to the same standard as Python and JavaScript: the emitted files must
+    // compile and produce the real answer, not merely contain the right text.
+
+    fn expected_hmac(message: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let key = b"Jefe";
+        let mut padded = [0u8; 64];
+        padded[..key.len()].copy_from_slice(key);
+        let mut ipad = [0x36u8; 64];
+        let mut opad = [0x5cu8; 64];
+        for i in 0..64 {
+            ipad[i] ^= padded[i];
+            opad[i] ^= padded[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(message.as_bytes());
+        let inner = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner);
+        outer
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn stage(tag: &str, files: &[(String, String)], extra: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("shownet-emit-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).expect("write emitted file");
+        }
+        for (name, content) in extra {
+            std::fs::write(dir.join(name), content).expect("write driver");
+        }
+        dir
+    }
+
+    const GO_AGENT: &str = "package main\n\nimport (\n\t\"crypto/hmac\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n)\n\nfunc ComputeSignature(request Request) string {\n\tmac := hmac.New(sha256.New, []byte(\"Jefe\"))\n\tmac.Write([]byte(request.Method + request.Path))\n\treturn hex.EncodeToString(mac.Sum(nil))\n}\n";
+
+    #[test]
+    fn emitted_go_agent_steps_compile_and_produce_the_real_answer() {
+        if !std::process::Command::new("go").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
+            return;
+        }
+        let mut reconstruction = reconstruction_with_agent_step("go", GO_AGENT, "verified");
+        reconstruction.pipeline[0].implementations[0].entry_point = "ComputeSignature".into();
+        let files = agent_step_files(&reconstruction, "go");
+
+        let dir = stage(
+            "go",
+            &files,
+            &[
+                ("go.mod", "module shownetemit\n\ngo 1.21\n"),
+                (
+                    "main.go",
+                    "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tinput := Request{Method: \"POST\", Path: \"/v1/order\", Headers: map[string]string{}}\n\tfor name, step := range AgentSteps {\n\t\tfmt.Printf(\"%s=%s\\n\", name, step(input))\n\t}\n}\n",
+                ),
+            ],
+        );
+        let output = std::process::Command::new("go")
+            .args(["run", "."])
+            .current_dir(&dir)
+            .output()
+            .expect("run emitted go");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            stdout.contains(&expected_hmac("POST/v1/order")),
+            "emitted go must produce the real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    const JAVA_AGENT: &str = "import javax.crypto.Mac;\nimport javax.crypto.spec.SecretKeySpec;\nimport java.nio.charset.StandardCharsets;\n\npublic class Candidate {\n    public static String computeSignature(Request request) throws Exception {\n        Mac mac = Mac.getInstance(\"HmacSHA256\");\n        mac.init(new SecretKeySpec(\"Jefe\".getBytes(StandardCharsets.UTF_8), \"HmacSHA256\"));\n        byte[] digest = mac.doFinal((request.method() + request.path()).getBytes(StandardCharsets.UTF_8));\n        StringBuilder out = new StringBuilder();\n        for (byte b : digest) { out.append(String.format(\"%02x\", b)); }\n        return out.toString();\n    }\n}\n";
+
+    #[test]
+    fn emitted_java_agent_steps_compile_and_produce_the_real_answer() {
+        if !std::process::Command::new("javac").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
+            return;
+        }
+        let reconstruction = reconstruction_with_agent_step("java", JAVA_AGENT, "verified");
+        let files = agent_step_files(&reconstruction, "java");
+
+        let dir = stage(
+            "java",
+            &files,
+            &[(
+                "Main.java",
+                "import java.util.LinkedHashMap;\n\npublic class Main {\n    public static void main(String[] args) {\n        Request input = new Request(\"POST\", \"h\", \"/v1/order\", null, new LinkedHashMap<>(), null);\n        AgentSteps.all().forEach((name, step) -> System.out.println(name + \"=\" + step.apply(input)));\n    }\n}\n",
+            )],
+        );
+        let names: Vec<String> = files.iter().map(|(name, _)| name.clone()).chain(["Main.java".to_string()]).collect();
+        let compile = std::process::Command::new("javac")
+            .args(&names)
+            .current_dir(&dir)
+            .output()
+            .expect("compile emitted java");
+        assert!(
+            compile.status.success(),
+            "emitted java must compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = std::process::Command::new("java")
+            .arg("Main")
+            .current_dir(&dir)
+            .output()
+            .expect("run emitted java");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            stdout.contains(&expected_hmac("POST/v1/order")),
+            "emitted java must produce the real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    const CSHARP_AGENT: &str = "using System.Security.Cryptography;\nusing System.Text;\n\nnamespace ShowNetReplay;\n\npublic static class Candidate\n{\n    public static string ComputeSignature(Request request)\n    {\n        using var mac = new HMACSHA256(Encoding.UTF8.GetBytes(\"Jefe\"));\n        var digest = mac.ComputeHash(Encoding.UTF8.GetBytes(request.Method + request.Path));\n        return Convert.ToHexString(digest).ToLowerInvariant();\n    }\n}\n";
+
+    #[test]
+    fn emitted_csharp_agent_steps_compile_and_produce_the_real_answer() {
+        if !std::process::Command::new("dotnet").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            return;
+        }
+        let mut reconstruction = reconstruction_with_agent_step("csharp", CSHARP_AGENT, "verified");
+        reconstruction.pipeline[0].implementations[0].entry_point = "ComputeSignature".into();
+        let files = agent_step_files(&reconstruction, "csharp");
+
+        let dir = stage(
+            "csharp",
+            &files,
+            &[
+                (
+                    "emit.csproj",
+                    "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n    <Nullable>enable</Nullable>\n    <ImplicitUsings>enable</ImplicitUsings>\n    <AssemblyName>shownetemit</AssemblyName>\n  </PropertyGroup>\n</Project>\n",
+                ),
+                (
+                    "Main.cs",
+                    "using ShowNetReplay;\n\ninternal static class EmitMain\n{\n    private static void Main()\n    {\n        var input = new Request(\"POST\", \"h\", \"/v1/order\", null, new Dictionary<string, string>(), null);\n        foreach (var pair in AgentSteps.All)\n        {\n            Console.WriteLine($\"{pair.Key}={pair.Value(input)}\");\n        }\n    }\n}\n",
+                ),
+            ],
+        );
+        let output = std::process::Command::new("dotnet")
+            .args(["run", "--project", "emit.csproj", "-v", "quiet", "--nologo"])
+            .current_dir(&dir)
+            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+            .output()
+            .expect("run emitted csharp");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            stdout.contains(&expected_hmac("POST/v1/order")),
+            "emitted csharp must produce the real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The gate holds for compiled languages too: unverified code must not be
+    /// emitted, in any of them.
+    #[test]
+    fn unverified_agent_code_is_withheld_in_every_compiled_language() {
+        for (language, source) in [("go", GO_AGENT), ("java", JAVA_AGENT), ("csharp", CSHARP_AGENT)] {
+            for verdict in ["failed", "unverifiable"] {
+                let reconstruction = reconstruction_with_agent_step(language, source, verdict);
+                let emitted = agent_step_files(&reconstruction, language)
+                    .iter()
+                    .map(|(_, content)| content.clone())
+                    .collect::<String>();
+                assert!(
+                    !emitted.contains("Jefe"),
+                    "{language}/{verdict} code must not be emitted"
+                );
+            }
         }
     }
 }

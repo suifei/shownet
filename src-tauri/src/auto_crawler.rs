@@ -111,7 +111,15 @@ pub fn build_auto_crawler_for_report(
     let fidelity = build_fidelity_block(&protection, &requests);
     let proxy_env = build_proxy_env_block();
 
-    let mut files = replay.files.clone();
+    // The crawler client owns the entry point, so the replay package's standalone
+    // demo main must not come along: two `func main` in one Go package is a
+    // compile error, and the operator wants the crawler, not the demo.
+    let mut files: Vec<_> = replay
+        .files
+        .iter()
+        .filter(|file| file.role != "replay-demo")
+        .cloned()
+        .collect();
     // Capture shape fixture used by offline validator (no live secrets).
     let capture_fixture = json!({
         "requiredHeaderNames": shape.required_header_names,
@@ -834,7 +842,7 @@ fn render_client_source(
     let body = match language {
         "python" => format!(
             r#"#!/usr/bin/env python3
-"""ShowNet auto-crawler client (dependency-light).
+"""ShowNet auto-crawler client (stdlib only).
 
 Adapter: {adapter} / {vendor}
 Reconstruction: {mode} (runnable_crypto={runnable})
@@ -848,20 +856,42 @@ Proxy env contract:
 
 Required env (never hardcode secrets): {env_list}
 Observed hosts: {hosts}
+
+Live requests are OFF unless SHOWNET_LIVE=1. Without it this runs the offline
+shape check only, so generating a package never touches the target on its own.
 """
 from __future__ import annotations
 
+import gzip
+import http.cookiejar
+import io
 import json
 import os
 import re
+import ssl
+import time
+import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+import zlib
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-# Optional: curl_cffi / httpx for richer TLS — not required for offline validation.
+try:
+    # Same package: the reconstructed signer, when the evidence supported one.
+    from replay import compute_dynamic_fields as _reconstructed_dynamic_fields
+except Exception:  # noqa: BLE001 - absence is a normal, reported state
+    _reconstructed_dynamic_fields = None
 
 
-def proxy_handlers() -> Optional[urllib.request.ProxyHandler]:
+REQUIRED_HEADER_NAMES = [{header_literals}]
+REQUIRED_BODY_KEYS = [{body_literals}]
+
+DEFAULT_TIMEOUT = float(os.environ.get("SHOWNET_TIMEOUT", "30"))
+MAX_RETRIES = int(os.environ.get("SHOWNET_RETRIES", "2"))
+RETRY_STATUSES = {{429, 500, 502, 503, 504}}
+
+
+def proxy_handler() -> Optional[urllib.request.ProxyHandler]:
     url = os.environ.get("SHOWNET_PROXY_URL", "").strip()
     mode = os.environ.get("SHOWNET_PROXY_MODE", "direct").strip().lower()
     if mode == "direct" and not url:
@@ -880,24 +910,314 @@ def proxy_handlers() -> Optional[urllib.request.ProxyHandler]:
     return urllib.request.ProxyHandler({{"http": url, "https": url}})
 
 
-REQUIRED_HEADER_NAMES = [{header_literals}]
-REQUIRED_BODY_KEYS = [{body_literals}]
+# --- TLS fidelity -----------------------------------------------------------
+# Two backends behind one interface. Which one is active decides what this
+# client may honestly claim about its TLS fingerprint, so the tier is reported
+# in every result rather than assumed.
+#
+# ShowNet preset for this capture: {tls_preset}
+# Documented JA3 for that preset:  {documented_ja3}
+
+SHOWNET_TLS_PRESET = "{tls_preset}"
+DOCUMENTED_JA3 = {documented_ja3_literal}
+
+# ShowNet preset id -> curl_cffi impersonate target. curl_cffi ships a fixed set
+# of browser builds; when the exact one is missing we fall back to the nearest
+# older build of the same family and say so, because silently using a different
+# browser's ClientHello is the kind of mismatch a WAF is built to notice.
+IMPERSONATE_TARGETS = {{
+    "chrome": ["chrome131", "chrome124", "chrome120", "chrome116", "chrome110"],
+    "edge": ["edge101", "edge99"],
+    "safari": ["safari17_0", "safari15_5"],
+    "firefox": ["firefox133", "firefox128"],
+}}
 
 
-def build_headers() -> Dict[str, str]:
+def _preset_family(preset: str) -> str:
+    for family in IMPERSONATE_TARGETS:
+        if preset.startswith(family):
+            return family
+    return ""
+
+
+def resolve_impersonate(preset: str, available: List[str]) -> Tuple[Optional[str], str]:
+    """Pick the closest impersonation target, and explain the choice."""
+    family = _preset_family(preset)
+    if not family:
+        return None, f"preset {{preset!r}} has no browser family to impersonate"
+    if preset in available:
+        return preset, "exact preset available"
+    for candidate in IMPERSONATE_TARGETS[family]:
+        if candidate in available:
+            return candidate, f"exact build {{preset!r}} unavailable; using nearest {{family}} build {{candidate!r}}"
+    return None, f"no {{family}} build available in this curl_cffi install"
+
+
+class Transport:
+    """Common surface over the two stacks, so callers never branch on it."""
+
+    tier = "stdlib"
+    claims_browser_ja3 = False
+    note = ""
+
+    def request(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Any:
+        raise NotImplementedError
+
+    def cookies(self) -> Dict[str, str]:
+        raise NotImplementedError
+
+    def set_cookie(self, name: str, value: str, domain: str) -> None:
+        raise NotImplementedError
+
+    def describe(self) -> Dict[str, Any]:
+        return {{
+            "tier": self.tier,
+            "preset": SHOWNET_TLS_PRESET,
+            "claimsBrowserJa3": self.claims_browser_ja3,
+            "documentedJa3": DOCUMENTED_JA3 if self.claims_browser_ja3 else None,
+            "note": self.note,
+        }}
+
+
+class ImpersonateTransport(Transport):
+    """curl_cffi / libcurl-impersonate: reproduces a real browser ClientHello."""
+
+    tier = "browser-impersonate"
+
+    def __init__(self, session: Any, target: str, note: str) -> None:
+        self.session = session
+        self.target = target
+        self.note = note
+        # Only an exact preset match may claim the documented hash; a nearest
+        # build is a different ClientHello and would hash differently.
+        self.claims_browser_ja3 = target == SHOWNET_TLS_PRESET and DOCUMENTED_JA3 is not None
+
+    def request(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Any:
+        return self.session.request(
+            method, url, headers=headers, data=body,
+            timeout=DEFAULT_TIMEOUT, allow_redirects=True,
+        )
+
+    def cookies(self) -> Dict[str, str]:
+        return {{k: v for k, v in dict(self.session.cookies).items()}}
+
+    def set_cookie(self, name: str, value: str, domain: str) -> None:
+        self.session.cookies.set(name, value, domain=domain or None)
+
+    def describe(self) -> Dict[str, Any]:
+        described = Transport.describe(self)
+        described["impersonate"] = self.target
+        return described
+
+
+class StdlibTransport(Transport):
+    """urllib: correct HTTP and cookies, ordinary Python TLS fingerprint."""
+
+    tier = "stdlib"
+    claims_browser_ja3 = False
+    note = "standard library TLS; JA3/JA4 will not match a browser"
+
+    def __init__(self) -> None:
+        self.jar = http.cookiejar.CookieJar()
+        handlers: List[urllib.request.BaseHandler] = [
+            urllib.request.HTTPCookieProcessor(self.jar),
+            urllib.request.HTTPRedirectHandler(),
+        ]
+        proxy = proxy_handler()
+        if proxy:
+            handlers.append(proxy)
+        if os.environ.get("SHOWNET_INSECURE_TLS") == "1":
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            handlers.append(urllib.request.HTTPSHandler(context=context))
+        self.opener = urllib.request.build_opener(*handlers)
+        self.opener.addheaders = []
+
+    def request(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Any:
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        return self.opener.open(req, timeout=DEFAULT_TIMEOUT)
+
+    def cookies(self) -> Dict[str, str]:
+        return {{cookie.name: cookie.value or "" for cookie in self.jar}}
+
+    def set_cookie(self, name: str, value: str, domain: str) -> None:
+        self.jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value=value,
+            port=None, port_specified=False,
+            domain=domain, domain_specified=bool(domain), domain_initial_dot=False,
+            path="/", path_specified=True, secure=True, expires=None,
+            discard=False, comment=None, comment_url=None, rest={{}},
+        ))
+
+
+def build_transport() -> Transport:
+    """Prefer real browser impersonation; fall back to stdlib, never silently."""
+    if os.environ.get("SHOWNET_TLS_BACKEND", "auto").lower() == "stdlib":
+        return StdlibTransport()
+    try:
+        from curl_cffi import requests as curl_requests  # type: ignore
+    except ImportError:
+        return StdlibTransport()
+
+    available = list(getattr(curl_requests, "BrowserType", None).__members__) if hasattr(curl_requests, "BrowserType") else []
+    target, note = resolve_impersonate(SHOWNET_TLS_PRESET, available)
+    if not target:
+        transport = StdlibTransport()
+        transport.note = f"{{note}}; fell back to standard library TLS"
+        return transport
+
+    proxy_url = os.environ.get("SHOWNET_PROXY_URL", "").strip()
+    proxies = {{"http": proxy_url, "https": proxy_url}} if proxy_url else None
+    session = curl_requests.Session(impersonate=target, proxies=proxies)
+    return ImpersonateTransport(session, target, note)
+
+
+class Session:
+    """One transport, one cookie jar, reused for every call.
+
+    A site's defences are stateful: the token handed out by the first response
+    is what the second request has to carry. Building a fresh request per call
+    — which is what a header dict alone gives you — cannot pass that.
+    """
+
+    def __init__(self) -> None:
+        self.transport = build_transport()
+
+    def tls(self) -> Dict[str, Any]:
+        return self.transport.describe()
+
+    def cookies(self) -> Dict[str, str]:
+        return self.transport.cookies()
+
+    def seed_cookies(self, url: str) -> None:
+        """Carry cookies the operator already holds into the jar."""
+        raw = os.environ.get("SHOWNET_COOKIES", "").strip()
+        token = os.environ.get("SHOWNET_EXISTING_TOKEN", "").strip()
+        if token and "aws-waf-token" not in raw:
+            raw = f"aws-waf-token={{token}}; {{raw}}" if raw else f"aws-waf-token={{token}}"
+        if not raw:
+            return
+        host = urlparse(url).hostname or ""
+        for part in raw.split(";"):
+            if "=" not in part:
+                continue
+            name, _, value = part.strip().partition("=")
+            self.transport.set_cookie(name.strip(), value.strip(), host)
+
+    def send(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Send, retry idempotently on transient failures, and parse the reply."""
+        payload = None
+        if request.get("json") is not None:
+            payload = json.dumps(request["json"], ensure_ascii=False).encode("utf-8")
+
+        last_error: Optional[str] = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = self.transport.request(
+                    request.get("method", "GET"),
+                    request["url"],
+                    request.get("headers") or {{}},
+                    payload,
+                )
+                return self._read(response, request)
+            except urllib.error.HTTPError as error:
+                parsed = self._read(error, request)
+                if error.code in RETRY_STATUSES and attempt < MAX_RETRIES:
+                    last_error = f"HTTP {{error.code}}"
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+                return parsed
+            except (urllib.error.URLError, TimeoutError) as error:
+                last_error = str(error)
+                if attempt < MAX_RETRIES:
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+        return {{"ok": False, "error": last_error or "request failed", "attempts": MAX_RETRIES + 1}}
+
+    def _read(self, response: Any, request: Dict[str, Any]) -> Dict[str, Any]:
+        # urllib gives a file object; curl_cffi gives a response with .content
+        # already decompressed. Normalise both here so callers see one shape.
+        if hasattr(response, "read"):
+            raw = response.read()
+        else:
+            raw = getattr(response, "content", b"")
+        headers = {{k.lower(): v for k, v in dict(response.headers).items()}}
+        encoding = (headers.get("content-encoding") or "").lower()
+        if not hasattr(response, "read"):
+            encoding = ""  # already decoded by the impersonating stack
+        if encoding == "gzip":
+            raw = gzip.decompress(raw)
+        elif encoding == "deflate":
+            raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+
+        charset = "utf-8"
+        match = re.search(r"charset=([\\w-]+)", headers.get("content-type", ""), re.I)
+        if match:
+            charset = match.group(1)
+        text = raw.decode(charset, errors="replace")
+
+        parsed: Any = None
+        if "json" in headers.get("content-type", ""):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+
+        status = getattr(response, "status", None) or getattr(response, "status_code", None) or getattr(response, "code", 0)
+        return {{
+            "ok": 200 <= status < 400,
+            "status": status,
+            "url": request["url"],
+            "headers": headers,
+            "cookies": self.cookies(),
+            "json": parsed,
+            "text": None if parsed is not None else text[:4096],
+        }}
+
+
+def dynamic_fields(context: Dict[str, Any]) -> Tuple[Dict[str, str], str]:
+    """Values for the captured dynamic headers.
+
+    Prefers the reconstructed algorithm shipped alongside this file. Env
+    overrides exist for the fields the evidence could not reconstruct — an
+    empty value is reported, not silently sent.
+    """
+    computed: Dict[str, str] = {{}}
+    source = "env"
+    if _reconstructed_dynamic_fields is not None:
+        try:
+            computed = {{k: str(v) for k, v in (_reconstructed_dynamic_fields(context) or {{}}).items()}}
+            source = "reconstructed"
+        except Exception as error:  # noqa: BLE001 - surfaced, not swallowed
+            computed = {{}}
+            source = f"reconstruction_failed: {{error}}"
+
+    for name in REQUIRED_HEADER_NAMES:
+        if computed.get(name):
+            continue
+        env_key = "SHOWNET_HEADER_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+        value = os.environ.get(env_key, "")
+        if value:
+            computed[name] = value
+    return computed, source
+
+
+def build_headers(context: Dict[str, Any]) -> Tuple[Dict[str, str], str, List[str]]:
     headers = {{
         "user-agent": os.environ.get("SHOWNET_UA", "ShowNet-AutoCrawler/1.0"),
         "accept": "application/json, text/plain, */*",
         "content-type": "application/json",
+        "accept-encoding": "gzip, deflate",
     }}
-    # Captured dynamic header names: keys always present; values from env only.
+    computed, source = dynamic_fields(context)
+    unresolved: List[str] = []
     for name in REQUIRED_HEADER_NAMES:
-        env_key = "SHOWNET_HEADER_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
-        headers[name] = os.environ.get(env_key, "")
-    token = os.environ.get("SHOWNET_EXISTING_TOKEN")
-    if token:
-        headers["cookie"] = f"aws-waf-token={{token}}"
-    return headers
+        value = computed.get(name, "")
+        headers[name] = value
+        if not value:
+            unresolved.append(name)
+    return headers, source, unresolved
 
 
 def build_body(seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -910,11 +1230,13 @@ def build_body(seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 def build_request(path: str = "/", method: str = "GET", body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     domain = os.environ.get("SHOWNET_DOMAIN", "example.com")
     url = os.environ.get("SHOWNET_URL", f"https://{{domain}}{{path}}")
+    payload = build_body(body)
+    headers, source, unresolved = build_headers({{"url": url, "method": method, "body": payload}})
     return {{
         "url": url,
         "method": method,
-        "headers": build_headers(),
-        "json": build_body(body),
+        "headers": headers,
+        "json": payload,
         "meta": {{
             "adapterId": "{adapter}",
             "vendor": "{vendor}",
@@ -922,6 +1244,8 @@ def build_request(path: str = "/", method: str = "GET", body: Optional[Dict[str,
             "powChallengeType": "{pow}",
             "signalIdentifier": "{signal}",
             "outboundFidelity": "{outbound_label}",
+            "dynamicFieldSource": source,
+            "unresolvedHeaders": unresolved,
             "claimsFullBrowserJa3": False,
             "inboundJa3Present": {ja3},
             "inboundJa4Present": {ja4},
@@ -939,12 +1263,8 @@ def validate_against_capture(request: Dict[str, Any], shape_path: str = "CAPTURE
         if n.lower() not in headers and n.lower() not in ("cookie",)
     ]
     missing_body = [k for k in (shape.get("requiredBodyKeys") or []) if k not in body]
-    ok = True
-    if missing_headers:
-        ok = False
-    if missing_body:
-        ok = False
     meta = request.get("meta") or {{}}
+    ok = not missing_headers and not missing_body
     if shape.get("powChallengeType") and meta.get("powChallengeType") not in (None, "", shape.get("powChallengeType")):
         ok = False
     if shape.get("signalIdentifier") and meta.get("signalIdentifier") not in (None, "", shape.get("signalIdentifier")):
@@ -954,17 +1274,46 @@ def validate_against_capture(request: Dict[str, Any], shape_path: str = "CAPTURE
         "status": "shape_aligned" if ok else "mismatch",
         "missingHeaders": missing_headers,
         "missingBodyKeys": missing_body,
+        # A header present but empty passes the shape check and still fails the
+        # site, so it is reported separately.
+        "unresolvedHeaders": meta.get("unresolvedHeaders") or [],
+        "dynamicFieldSource": meta.get("dynamicFieldSource"),
         "meta": meta,
-        "note": "Offline shape check; live send is disabled by default.",
     }}
 
 
+def run_session(paths: List[str]) -> Dict[str, Any]:
+    """Walk the captured endpoints on one session, carrying cookies forward."""
+    session = Session()
+    steps: List[Dict[str, Any]] = []
+    for index, path in enumerate(paths):
+        request = build_request(path=path, method=os.environ.get("SHOWNET_METHOD", "GET"))
+        if index == 0:
+            session.seed_cookies(request["url"])
+        result = session.send(request)
+        steps.append({{"path": path, "status": result.get("status"), "ok": result.get("ok"), "error": result.get("error")}})
+        if not result.get("ok"):
+            break
+    return {{"steps": steps, "cookies": session.cookies(), "tls": session.tls()}}
+
+
 def main() -> None:
-    req = build_request(path=os.environ.get("SHOWNET_PATH", "/"))
-    print(json.dumps(req, indent=2, ensure_ascii=False))
-    result = validate_against_capture(req)
-    print(json.dumps({{"validation": result}}, indent=2, ensure_ascii=False))
-    raise SystemExit(0 if result.get("ok") else 2)
+    paths = [p for p in os.environ.get("SHOWNET_PATHS", os.environ.get("SHOWNET_PATH", "/")).split(",") if p]
+    request = build_request(path=paths[0])
+    print(json.dumps({{"request": request}}, indent=2, ensure_ascii=False))
+
+    validation = validate_against_capture(request)
+    print(json.dumps({{"validation": validation}}, indent=2, ensure_ascii=False))
+
+    print(json.dumps({{"tls": Session().tls()}}, indent=2, ensure_ascii=False))
+
+    if os.environ.get("SHOWNET_LIVE") != "1":
+        print(json.dumps({{"live": "skipped", "hint": "set SHOWNET_LIVE=1 against a target you are authorized to test"}}, indent=2))
+        raise SystemExit(0 if validation.get("ok") else 2)
+
+    outcome = run_session(paths)
+    print(json.dumps({{"live": outcome}}, indent=2, ensure_ascii=False))
+    raise SystemExit(0 if all(step.get("ok") for step in outcome["steps"]) else 1)
 
 
 if __name__ == "__main__":
@@ -993,6 +1342,13 @@ if __name__ == "__main__":
                 .collect::<Vec<_>>()
                 .join(", "),
             outbound_label = shape.outbound_fidelity_label,
+            tls_preset = shape.outbound_tls_profile,
+            documented_ja3 = crate::tls_clienthello_catalog::catalog_documented_ja3(&shape.outbound_tls_profile)
+                .unwrap_or("not documented for this preset"),
+            documented_ja3_literal = match crate::tls_clienthello_catalog::catalog_documented_ja3(&shape.outbound_tls_profile) {
+                Some(hash) => format!("\"{hash}\""),
+                None => "None".to_string(),
+            },
             ja3 = if shape.inbound_ja3_present {
                 "True"
             } else {
@@ -1004,7 +1360,7 @@ if __name__ == "__main__":
                 "False"
             },
         ),
-        "javascript" | "typescript" | "go" | "rust" | "java" | "csharp" | "c++" | "c" | "zig" => {
+        "javascript" | "typescript" | "go" | "java" | "csharp" => {
             render_native_client(
                 language,
                 replay,
@@ -1015,7 +1371,7 @@ if __name__ == "__main__":
         }
         other => {
             return Err(format!(
-                "unsupported auto-crawler language '{other}' (supported: python, javascript, typescript, go, rust, java, csharp, c++, c, zig)"
+                "unsupported auto-crawler language '{other}' (supported: python, javascript, typescript, go, java, csharp)"
             ));
         }
     };
@@ -1083,19 +1439,46 @@ const PROXY_CONTRACT = {proxy_pretty};
 const REQUIRED_HEADER_NAMES = [{header_list}];
 const REQUIRED_BODY_KEYS = [{body_list}];
 
-function buildHeaders() {{
+// Runs the verified agent steps that shipped in this package. Steps only appear
+// there when ShowNet executed them against values this capture recorded, so a
+// value one returns is a value the site really saw.
+function dynamicFields(domain, path, headers) {{
+  let steps = {{}};
+  try {{
+    // The replay module sits beside this client in the exported package.
+    steps = require("./replay").AGENT_STEPS || {{}};
+  }} catch (error) {{
+    steps = {{}};
+  }}
+  if (!Object.keys(steps).length) return [{{}}, "env"];
+  const request = {{ method: "GET", host: domain, path, query: null, headers, body: null }};
+  const out = {{}};
+  for (const [name, step] of Object.entries(steps)) out[name] = step(request);
+  return [out, "reconstructed"];
+}}
+
+function buildHeaders(domain, path) {{
   const headers = {{
     "user-agent": process.env.SHOWNET_UA || "ShowNet-AutoCrawler/1.0",
     "accept": "application/json, text/plain, */*",
     "content-type": "application/json",
   }};
+  // Prefer the reconstructed signer; fall back to an env var only where no
+  // verified step covers the field, and say which happened.
+  const [computed, source] = dynamicFields(domain, path, headers);
+  const unresolved = [];
   for (const name of REQUIRED_HEADER_NAMES) {{
+    if (computed[name]) {{
+      headers[name] = computed[name];
+      continue;
+    }}
     const envKey = "SHOWNET_HEADER_" + name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
     headers[name] = process.env[envKey] || "";
+    if (!headers[name]) unresolved.push(name);
   }}
   const token = process.env.SHOWNET_EXISTING_TOKEN;
   if (token) headers["cookie"] = `aws-waf-token=${{token}}`;
-  return headers;
+  return {{ headers, dynamicFieldSource: source, unresolvedHeaders: unresolved }};
 }}
 
 function buildBody(seed = {{}}) {{
@@ -1107,12 +1490,15 @@ function buildBody(seed = {{}}) {{
 function buildRequest(path = "/", method = "GET", body = {{}}) {{
   const domain = process.env.SHOWNET_DOMAIN || "example.com";
   const url = process.env.SHOWNET_URL || `https://${{domain}}${{path}}`;
+  const resolved = buildHeaders(domain, path);
   return {{
     url,
     method,
-    headers: buildHeaders(),
+    headers: resolved.headers,
     json: buildBody(body),
     meta: {{
+      dynamicFieldSource: resolved.dynamicFieldSource,
+      unresolvedHeaders: resolved.unresolvedHeaders,
       adapterId: "{adapter}",
       vendor: "{vendor}",
       reconstructionMode: "{mode}",
@@ -1181,6 +1567,26 @@ import (
 var requiredHeaderNames = []string{{{header_list}}}
 var requiredBodyKeys = []string{{{body_list}}}
 
+// dynamicFields runs the verified agent steps that shipped in this package.
+// Steps only appear here when ShowNet compiled and ran them against values this
+// capture recorded, so a value returned by one is a value the site really saw.
+func dynamicFields(domain, path string, headers map[string]string) (map[string]string, string) {{
+        if len(AgentSteps) == 0 {{
+                return map[string]string{{}}, "env"
+        }}
+        request := Request{{
+                Method:  "GET",
+                Host:    domain,
+                Path:    path,
+                Headers: headers,
+        }}
+        out := map[string]string{{}}
+        for name, step := range AgentSteps {{
+                out[name] = step(request)
+        }}
+        return out, "reconstructed"
+}}
+
 func buildRequest() map[string]any {{
         domain := env("SHOWNET_DOMAIN", "example.com")
         path := env("SHOWNET_PATH", "/")
@@ -1189,8 +1595,22 @@ func buildRequest() map[string]any {{
                 "content-type": "application/json",
                 "accept":       "application/json, text/plain, */*",
         }}
+        // Prefer the reconstructed signer that shipped beside this client, and
+        // say which source each field came from. Silently falling back to an
+        // env var would let a run look successful while every signature was a
+        // value the operator pasted by hand.
+        computed, source := dynamicFields(domain, path, headers)
+        unresolved := []string{{}}
         for _, name := range requiredHeaderNames {{
-                headers[name] = os.Getenv("SHOWNET_HEADER_" + sanitizeEnv(name))
+                if value, ok := computed[name]; ok && value != "" {{
+                        headers[name] = value
+                        continue
+                }}
+                value := os.Getenv("SHOWNET_HEADER_" + sanitizeEnv(name))
+                headers[name] = value
+                if value == "" {{
+                        unresolved = append(unresolved, name)
+                }}
         }}
         if token := os.Getenv("SHOWNET_EXISTING_TOKEN"); token != "" {{
                 headers["cookie"] = "aws-waf-token=" + token
@@ -1210,6 +1630,8 @@ func buildRequest() map[string]any {{
                         "powChallengeType":     "{pow}",
                         "signalIdentifier":     "{signal}",
                         "outboundFidelity":     "{outbound_label}",
+                        "dynamicFieldSource":   source,
+                        "unresolvedHeaders":    unresolved,
                         "claimsFullBrowserJa3": false,
                         "proxyEnv":             "SHOWNET_PROXY_URL / SHOWNET_PROXY_MODE",
                         "inboundJa3Present":    {ja3},
@@ -1375,14 +1797,46 @@ public final class ClientCrawler {{
 
   private ClientCrawler() {{}}
 
+  /**
+   * Runs the verified agent steps that shipped in this package. Steps only
+   * appear here when ShowNet compiled and ran them against values this capture
+   * recorded, so a value one returns is a value the site really saw.
+   */
+  private static Map<String, String> dynamicFields(String domain, String path, Map<String, String> headers) {{
+    Map<String, String> out = new LinkedHashMap<>();
+    Map<String, java.util.function.Function<Request, String>> steps = AgentSteps.all();
+    if (steps.isEmpty()) {{
+      return out;
+    }}
+    Request request = new Request("GET", domain, path, null, headers, null);
+    steps.forEach((name, step) -> out.put(name, step.apply(request)));
+    return out;
+  }}
+
   public static Map<String, Object> buildRequest() {{
+    String domain = env("SHOWNET_DOMAIN", "example.com");
+    String path = env("SHOWNET_PATH", "/");
     Map<String, String> headers = new LinkedHashMap<>();
     headers.put("user-agent", env("SHOWNET_UA", "ShowNet-AutoCrawler/1.0"));
     headers.put("content-type", "application/json");
     headers.put("accept", "application/json, text/plain, */*");
+    // Prefer the reconstructed signer that shipped beside this client, and say
+    // which source each field came from. Silently falling back to an env var
+    // would let a run look successful while every signature was pasted by hand.
+    Map<String, String> computed = dynamicFields(domain, path, headers);
+    java.util.List<String> unresolved = new java.util.ArrayList<>();
     for (String name : REQUIRED_HEADER_NAMES) {{
+      String reconstructed = computed.get(name);
+      if (reconstructed != null && !reconstructed.isEmpty()) {{
+        headers.put(name, reconstructed);
+        continue;
+      }}
       String envKey = "SHOWNET_HEADER_" + name.replaceAll("[^A-Za-z0-9]", "_").toUpperCase();
-      headers.put(name, env(envKey, ""));
+      String value = env(envKey, "");
+      headers.put(name, value);
+      if (value.isEmpty()) {{
+        unresolved.add(name);
+      }}
     }}
     String token = System.getenv("SHOWNET_EXISTING_TOKEN");
     if (token != null && !token.isEmpty()) {{
@@ -1398,13 +1852,13 @@ public final class ClientCrawler {{
     meta.put("powChallengeType", "{pow}");
     meta.put("signalIdentifier", "{signal}");
     meta.put("outboundFidelity", "{outbound_label}");
+    meta.put("dynamicFieldSource", AgentSteps.all().isEmpty() ? "env" : "reconstructed");
+    meta.put("unresolvedHeaders", unresolved);
     meta.put("claimsFullBrowserJa3", false);
     meta.put("proxyEnv", "SHOWNET_PROXY_URL");
     meta.put("inboundJa3Present", {ja3});
     meta.put("inboundJa4Present", {ja4});
     Map<String, Object> request = new LinkedHashMap<>();
-    String domain = env("SHOWNET_DOMAIN", "example.com");
-    String path = env("SHOWNET_PATH", "/");
     request.put("url", env("SHOWNET_URL", "https://" + domain + path));
     request.put("method", "GET");
     request.put("headers", headers);
@@ -1463,23 +1917,63 @@ public final class ClientCrawler {{
 using System;
 using System.Collections.Generic;
 
+// Same namespace as the replay files copied in beside this client, so the agent
+// steps and the Request record it was verified against are actually in scope.
+namespace ShowNetReplay;
+
 public static class ClientCrawler
 {{
     static readonly string[] RequiredHeaderNames = new[] {{{header_list}}};
     static readonly string[] RequiredBodyKeys = new[] {{{body_list}}};
 
+    /// <summary>
+    /// Runs the verified agent steps that shipped in this package. Steps only
+    /// appear here when ShowNet compiled and ran them against values this
+    /// capture recorded, so a value one returns is a value the site really saw.
+    /// </summary>
+    static Dictionary<string, string> DynamicFields(string domain, string path, Dictionary<string, string> headers)
+    {{
+        var computed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (AgentSteps.All.Count == 0)
+        {{
+            return computed;
+        }}
+        var request = new Request("GET", domain, path, null, new Dictionary<string, string>(headers), null);
+        foreach (var pair in AgentSteps.All)
+        {{
+            computed[pair.Key] = pair.Value(request);
+        }}
+        return computed;
+    }}
+
     public static Dictionary<string, object> BuildRequest()
     {{
+        var domain = Env("SHOWNET_DOMAIN", "example.com");
+        var path = Env("SHOWNET_PATH", "/");
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {{
             ["user-agent"] = Env("SHOWNET_UA", "ShowNet-AutoCrawler/1.0"),
             ["content-type"] = "application/json",
             ["accept"] = "application/json, text/plain, */*",
         }};
+        // Prefer the reconstructed signer; fall back to an env var only when no
+        // verified step covers the field, and record which happened.
+        var computed = DynamicFields(domain, path, headers);
+        var unresolved = new List<string>();
         foreach (var name in RequiredHeaderNames)
         {{
+            if (computed.TryGetValue(name, out var reconstructed) && reconstructed.Length > 0)
+            {{
+                headers[name] = reconstructed;
+                continue;
+            }}
             var envKey = "SHOWNET_HEADER_" + System.Text.RegularExpressions.Regex.Replace(name, "[^A-Za-z0-9]", "_").ToUpperInvariant();
-            headers[name] = Env(envKey, "");
+            var value = Env(envKey, "");
+            headers[name] = value;
+            if (value.Length == 0)
+            {{
+                unresolved.Add(name);
+            }}
         }}
         var token = Environment.GetEnvironmentVariable("SHOWNET_EXISTING_TOKEN");
         if (!string.IsNullOrEmpty(token)) headers["cookie"] = "aws-waf-token=" + token;
@@ -1494,14 +1988,14 @@ public static class ClientCrawler
             ["powChallengeType"] = "{pow}",
             ["signalIdentifier"] = "{signal}",
             ["outboundFidelity"] = "{outbound_label}",
+            ["dynamicFieldSource"] = AgentSteps.All.Count == 0 ? "env" : "reconstructed",
+            ["unresolvedHeaders"] = unresolved,
             ["claimsFullBrowserJa3"] = false,
             ["proxyEnv"] = "SHOWNET_PROXY_URL",
             ["inboundJa3Present"] = {ja3},
             ["inboundJa4Present"] = {ja4},
         }};
 
-        var domain = Env("SHOWNET_DOMAIN", "example.com");
-        var path = Env("SHOWNET_PATH", "/");
         return new Dictionary<string, object>
         {{
             ["url"] = Env("SHOWNET_URL", $"https://{{domain}}{{path}}"),
@@ -1765,6 +2259,15 @@ fn render_analysis_doc(
 | Vendor | `{vendor}` |
 | Reconstruction mode | `{mode}` |
 | Runnable crypto helpers | `{runnable}` |
+| Verified against this capture | `{verified}` |
+
+`Runnable crypto helpers` says ShowNet had a template for these step names — it
+is a statement about ShowNet, not about the site. `Verified against this capture`
+says the emitted code was executed on values this capture recorded and produced
+the same answers the site did. Only the second is evidence. See
+`VERIFICATION.json` for the cases, and treat `false` there as "not checked",
+which is not the same as "wrong" — a secret held server-side is unverifiable by
+construction.
 | PoW (capture) | `{pow}` |
 | Signal id (capture) | `{signal}` |
 | Outbound TLS profile | `{outbound}` |
@@ -1795,6 +2298,21 @@ Header names retained for env injection: {headers}
 
 ## TLS fidelity
 
+The client runs on one of two transports and prints which one it reached, under
+`tls` in its own output. Check that before blaming a block on the algorithm — a
+handshake that does not look like the captured browser is rejected before the
+signature is ever read.
+
+| Tier | How you get it | May claim the documented JA3 |
+| --- | --- | --- |
+| `browser-impersonate` | `pip install curl_cffi` (ships libcurl-impersonate) | only on an exact preset match |
+| `stdlib` | the fallback when curl_cffi is absent | never |
+
+This capture ran under preset `{tls_preset}`. If curl_cffi has no build for it,
+the client uses the nearest build of the same browser family and says so — that
+is a different ClientHello, so it stops claiming the documented hash. Force the
+fallback for comparison with `SHOWNET_TLS_BACKEND=stdlib`.
+
 ```json
 {fidelity}
 ```
@@ -1813,10 +2331,12 @@ Header names retained for env injection: {headers}
         vendor = replay.vendor,
         mode = replay.reconstruction_mode,
         runnable = replay.can_emit_runnable_crypto,
+        verified = replay.crypto_verified,
         pow = shape.pow_challenge_type.as_deref().unwrap_or("n/a"),
         signal = shape.signal_identifier.as_deref().unwrap_or("n/a"),
         outbound = shape.outbound_tls_profile,
         label = shape.outbound_fidelity_label,
+        tls_preset = shape.outbound_tls_profile,
         pipeline = pipeline,
         hosts = shape.endpoint_hosts.join(", "),
         paths = shape
@@ -2015,12 +2535,8 @@ fn client_filename(language: &str) -> String {
         "javascript" => "client_crawler.js".into(),
         "typescript" => "client_crawler.ts".into(),
         "go" => "client_crawler.go".into(),
-        "rust" => "client_crawler.rs".into(),
         "java" => "ClientCrawler.java".into(),
         "csharp" => "ClientCrawler.cs".into(),
-        "c++" => "client_crawler.cpp".into(),
-        "c" => "client_crawler.c".into(),
-        "zig" => "client_crawler.zig".into(),
         other => format!("client_crawler.{other}"),
     }
 }
@@ -2288,15 +2804,288 @@ mod tests {
             .iter()
             .find(|f| f.role == "auto-crawler-client")
             .unwrap();
-        // Contract: missingHeaders must flip ok to False (not soft-pass).
+        // Contract: a missing header or body key must fail validation, never soft-pass.
         assert!(
-            client.content.contains("if missing_headers:") && client.content.contains("ok = False"),
-            "python client must fail offline validation on missing headers"
+            client.content.contains("ok = not missing_headers and not missing_body"),
+            "python client must fail offline validation on a missing header or body key"
         );
+        // A header that is present but empty passes a name-only shape check and
+        // still fails the site, so it has to be reported separately.
         assert!(
-            client.content.contains("if missing_body:") && client.content.contains("ok = False"),
-            "python client must fail offline validation on missing body keys"
+            client.content.contains("\"unresolvedHeaders\": meta.get(\"unresolvedHeaders\")"),
+            "python client must report headers it could not resolve"
         );
+    }
+
+    /// Write the generated package out and actually run it.
+    ///
+    /// Every other test here asserts on the *text* of the generated file, which
+    /// cannot tell whether it parses, imports, or does what it claims. This one
+    /// executes it: syntax errors, bad f-strings and broken imports surface here
+    /// and nowhere else.
+    #[test]
+    fn python_client_runs_offline_and_reports_its_shape() {
+        let Some(python) = python_interpreter() else {
+            eprintln!("skipping: no python3 on PATH");
+            return;
+        };
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        let package = build_auto_crawler(&storage, &sid, "python").expect("build");
+
+        let dir = std::env::temp_dir().join(format!("shownet-crawler-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for file in &package.files {
+            std::fs::write(dir.join(&file.name), &file.content).expect("write generated file");
+        }
+
+        let client = package
+            .files
+            .iter()
+            .find(|f| f.role == "auto-crawler-client")
+            .unwrap();
+        let output = std::process::Command::new(&python)
+            .arg(&client.name)
+            .current_dir(&dir)
+            .env_remove("SHOWNET_LIVE")
+            .output()
+            .expect("run generated client");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("SyntaxError") && !stderr.contains("Traceback"),
+            "generated client failed to run:\n{stderr}"
+        );
+        // Live sending must stay opt-in: generating a package cannot touch the target.
+        assert!(
+            stdout.contains("\"live\": \"skipped\""),
+            "generated client must not send without SHOWNET_LIVE=1:\n{stdout}"
+        );
+        assert!(stdout.contains("\"validation\""), "client must print its shape check:\n{stdout}");
+        assert!(
+            stdout.contains("\"dynamicFieldSource\""),
+            "client must say where its dynamic header values came from:\n{stdout}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The simulator has to keep one session across calls, not rebuild a bare
+    /// header dict per request: the token a site hands out in the first response
+    /// is what the second request must carry.
+    #[test]
+    fn python_client_carries_cookies_across_requests() {
+        let Some(python) = python_interpreter() else {
+            eprintln!("skipping: no python3 on PATH");
+            return;
+        };
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        let package = build_auto_crawler(&storage, &sid, "python").expect("build");
+        let client = package
+            .files
+            .iter()
+            .find(|f| f.role == "auto-crawler-client")
+            .unwrap();
+
+        assert!(
+            client.content.contains("from replay import compute_dynamic_fields"),
+            "client must call the reconstructed signer shipped beside it"
+        );
+
+        let dir = std::env::temp_dir().join(format!("shownet-crawler-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for file in &package.files {
+            std::fs::write(dir.join(&file.name), &file.content).expect("write generated file");
+        }
+
+        // Drive the generated Session against a local server that hands out a
+        // cookie on the first response. Asserting on the source text cannot tell
+        // whether the jar is actually wired to the transport; this can.
+        let module = client.name.trim_end_matches(".py").to_string();
+        let driver = format!(
+            r#"import json, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import {module} as c
+
+seen = []
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        seen.append(self.headers.get("Cookie") or "")
+        self.send_response(200)
+        if self.path == "/first":
+            self.send_header("Set-Cookie", "granted=by-server; Path=/")
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b"{{}}")
+
+    def log_message(self, *args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%d" % server.server_address[1]
+
+session = c.Session()
+session.send({{"name": "first", "method": "GET", "url": base + "/first", "headers": {{}}}})
+session.send({{"name": "second", "method": "GET", "url": base + "/second", "headers": {{}}}})
+print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}}))
+"#
+        );
+        std::fs::write(dir.join("drive_session.py"), &driver).expect("write driver");
+        let output = std::process::Command::new(&python)
+            .arg("drive_session.py")
+            .current_dir(&dir)
+            .output()
+            .expect("run session driver");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.lines().last().unwrap_or_default();
+        let report: Value = serde_json::from_str(line).unwrap_or_else(|_| {
+            panic!(
+                "session driver produced no report:\n{}\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+
+        let seen = report["seen"].as_array().expect("seen list");
+        assert_eq!(seen.len(), 2, "both requests must reach the server: {report}");
+        assert!(
+            seen[0].as_str().unwrap_or_default().is_empty(),
+            "the first request has no cookie to send yet: {report}"
+        );
+        // The point of the whole session: what the server handed back on call one
+        // is carried by call two without the caller doing anything.
+        assert!(
+            seen[1].as_str().unwrap_or_default().contains("granted=by-server"),
+            "the second request must carry the cookie the server set: {report}"
+        );
+        assert_eq!(
+            report["jar"]["granted"].as_str(),
+            Some("by-server"),
+            "the session must expose the cookies it is holding: {report}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A client that quietly falls back to stdlib TLS while the report still says
+    /// "Chrome" is worse than one that never claimed it: the operator would blame
+    /// the algorithm for a block that came from the handshake. The tier the client
+    /// actually reached has to be reported, and only an exact preset match may
+    /// claim the documented JA3 hash.
+    #[test]
+    fn python_client_reports_its_real_tls_tier() {
+        let Some(python) = python_interpreter() else {
+            eprintln!("skipping: no python3 on PATH");
+            return;
+        };
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        let package = build_auto_crawler(&storage, &sid, "python").expect("build");
+        let client = package
+            .files
+            .iter()
+            .find(|f| f.role == "auto-crawler-client")
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("shownet-crawler-tls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for file in &package.files {
+            std::fs::write(dir.join(&file.name), &file.content).expect("write generated file");
+        }
+
+        // Force the fallback path: curl_cffi is not a dependency of this repo, so
+        // this is also what a fresh checkout without it will hit.
+        let module = client.name.trim_end_matches(".py").to_string();
+        let probe = format!("import json, {module} as c; print(json.dumps(c.Session().tls()))");
+        let output = std::process::Command::new(&python)
+            .arg("-c")
+            .arg(&probe)
+            .env("SHOWNET_TLS_BACKEND", "stdlib")
+            .current_dir(&dir)
+            .output()
+            .expect("run tls probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let tls: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
+            panic!(
+                "tls probe produced no report:\n{}\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+
+        assert_eq!(tls["tier"].as_str(), Some("stdlib"), "{tls}");
+        assert_eq!(
+            tls["claimsBrowserJa3"].as_bool(),
+            Some(false),
+            "stdlib TLS must never claim a browser JA3: {tls}"
+        );
+        assert!(tls["documentedJa3"].is_null(), "no hash may be claimed on the stdlib path: {tls}");
+        assert!(
+            !tls["note"].as_str().unwrap_or_default().is_empty(),
+            "the client must say why it is on this tier: {tls}"
+        );
+        // The preset is still reported so the operator can see what to install for.
+        assert_eq!(
+            tls["preset"].as_str(),
+            Some(package_tls_preset(&package).as_str()),
+            "reported preset must match the one the capture ran under: {tls}"
+        );
+
+        // And the resolver must prefer an exact match over a nearest build.
+        let resolve = format!(
+            "import {module} as c; print(c.resolve_impersonate(c.SHOWNET_TLS_PRESET, [c.SHOWNET_TLS_PRESET])[0]); print(c.resolve_impersonate('chrome999', ['chrome124'])[0])"
+        );
+        let output = std::process::Command::new(&python)
+            .arg("-c")
+            .arg(&resolve)
+            .current_dir(&dir)
+            .output()
+            .expect("run resolver probe");
+        let lines = String::from_utf8_lossy(&output.stdout);
+        let mut lines = lines.lines();
+        assert_eq!(
+            lines.next(),
+            Some(package_tls_preset(&package).as_str()),
+            "an available exact preset must win"
+        );
+        assert_eq!(
+            lines.next(),
+            Some("chrome124"),
+            "an unavailable build must fall back to the nearest of the same family"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn package_tls_preset(package: &AutoCrawlerPackage) -> String {
+        let shape = package
+            .files
+            .iter()
+            .find(|f| f.role == "capture-shape")
+            .expect("package ships the capture shape it was built from");
+        let shape: Value = serde_json::from_str(&shape.content).expect("capture shape is json");
+        shape["outboundTlsProfile"]
+            .as_str()
+            .expect("capture shape records the TLS preset")
+            .to_string()
+    }
+
+    fn python_interpreter() -> Option<String> {
+        for candidate in ["python3", "python"] {
+            if std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+            {
+                return Some(candidate.to_string());
+            }
+        }
+        None
     }
 
     #[test]
@@ -2427,6 +3216,139 @@ mod tests {
                 );
                 let _ = std::fs::write(summary_path, body);
             }
+        }
+    }
+
+    /// The crawler package is what most operators actually export, so the
+    /// verification verdict has to survive the copy from the replay package
+    /// rather than being visible only in the narrower export.
+    #[test]
+    fn the_crawler_package_carries_the_verification_verdict_forward() {
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        let package = build_auto_crawler(&storage, &sid, "python").expect("build");
+
+        let file = package
+            .files
+            .iter()
+            .find(|f| f.name == "VERIFICATION.json")
+            .expect("crawler package must ship the verdict it inherited");
+        let parsed: Value = serde_json::from_str(&file.content).expect("valid json");
+        assert!(parsed.get("cryptoVerified").is_some(), "{parsed}");
+        assert!(parsed.get("claimBasis").is_some(), "{parsed}");
+
+        // And the analysis doc must show both claims side by side, so the weaker
+        // one cannot be mistaken for the stronger.
+        let doc = package
+            .files
+            .iter()
+            .find(|f| f.role == "crawler-analysis-doc")
+            .expect("analysis doc");
+        assert!(
+            doc.content.contains("Verified against this capture"),
+            "the doc must state the verified claim next to the template claim"
+        );
+    }
+
+    /// The crawler client and the replay files land in one directory, so they
+    /// must compile together. Asserting only on the client's text would miss a
+    /// helper it calls that the replay package never defines — which is exactly
+    /// how the Go client shipped reading env vars instead of the signer.
+    #[test]
+    fn crawler_packages_compile_against_the_replay_files_they_ship_with() {
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+
+        for (language, toolchain, probe) in [
+            ("go", "go", "version"),
+            ("java", "javac", "-version"),
+            ("csharp", "dotnet", "--version"),
+        ] {
+            let available = std::process::Command::new(toolchain)
+                .arg(probe)
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if !available {
+                eprintln!("skipping {language}: no {toolchain} on PATH");
+                continue;
+            }
+
+            let package = build_auto_crawler(&storage, &sid, language)
+                .unwrap_or_else(|error| panic!("{language} crawler: {error}"));
+            let dir = std::env::temp_dir()
+                .join(format!("shownet-crawler-build-{language}-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            for f in &package.files {
+                // Only source files matter here; the docs and JSON come along
+                // but must not be handed to a compiler.
+                std::fs::write(dir.join(&f.name), &f.content).expect("write package file");
+            }
+
+            let (program, args): (&str, Vec<String>) = match language {
+                "go" => {
+                    std::fs::write(dir.join("go.mod"), "module shownetcrawler\n\ngo 1.21\n")
+                        .expect("go.mod");
+                    ("go", vec!["build".into(), "./...".into()])
+                }
+                "java" => {
+                    let sources: Vec<String> = package
+                        .files
+                        .iter()
+                        .filter(|f| f.name.ends_with(".java"))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    ("javac", sources)
+                }
+                _ => {
+                    std::fs::write(
+                        dir.join("crawler.csproj"),
+                        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Library</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n    <Nullable>enable</Nullable>\n    <ImplicitUsings>enable</ImplicitUsings>\n  </PropertyGroup>\n</Project>\n",
+                    )
+                    .expect("csproj");
+                    (
+                        "dotnet",
+                        vec!["build".into(), "-v".into(), "quiet".into(), "--nologo".into()],
+                    )
+                }
+            };
+
+            let output = std::process::Command::new(program)
+                .args(&args)
+                .current_dir(&dir)
+                .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("{language} build failed to start: {error}"));
+            let ok = output.status.success();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            std::fs::remove_dir_all(&dir).ok();
+            assert!(ok, "{language} crawler package must compile:\n{stderr}\n{stdout}");
+        }
+    }
+
+    /// Every language's client must draw its dynamic fields from the shipped
+    /// signer first and report which source it used. A client that only reads
+    /// env vars makes the operator compute signatures by hand, which is the
+    /// thing this whole pipeline exists to avoid.
+    #[test]
+    fn every_crawler_client_prefers_the_reconstructed_signer_over_env() {
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        for language in ["python", "javascript", "typescript", "go", "java", "csharp"] {
+            let package = build_auto_crawler(&storage, &sid, language)
+                .unwrap_or_else(|error| panic!("{language}: {error}"));
+            let client = package
+                .files
+                .iter()
+                .find(|f| f.role == "auto-crawler-client")
+                .unwrap_or_else(|| panic!("{language} ships a client"));
+            assert!(
+                client.content.contains("dynamicFieldSource")
+                    || client.content.contains("dynamic_field_source"),
+                "{language} client must record where its dynamic values came from"
+            );
         }
     }
 }

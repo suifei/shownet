@@ -1,6 +1,8 @@
 mod agent_tools;
+mod algorithm_ground_truth;
 mod algorithm_reconstruction;
 mod algorithm_replay;
+mod algorithm_verification;
 mod analysis;
 mod analysis_graph;
 mod analysis_pipeline;
