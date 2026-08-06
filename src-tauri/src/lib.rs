@@ -53,7 +53,7 @@ mod web_risk_lab;
 use breakpoints::{BreakpointCoordinator, BreakpointDecisionInput, BreakpointQueueSnapshot};
 use ca::CertificateAuthority;
 use client_access::ClientAccessPolicy;
-use interchange::{generate_code, render_export, ExportFormat, SessionBundle};
+use interchange::{render_export, ExportFormat, SessionBundle};
 use mcp::McpServerHandle;
 use models::{
     AiAnalysisSettings, AiModelDiscoveryInput, AiProviderSettings, AiProviderSettingsInput,
@@ -622,7 +622,17 @@ async fn stop_proxy_browser(
     if let Some(handle) = handle {
         handle.stop().await;
     }
-    emit(&app, "browser://status", &false)
+    // Same payload type as the start path. Emitting a bare `false` here would
+    // mean one event channel carrying two incompatible shapes, so any listener
+    // written against the struct would break the moment the browser stops.
+    emit(
+        &app,
+        "browser://status",
+        &ProxyBrowserStatus {
+            running: false,
+            ..Default::default()
+        },
+    )
 }
 
 fn browser_bus_from_state(
@@ -2431,16 +2441,6 @@ fn import_session_file(
 }
 
 #[tauri::command]
-fn generate_request_code(
-    request_id: String,
-    template: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let request = state.storage.get_bundle_request(&request_id)?;
-    generate_code(&request, &template)
-}
-
-#[tauri::command]
 fn get_upstream_proxy_settings(
     state: State<'_, AppState>,
 ) -> Result<UpstreamProxySettings, String> {
@@ -3769,7 +3769,6 @@ pub fn run() {
             decode_px_payload,
             run_autonomous_session_analysis,
             eval_analysis_scorecard,
-            generate_request_code,
             get_upstream_proxy_settings,
             save_upstream_proxy_settings,
             detect_env_upstream_proxy,

@@ -69,7 +69,7 @@ pub struct BrowserHookEvent {
     pub correlation: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyBrowserStatus {
     pub running: bool,
