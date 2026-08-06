@@ -4,6 +4,8 @@
 //! into an explicit pipeline (not empty stubs). VMP / heavily protected JS is
 //! classified as hybrid/trace-driven rather than fake static decompilation.
 
+use crate::algorithm_ground_truth::{self, GroundTruth};
+use crate::algorithm_verification::{self, Implementation, VerificationReport};
 use crate::models::{BrowserHookEvent, CryptoCodeSnippet, RequestRecord};
 use crate::signature_adapter::SignatureAdapterHarness;
 use serde::Serialize;
@@ -19,6 +21,21 @@ pub struct AlgorithmStep {
     pub formula: String,
     pub evidence: Vec<String>,
     pub implementation_hint: String,
+    /// Code the analysis agent wrote for this step.
+    ///
+    /// This is the seam that lets reconstruction exceed the built-in catalogue:
+    /// without it a step whose `name` is not one of the handful the emitter
+    /// recognises can only ever become a placeholder, so any algorithm nobody
+    /// predicted in advance is out of reach. Supplied code is never trusted on
+    /// sight — each is executed against captured ground truth, and `verification`
+    /// on the reconstruction records what happened.
+    ///
+    /// One entry per language the agent wants emitted. They are verified
+    /// independently: a correct JavaScript reconstruction is no evidence that
+    /// the agent's Python port of it is also correct, and the Python package is
+    /// what the operator actually runs.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub implementations: Vec<Implementation>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,6 +65,17 @@ pub struct AlgorithmReconstruction {
     pub test_field_shapes: Vec<String>,
     pub report_spec_embedded: bool,
     pub can_emit_runnable_crypto: bool,
+    /// What running the agent's code against captured ground truth produced,
+    /// one entry per implementation. Empty when no agent code was supplied —
+    /// which is different from running it and it failing.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub verification: Vec<VerificationReport>,
+    /// The only field entitled to claim the algorithm was actually reproduced.
+    ///
+    /// `can_emit_runnable_crypto` says the emitter has a template for these step
+    /// names; it is a statement about ShowNet, not about the site. This says the
+    /// code produced the values the site really saw.
+    pub crypto_verified: bool,
     pub notes: Vec<String>,
 }
 
@@ -397,8 +425,50 @@ pub fn reconstruct(
         test_field_shapes: test_field_shapes.into_iter().collect(),
         report_spec_embedded: false,
         can_emit_runnable_crypto,
+        // The evidence-only path writes no code of its own, so there is nothing
+        // to run and nothing to claim. Verification arrives with an agent spec.
+        verification: Vec::new(),
+        crypto_verified: false,
         notes,
     }
+}
+
+/// Execute whatever code the agent supplied against what the capture recorded.
+///
+/// Returns the report and whether the reconstruction may claim its crypto was
+/// reproduced. The claim requires an actual `verified` verdict: a capture with
+/// no comparable pairs, a missing runtime, or a candidate that threw all leave
+/// the claim off. Silence is not consent here — an unverifiable result reads
+/// exactly like a failed one as far as what we are allowed to say.
+fn verify_supplied_implementations(
+    pipeline: &[AlgorithmStep],
+    harness: &SignatureAdapterHarness,
+    hooks: &[BrowserHookEvent],
+    matched_requests: &[RequestRecord],
+) -> (Vec<VerificationReport>, GroundTruth, bool) {
+    let truth = algorithm_ground_truth::collect(hooks, matched_requests, &harness.dynamic_fields);
+
+    let mut reports = Vec::new();
+    for step in pipeline {
+        // Only reconstructed steps are candidates: a step the agent itself
+        // marked partial is not claiming to be runnable, and failing it would
+        // be noise that buries the results that matter.
+        if step.status != "reconstructed" {
+            continue;
+        }
+        for implementation in &step.implementations {
+            let mut report = algorithm_verification::verify(implementation, &truth.cases);
+            report.step_id = step.id.clone();
+            report.step_name = step.name.clone();
+            reports.push(report);
+        }
+    }
+
+    // Every supplied implementation must have passed. One verified language does
+    // not vouch for another: a correct JS reconstruction says nothing about
+    // whether the agent's Python port of it is right, and Python is what ships.
+    let verified = !reports.is_empty() && reports.iter().all(VerificationReport::is_verified);
+    (reports, truth, verified)
 }
 
 pub fn render_reconstruction_markdown(spec: &AlgorithmReconstruction) -> String {
@@ -459,10 +529,120 @@ pub fn render_reconstruction_markdown(spec: &AlgorithmReconstruction) -> String 
     for note in &spec.notes {
         out.push_str(&format!("- {note}\n"));
     }
-    out.push_str(
-        "\n## Agent contract\n\nReports should embed a fenced `algorithm-spec` JSON block so replay can materialize exact formulas. Without it, ShowNet synthesizes this reconstruction from deterministic evidence only.\n",
-    );
+    out.push_str(AGENT_CONTRACT);
     out
+}
+
+/// Read an agent-supplied implementation off a spec step.
+///
+/// Rejects an empty body rather than accepting it: a step carrying
+/// `implementation: {source: ""}` would otherwise be handed to the verifier,
+/// fail every case, and be reported as a wrong algorithm when the real problem
+/// is that the agent sent nothing.
+/// What the analysis agent needs to know to get its own code shipped.
+///
+/// Kept next to the parser that consumes it: a contract documented somewhere
+/// else drifts from the code that enforces it, and then agents write against a
+/// shape ShowNet silently ignores.
+pub const AGENT_CONTRACT: &str = r#"
+## Agent contract
+
+Embed a fenced `algorithm-spec` JSON block in the report. Without one, ShowNet
+falls back to deterministic evidence and its built-in catalogue, which can only
+recognise algorithms someone predicted in advance.
+
+A step may carry the code you wrote for it. This is how a step ShowNet has never
+heard of becomes runnable rather than a placeholder:
+
+```json
+{
+  "pipeline": [
+    {
+      "id": "1",
+      "name": "vendor_custom_sign",
+      "status": "reconstructed",
+      "formula": "sha256(method + path + nonce)",
+      "implementation": [
+        { "language": "javascript", "source": "function computeSignature(request) { ... }" },
+        { "language": "python", "source": "def computeSignature(request):\n    ..." }
+      ]
+    }
+  ]
+}
+```
+
+Rules that decide whether your code ships:
+
+1. **It is executed, not read.** ShowNet runs it against input/output pairs this
+   capture recorded — hooked crypto calls, and requests whose signature header is
+   visible next to the fields that produced it. Every case must reproduce the
+   observed value exactly. One mismatch and the step is reported wrong, not
+   partial.
+2. **Each language is verified separately.** A correct JavaScript reconstruction
+   is not evidence that your Python port is also correct. Supply the language
+   the operator asked to export. Six are supported, each executed in its own
+   runtime — `python` (python3), `javascript`/`typescript` (in-process), `go`
+   (`go run`), `java` (`javac`+`java`), `csharp` (`dotnet run`). A toolchain
+   that is not installed yields `unverifiable`, and the code is withheld.
+3. **No cases means unverifiable, which is not a pass.** If the secret lives on
+   the server there is nothing to compare against; ShowNet says so rather than
+   claiming success. Do not work around this by weakening the step.
+4. **Entry point** is `computeSignature(request)` unless you set `entryPoint`;
+   use `ComputeSignature` for Go and C#, which capitalise exported names. It
+   receives exactly: `method`, `host`, `path`, `query`, `headers` (lowercased,
+   with the field being computed removed), `body`. Nothing else — a field you
+   read at run time but were never verified on voids the check. The compiled
+   languages get this as a typed `Request` record ShowNet declares; do not
+   redeclare it.
+
+   Write each candidate as a standalone compilation unit, because that is how it
+   is both verified and shipped: Go as `package main`, Java as
+   `public class Candidate`, C# in `namespace ShowNetReplay` as
+   `public static class Candidate`.
+5. **JavaScript primitives** are provided because the sandbox has no WebCrypto:
+   `shownet.sha256Hex`, `shownet.md5Hex`, `shownet.hmacSha256Hex(key, message)`,
+   `shownet.base64Encode`. Python candidates use the standard library.
+6. **Never hard-code a production secret.** Read it from the environment; a
+   secret pasted into `source` ends up in the exported package.
+"#;
+
+fn parse_implementations(value: Option<&Value>) -> Vec<Implementation> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    // Accept both a single object and an array, so an agent emitting one
+    // language does not have to wrap it.
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| parse_implementation(Some(item)))
+            .collect(),
+        _ => parse_implementation(Some(value)).into_iter().collect(),
+    }
+}
+
+fn parse_implementation(value: Option<&Value>) -> Option<Implementation> {
+    let value = value?;
+    let source = value.get("source").and_then(Value::as_str)?.trim();
+    if source.is_empty() {
+        return None;
+    }
+    let language = value
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("javascript")
+        .to_string();
+    let entry_point = value
+        .get("entryPoint")
+        .and_then(Value::as_str)
+        .filter(|entry| !entry.trim().is_empty())
+        .unwrap_or("computeSignature")
+        .to_string();
+    Some(Implementation {
+        language,
+        source: source.to_string(),
+        entry_point,
+    })
 }
 
 fn parse_embedded_algorithm_spec(report: &str) -> Option<Value> {
@@ -537,6 +717,7 @@ fn merge_embedded_with_evidence(
                     .and_then(Value::as_str)
                     .unwrap_or("from embedded algorithm-spec")
                     .to_string(),
+                implementations: parse_implementations(step_val.get("implementation")),
             });
         }
         if !pipeline.is_empty() {
@@ -547,6 +728,45 @@ fn merge_embedded_with_evidence(
                 .any(|step| step.status == "reconstructed");
         }
     }
+
+    // Run the agent's code before believing any of it. This is the whole point
+    // of accepting code rather than a step name: a name can only be trusted
+    // because someone vouched for the catalogue, whereas code can be checked.
+    let (report, truth, verified) =
+        verify_supplied_implementations(&base.pipeline, harness, hooks, matched_requests);
+    base.crypto_verified = verified;
+    for report in report.iter().rev() {
+        base.notes.insert(
+            0,
+            match report.verdict.as_str() {
+                "verified" => format!(
+                    "`{}` ({}) reproduced {} of {} captured values ({} end-to-end). This claim is backed by execution.",
+                    report.step_name, report.language, report.passed, report.attempted, report.end_to_end_passed
+                ),
+                "failed" => format!(
+                    "`{}` ({}) ran but disagreed with the capture on {} of {} values; treat that step as wrong, not partial.",
+                    report.step_name, report.language, report.failed, report.attempted
+                ),
+                _ => format!(
+                    "`{}` ({}) could not be checked ({}). This is not a pass — the crypto claim stays off.",
+                    report.step_name,
+                    report.language,
+                    report.notes.first().map(String::as_str).unwrap_or("no reason recorded")
+                ),
+            },
+        );
+    }
+    if report.is_empty() && !truth.is_empty() {
+        base.notes.insert(
+            0,
+            format!(
+                "Capture yielded {} verifiable case(s) ({} end-to-end) but the spec supplied no implementation to check against them.",
+                truth.cases.len(),
+                truth.end_to_end_cases()
+            ),
+        );
+    }
+    base.verification = report;
     if let Some(algos) = embedded.get("algorithms").and_then(Value::as_array) {
         for algo in algos.iter().filter_map(Value::as_str) {
             if !base.algorithms.iter().any(|item| item == algo) {
@@ -619,6 +839,7 @@ fn step(
         formula: formula.into(),
         evidence,
         implementation_hint: hint.into(),
+        implementations: Vec::new(),
     };
     *id += 1;
     step
@@ -728,5 +949,150 @@ mod tests {
         assert!(spec.report_spec_embedded);
         assert_eq!(spec.pipeline[0].name, "hmac_sign");
         assert_eq!(spec.pipeline[0].formula, "HMAC_SHA256(path:time, secret)");
+    }
+
+    /// A hook whose recorded return value we can reproduce.
+    fn hmac_hook() -> BrowserHookEvent {
+        BrowserHookEvent {
+            id: "h1".into(),
+            session_id: "s".into(),
+            source_instance_id: "i".into(),
+            request_id: Some("r1".into()),
+            sequence: 1,
+            timestamp: 0,
+            kind: "crypto.subtle".into(),
+            name: "sign".into(),
+            url: None,
+            method: None,
+            input: json!({"algorithm": "HMAC", "data": "what do ya want for nothing?"}),
+            output: json!("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"),
+            stack: None,
+            duration_ms: None,
+            correlation: "c".into(),
+        }
+    }
+
+    fn spec_report(implementation: &str) -> String {
+        format!(
+            "# Report\n\n```algorithm-spec\n{{\n  \"pipeline\": [\n    {{\n      \"id\": \"1\",\n      \"name\": \"custom_vendor_sign\",\n      \"status\": \"reconstructed\",\n      \"formula\": \"hmac(secret, data)\",\n      \"implementation\": {{\n        \"language\": \"javascript\",\n        \"source\": {source}\n      }}\n    }}\n  ]\n}}\n```\n",
+            source = serde_json::Value::String(implementation.to_string())
+        )
+    }
+
+    /// The seam that lets reconstruction exceed the built-in catalogue: a step
+    /// name nobody predicted, carrying code, verified against the capture.
+    #[test]
+    fn agent_supplied_code_that_reproduces_the_capture_earns_the_verified_claim() {
+        let report = spec_report(
+            "function computeSignature(input) { return shownet.hmacSha256Hex('Jefe', input.data); }",
+        );
+        let spec = reconstruct(
+            &report,
+            &harness(),
+            &json!({}),
+            &json!([]),
+            &[hmac_hook()],
+            &[],
+            &[],
+        );
+        assert!(spec.crypto_verified, "{:?}", spec.verification);
+        let verification = &spec.verification[0];
+        assert_eq!(verification.verdict, "verified");
+        assert_eq!(verification.passed, 1);
+        assert_eq!(verification.step_name, "custom_vendor_sign");
+        assert_eq!(spec.pipeline[0].name, "custom_vendor_sign");
+    }
+
+    /// The regression this whole layer exists to prevent: code that looks right,
+    /// has the right output shape, and is wrong. Under the old name-matching
+    /// rule this shipped as runnable crypto.
+    #[test]
+    fn agent_supplied_code_that_disagrees_with_the_capture_is_not_verified() {
+        let report = spec_report(
+            "function computeSignature(input) { return shownet.sha256Hex(input.data); }",
+        );
+        let spec = reconstruct(
+            &report,
+            &harness(),
+            &json!({}),
+            &json!([]),
+            &[hmac_hook()],
+            &[],
+            &[],
+        );
+        assert!(!spec.crypto_verified);
+        let verification = &spec.verification[0];
+        assert_eq!(verification.verdict, "failed");
+        assert!(
+            spec.notes.iter().any(|note| note.contains("disagreed")),
+            "the report must say the reconstruction is wrong: {:?}",
+            spec.notes
+        );
+    }
+
+    /// No pairs to compare against is not a pass. This is the honest boundary
+    /// for a server-side secret: we cannot tell, and must say so.
+    #[test]
+    fn code_with_no_ground_truth_to_check_it_against_is_unverifiable_not_verified() {
+        let report = spec_report(
+            "function computeSignature(input) { return shownet.hmacSha256Hex('k', input.data); }",
+        );
+        let spec = reconstruct(&report, &harness(), &json!({}), &json!([]), &[], &[], &[]);
+        assert!(!spec.crypto_verified, "silence must not be read as success");
+        let verification = &spec.verification[0];
+        assert_eq!(verification.verdict, "unverifiable");
+        assert!(
+            spec.notes.iter().any(|note| note.contains("not a pass")),
+            "{:?}",
+            spec.notes
+        );
+    }
+
+    /// `can_emit_runnable_crypto` is a statement about ShowNet's templates;
+    /// `crypto_verified` is a statement about the site. They must not be
+    /// conflated — the old code had only the first and used it as both.
+    #[test]
+    fn the_template_claim_and_the_verified_claim_are_separate() {
+        let spec = reconstruct(
+            "HMAC-SHA256 signing observed",
+            &harness(),
+            &json!({}),
+            &json!([]),
+            &[hmac_hook()],
+            &[],
+            &[],
+        );
+        assert!(
+            spec.can_emit_runnable_crypto,
+            "the catalogue still recognises hmac_sign"
+        );
+        assert!(
+            !spec.crypto_verified,
+            "but nothing was executed, so nothing is proven"
+        );
+        assert!(spec.verification.is_empty(), "no code was supplied to run");
+    }
+
+    /// An empty body is a missing implementation, not a wrong one. Reporting it
+    /// as a failed algorithm would send the operator after the wrong problem.
+    #[test]
+    fn an_empty_implementation_body_is_treated_as_absent() {
+        let report = spec_report("   ");
+        let spec = reconstruct(
+            &report,
+            &harness(),
+            &json!({}),
+            &json!([]),
+            &[hmac_hook()],
+            &[],
+            &[],
+        );
+        assert!(spec.pipeline[0].implementations.is_empty());
+        assert!(spec.verification.is_empty());
+        assert!(
+            spec.notes.iter().any(|note| note.contains("supplied no implementation")),
+            "the capture had cases but nothing to run: {:?}",
+            spec.notes
+        );
     }
 }
