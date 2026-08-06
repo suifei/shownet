@@ -309,6 +309,20 @@ pub fn evaluate_measured(
     let Some(entry) = golden_for(preset_id, current_platform()) else {
         return AlignmentLevel::Recipe;
     };
+    evaluate_measured_against(entry, measured_ja3, measured_ja4)
+}
+
+/// The decision itself, against one named entry.
+///
+/// Split out from `evaluate_measured` so it can be exercised without depending on
+/// which platform the test happens to run on: goldens are captured per platform,
+/// and a host with only pending-capture entries would otherwise skip the whole
+/// ladder silently rather than check it.
+pub fn evaluate_measured_against(
+    entry: &GoldenEntry,
+    measured_ja3: &str,
+    measured_ja4: Option<&str>,
+) -> AlignmentLevel {
     if !entry.is_usable() {
         return AlignmentLevel::Recipe;
     }
@@ -317,6 +331,8 @@ pub fn evaluate_measured(
             return entry.authorised_level();
         }
     }
+    // JA4 buckets extension order and GREASE, so it survives drift that moves
+    // JA3. Matching either hash is enough to authorise; matching neither is not.
     if let (Some(golden_ja4), Some(measured)) = (entry.golden.ja4.as_deref(), measured_ja4) {
         if !golden_ja4.is_empty()
             && !measured.is_empty()
@@ -443,29 +459,49 @@ mod tests {
 
     #[test]
     fn ja4_match_authorises_when_ja3_differs() {
-        let entry = golden_for("chrome150", "desktop-windows");
-        let Some(entry) = entry else {
-            return; // non-windows host in CI matrix
-        };
-        if !entry.is_usable() {
-            return;
-        }
-        let golden_ja4 = entry.golden.ja4.as_deref().expect("tool golden has ja4");
+        // Take any captured entry that carries a JA4, whichever platform it was
+        // recorded on, and evaluate against it directly. Going through
+        // `evaluate_measured` would resolve the entry via `current_platform()`,
+        // so on a host whose goldens are still pending-capture the assertions
+        // below would never run — the test would pass by skipping.
+        let entry = entries()
+            .iter()
+            .find(|e| e.is_usable() && e.golden.ja4.as_deref().is_some_and(|v| !v.is_empty()))
+            .expect("at least one captured golden with a ja4 must ship");
+        let golden_ja4 = entry.golden.ja4.as_deref().unwrap();
+
         // Wrong JA3, correct JA4 → still matched (extension-order / GREASE drift).
-        let level = evaluate_measured(
-            "chrome150",
-            "ffffffffffffffffffffffffffffffff",
-            Some(golden_ja4),
-        );
-        assert_eq!(level, entry.authorised_level());
-        // Wrong JA3 and wrong JA4 → recipe.
         assert_eq!(
-            evaluate_measured(
-                "chrome150",
+            evaluate_measured_against(entry, "ffffffffffffffffffffffffffffffff", Some(golden_ja4)),
+            entry.authorised_level(),
+            "a JA4 match must authorise even when JA3 has drifted"
+        );
+        // Correct JA3 alone is still enough — JA4 is an additional route, not a
+        // second requirement.
+        assert_eq!(
+            evaluate_measured_against(entry, entry.golden.ja3.as_deref().unwrap(), None),
+            entry.authorised_level(),
+            "a JA3 match must authorise without a measured JA4"
+        );
+        // Neither matching → recipe. This is the rung that must not be skipped.
+        assert_eq!(
+            evaluate_measured_against(
+                entry,
                 "ffffffffffffffffffffffffffffffff",
                 Some("t00d0000h0_deadbeef_deadbeef")
             ),
-            AlignmentLevel::Recipe
+            AlignmentLevel::Recipe,
+            "neither hash matching may not authorise anything"
+        );
+        // A capture that never happened cannot authorise, whatever it declares.
+        let pending = entries()
+            .iter()
+            .find(|e| !e.is_usable())
+            .expect("the matrix still ships pending-capture stubs");
+        assert_eq!(
+            evaluate_measured_against(pending, "ffffffffffffffffffffffffffffffff", None),
+            AlignmentLevel::Recipe,
+            "a pending-capture entry must stay at recipe"
         );
     }
 
