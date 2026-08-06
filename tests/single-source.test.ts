@@ -335,4 +335,33 @@ describe("closed loops", () => {
     );
   });
 
+
+  it("documents the update source the code actually uses", async () => {
+    // Release docs that describe a mechanism the code abandoned are worse than
+    // no docs: whoever cuts the next release follows them and looks for a file
+    // nothing produces any more.
+    const doc = await readFile(new URL("../docs/release.md", import.meta.url), "utf8");
+    assert.ok(
+      doc.includes("api.github.com/repos/suifei/shownet/releases/latest"),
+      "release docs must name the endpoint the client reads",
+    );
+    assert.ok(
+      !doc.includes("SHOWNET_UPDATE_PUBLISH"),
+      "release docs must not instruct anyone to configure a manifest publish endpoint",
+    );
+
+    // The asset names are load-bearing: update checking resolves the download
+    // from them, so the docs and the workflow have to agree.
+    const workflow = await readFile(
+      new URL("../.github/workflows/release.yml", import.meta.url),
+      "utf8",
+    );
+    for (const token of ["aarch64", "windows_x86_64"]) {
+      assert.ok(
+        doc.includes(token) && workflow.includes(token),
+        `${token} must appear in both the release docs and the workflow`,
+      );
+    }
+  });
+
 });

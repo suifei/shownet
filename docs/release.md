@@ -1,6 +1,6 @@
 # ShowNet Release And Update Operations
 
-ShowNet checks `https://claudegpt.org/shownet/latest.json` for updates. The desktop client only reads release metadata and opens an explicit HTTPS download link; it never silently downloads or installs a package. macOS Gatekeeper and Windows Authenticode remain the final trust checks.
+ShowNet checks the GitHub Releases API (`https://api.github.com/repos/suifei/shownet/releases/latest`) for updates. The desktop client only reads release metadata and opens an explicit HTTPS download link; it never silently downloads or installs a package. macOS Gatekeeper and Windows Authenticode remain the final trust checks.
 
 For the **0.1.0-era ClientHello catalog, Advanced MITM console, local package gates, and honesty limits**, see [clienthello-catalog-and-mitm-console.md](./clienthello-catalog-and-mitm-console.md) (feature surface + release-gate commands used for formal local QA builds).
 
@@ -105,34 +105,47 @@ For local macOS QA, `npm run tauri:bundle` merges `src-tauri/tauri.local.macos.c
 
 The workflow writes the PFX only into the ephemeral runner directory, imports it into the current-user certificate store, and deletes the temporary PFX. It signs the ShowNet executable, built-in Agent, and `ShowNetPortable.exe` launcher separately, verifies all three with `Get-AuthenticodeSignature`, builds the PortableApps directory, rejects mutable/build-only files, and publishes a checksum alongside the ZIP.
 
-## Update Manifest
+## Update Source
 
-The tagged workflow creates `latest.json`, adds it to the GitHub Release, and can publish it to ClaudeGPT.org. The supported schema is:
+The published GitHub release *is* the manifest. There is no separately hosted
+`latest.json`: it could only restate what the release already says — the tag, the
+notes, the download URLs — while being able to drift from it or go missing if
+publishing failed after the release was already public.
 
-```json
-{
-  "version": "0.2.0",
-  "notes": "Release notes shown inside ShowNet.",
-  "publishedAt": "2026-07-30T12:00:00Z",
-  "platforms": {
-    "darwin-aarch64": {
-      "url": "https://github.com/example/shownet/releases/download/v0.2.0/ShowNet_0.2.0_aarch64.dmg"
-    },
-    "windows-x86_64": {
-      "url": "https://github.com/example/shownet/releases/download/v0.2.0/ShowNetPortable_0.2.0_windows_x86_64.zip"
-    }
-  }
-}
-```
+`src-tauri/src/updates.rs` reads `/releases/latest`, which excludes drafts and
+pre-releases by definition, and maps it as follows:
 
-All manifest and artifact URLs must use HTTPS. The client rejects invalid SemVer, insecure download URLs, responses larger than 128 KB, and release notes larger than 16 KB. `downloadUrl` is accepted as a platform-independent fallback.
+| Release field | Shown as |
+| --- | --- |
+| `tag_name` (leading `v` stripped) | version compared against the running build |
+| `body` | release notes, truncated to 16 KB |
+| `published_at` | publish date |
+| `assets[].browser_download_url` | the download, chosen per platform |
 
-To publish automatically, configure both optional Secrets:
+### Asset naming
 
-- `SHOWNET_UPDATE_PUBLISH_URL`: HTTPS endpoint that accepts the final manifest with `PUT`.
-- `SHOWNET_UPDATE_PUBLISH_TOKEN`: Bearer token accepted by that endpoint.
+Asset selection requires an architecture token **and** an extension the user can
+open, so the checksum and metadata files that sit beside the installers are never
+offered. Keep these names stable:
 
-Set `SHOWNET_UPDATE_PUBLISH_URL` to the deployment endpoint, not necessarily the public read URL. If either Secret is absent, the workflow still publishes the signed GitHub Release and attaches `latest.json`; an operator must then deploy that file to `https://claudegpt.org/shownet/latest.json`.
+- macOS: `ShowNet_<version>_aarch64.dmg`
+- Windows: `ShowNetPortable_<version>_windows_x86_64.zip`
+
+A release with no asset for the current platform falls back to the release page
+rather than reporting an update the user cannot obtain. Downloads must be HTTPS;
+the client rejects invalid SemVer, insecure URLs and responses over 128 KB.
+
+### Rate limit
+
+Unauthenticated GitHub allows 60 requests an hour per address. The client reports
+that explicitly on 403/429, and reports "no release published yet" on 404 rather
+than surfacing a raw HTTP status.
+
+### Pointing somewhere else
+
+A fork can override the endpoint at build time with
+`SHOWNET_UPDATE_MANIFEST_URL`; any endpoint returning the GitHub release schema
+works. No secrets, no deployment step, nothing to keep in sync.
 
 ## Release Procedure
 
@@ -141,8 +154,8 @@ Set `SHOWNET_UPDATE_PUBLISH_URL` to the deployment endpoint, not necessarily the
 3. Create an annotated tag such as `git tag -a v0.2.0 -m "ShowNet 0.2.0"`.
 4. Push the tag. The quality matrix must pass on macOS and Windows before signing begins.
 5. Confirm both platform jobs built and checksum-verified their pinned Agent sidecars, then verified Apple notarization, Gatekeeper assessment, and Windows Authenticode.
-6. Confirm the GitHub Release contains the DMG, Windows PortableApps ZIP and its checksum, `release-verification-macos.json`, `SHA256SUMS.txt`, and `latest.json`.
-7. Confirm the public ClaudeGPT.org manifest returns the same JSON over HTTPS, then use ShowNet's Settings > Check for updates action from both platforms.
+6. Confirm the GitHub Release contains the DMG, Windows PortableApps ZIP and its checksum, `release-verification-macos.json`, and `SHA256SUMS.txt`, and that the asset names match the pattern above — update checking resolves the download from them.
+7. Use ShowNet's Settings > Check for updates action from both platforms.
 
 Local unsigned debug builds do not prove signing or notarization. The release is valid only after the CI verification steps pass with the real production credentials.
 
