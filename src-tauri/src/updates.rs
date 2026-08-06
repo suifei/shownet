@@ -382,15 +382,47 @@ mod tests {
         };
         let bytes = std::fs::read(path).expect("live payload");
         let result = parse_update_manifest(&bytes).expect("live payload must parse");
-        assert_eq!(result.latest_version, "0.1.0");
+        // Deliberately not pinned to a version: every release would break that,
+        // and the version is not what this is checking. What matters is that a
+        // real payload parses and resolves to the right file per platform.
+        Version::parse(&result.latest_version).expect("live tag must be semver");
+
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let assets: Vec<GithubAsset> = serde_json::from_value(value["assets"].clone()).unwrap();
-        for (platform, expected) in [
-            ("darwin-aarch64", "ShowNet_0.1.0_aarch64.dmg"),
-            ("windows-x86_64", "ShowNetPortable_0.1.0_windows_x86_64.zip"),
+        for (platform, extension, decoys) in [
+            ("darwin-aarch64", ".dmg", ["aarch64"].as_slice()),
+            ("windows-x86_64", ".zip", ["windows", "x86_64"].as_slice()),
         ] {
             let url = select_asset(&assets, platform).expect("live release has this build");
-            assert!(url.ends_with(expected), "{platform} picked {url}");
+            assert!(url.ends_with(extension), "{platform} picked {url}");
+            for token in decoys {
+                assert!(url.contains(token), "{platform} picked {url}");
+            }
         }
+    }
+
+    /// The user-facing path this whole change exists to serve: an older client
+    /// looking at the live release must be told an update exists and be handed a
+    /// working download for its own platform.
+    #[test]
+    fn an_older_client_is_offered_the_live_release() {
+        let Ok(path) = std::env::var("SHOWNET_LIVE_RELEASE_JSON") else {
+            return;
+        };
+        let bytes = std::fs::read(path).expect("live payload");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let published = Version::parse(value["tag_name"].as_str().unwrap().trim_start_matches('v'))
+            .expect("live tag is semver");
+        let running = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        // Only meaningful while the build under test is not itself the newest.
+        if published <= running {
+            return;
+        }
+        let result = parse_update_manifest(&bytes).expect("live payload must parse");
+        assert!(result.available, "{result:?}");
+        let url = result
+            .download_url
+            .expect("an update must come with a way to get it");
+        assert!(url.starts_with("https://"), "{url}");
     }
 }
