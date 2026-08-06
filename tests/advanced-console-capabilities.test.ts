@@ -35,9 +35,7 @@ describe("advanced console capability map (shipped pure data)", () => {
       "hooks",
       "rules",
       "fingerprint",
-      "px-replay",
-      "px-compare",
-      "px-tamper",
+      "px",
       "recaptcha",
       "config",
     ];

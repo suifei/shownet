@@ -41,6 +41,7 @@ import {
   tryBrowserNavigate,
   type WebRiskFixtureProbeResult,
 } from "../browserBus";
+import { formatClock } from "../format";
 import type { BrowserHookEvent, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
@@ -188,15 +189,19 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     return () => { disposed = true; void unlisten?.(); };
   }, [desktop, pausedDisplay, sessionId]);
 
-  // True unmount only (app exit): stop Chrome. View switches keep this component mounted.
+  // True unmount only (app exit): stop Chrome. View switches keep this
+  // component mounted, so this must have no dependencies at all — a dep would
+  // let the cleanup fire mid-session and take the user's page down with it.
+  const desktopRef = useRef(desktop);
+  desktopRef.current = desktop;
   useEffect(() => () => {
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
     cdpSocketRef.current = null;
     cdpSendRef.current = null;
     cdpPendingRef.current.clear();
-    if (desktop) void invoke("stop_proxy_browser").catch(() => undefined);
-  }, [desktop]);
+    if (desktopRef.current) void invoke("stop_proxy_browser").catch(() => undefined);
+  }, []);
 
   // Stop capture tears down the isolated proxy Chrome (documented default). Switching nav tabs does not.
   useEffect(() => {
@@ -219,6 +224,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     const syncSize = () => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
+        // A hidden surface measures 0; clamping that to the minimum would
+        // resize the real page instead of leaving it alone.
+        if (!surface.clientWidth || !surface.clientHeight) return;
         const width = Math.max(320, Math.floor(surface.clientWidth));
         const height = Math.max(240, Math.floor(surface.clientHeight));
         cdpSendRef.current?.("Emulation.setDeviceMetricsOverride", {
@@ -1160,7 +1168,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               )}
             </div>
           ) : externalPage ? (
-            <iframe ref={iframeRef} key={currentUrl} src={externalPage} title="ShowNet embedded browser" sandbox="allow-forms allow-scripts allow-same-origin" />
+            <iframe ref={iframeRef} src={externalPage} title="ShowNet embedded browser" sandbox="allow-forms allow-scripts allow-same-origin" />
           ) : (
             <MockTargetPage />
           )}
@@ -1290,7 +1298,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             {filteredHooks.map((event) => (
               <button key={event.id} className={`hook-event ${selectedHookId === event.id ? "is-selected" : ""}`} onClick={() => setSelectedHookId((current) => current === event.id ? "" : event.id)} aria-expanded={selectedHookId === event.id}>
                 <span className={`hook-event__mark tone-${hookTone(event.kind)}`}>{event.kind === "crypto" ? <KeyRound size={14} /> : event.kind === "storage" ? <Cookie size={14} /> : event.kind === "interaction" ? <MousePointer2 size={14} /> : <Code2 size={14} />}</span>
-                <span className="hook-event__content"><strong>{event.name}</strong><small>{hookDetail(event)}</small><em>{formatHookTime(event.timestamp)} · {event.correlation === "unmatched" ? "未关联请求" : "已关联"}</em>{selectedHookId === event.id && <span className="hook-event__details"><span><b>输入</b><code>{hookValuePreview(event.input)}</code></span><span><b>输出</b><code>{hookValuePreview(event.output)}</code></span>{event.durationMs != null && <span><b>耗时</b><code>{event.durationMs.toFixed(2)} ms</code></span>}</span>}</span>
+                <span className="hook-event__content"><strong>{event.name}</strong><small>{hookDetail(event)}</small><em>{formatClock(event.timestamp, true)} · {event.correlation === "unmatched" ? "未关联请求" : "已关联"}</em>{selectedHookId === event.id && <span className="hook-event__details"><span><b>输入</b><code>{hookValuePreview(event.input)}</code></span><span><b>输出</b><code>{hookValuePreview(event.output)}</code></span>{event.durationMs != null && <span><b>耗时</b><code>{event.durationMs.toFixed(2)} ms</code></span>}</span>}</span>
               </button>
             ))}
           </div>
@@ -1335,13 +1343,6 @@ function hookValuePreview(value: unknown) {
   }
   if (!text) return "-";
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
-}
-
-function formatHookTime(timestamp: number) {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return "--:--:--";
-  const value = date.toLocaleTimeString("zh-CN", { hour12: false });
-  return `${value}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function MockTargetPage() {

@@ -1,13 +1,18 @@
 import {
   Activity, Archive, ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Clock3, Code2, Cookie, Copy, Download, FileJson, FileUp, FlaskConical, Folder,
   Eye, EyeOff, FolderInput, FolderOpen, FolderPlus, FolderTree, GitCompareArrows, History, KeyRound, ListRestart, LoaderCircle, LockKeyhole, Pencil, Play, Plus, Save, Search,
-  Pause, RefreshCw, RotateCcw, Route, Send, ShieldCheck, SlidersHorizontal, Square, Tag, Trash2, Upload, X,
+  MoreHorizontal, Pause, RefreshCw, RotateCcw, Route, Send, ShieldCheck, SlidersHorizontal, Square, Tag, Terminal, Trash2, Upload, X,
 } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BUILDABLE_METHODS } from "../httpMethods";
+import { ruleTraceResultLabel } from "../ruleTrace";
+import { SEND_SETTINGS } from "../sendSettings";
+import { useConfirm } from "./ConfirmDialog";
+import { useDismissibleLayer } from "../useDismissibleLayer";
 import { initialCollectionSyncPreview, initialRequestCollectionWorkspace, initialRequests } from "../data";
 import {
   captureRuleActionFromDraft, captureRuleDraftFromRule, captureRuleDraftValidationError, changeRuleDraftOperationTarget, changeRuleDraftStage,
@@ -29,6 +34,8 @@ export type WorkbenchMode = "replay" | "diff" | "lab" | "collections" | "environ
 interface Props {
   sessionId: string;
   selected: RequestListItem[];
+  /** Pending manual breakpoints, surfaced on the 规则 tab from any mode. */
+  breakpointCount: number;
   initialMode: WorkbenchMode;
   autoCreateFromSelection?: boolean;
   onBack: () => void;
@@ -67,7 +74,7 @@ const responseBreakpointManagedHeaders = [
   "connection", "content-encoding", "content-length", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
 ];
 
-export function RequestWorkbench({ sessionId, selected, initialMode, autoCreateFromSelection = false, onBack, onOpenRequest }: Props) {
+export function RequestWorkbench({ sessionId, selected, breakpointCount, initialMode, autoCreateFromSelection = false, onBack, onOpenRequest }: Props) {
   const [mode, setMode] = useState<WorkbenchMode>(initialMode);
   const [requestedDraftId, setRequestedDraftId] = useState<string>();
   const [details, setDetails] = useState<RequestRecord[]>([]);
@@ -94,14 +101,17 @@ export function RequestWorkbench({ sessionId, selected, initialMode, autoCreateF
             const Icon = tab.icon;
             const disabled = tab.id === "replay" && selected.length === 0 || tab.id === "diff" && selected.length !== 2;
             const title = tab.id === "replay" && disabled ? "请先从流量页带入请求" : tab.id === "diff" && disabled ? "请从流量页带入两条请求" : tab.label;
-            return <button key={tab.id} className={mode === tab.id ? "is-active" : ""} disabled={disabled} aria-pressed={mode === tab.id} onClick={() => setMode(tab.id)} title={title}><Icon size={15} /><span>{tab.label}</span></button>;
+            // The breakpoint queue lives inside 规则 and each task expires on a
+            // timer, so its pending count has to be visible from any mode.
+            const badge = tab.id === "rules" && breakpointCount > 0 ? breakpointCount : undefined;
+            return <button key={tab.id} className={mode === tab.id ? "is-active" : ""} disabled={disabled} aria-pressed={mode === tab.id} onClick={() => setMode(tab.id)} title={badge ? `${title} · ${badge} 条断点待处理` : title}><Icon size={15} /><span>{tab.label}</span>{badge !== undefined && <em className="request-workbench__nav-badge">{badge}</em>}</button>;
           })}
           <div className="request-workbench__nav-footer">
             {selected.length > 0 && <span className="request-workbench__context">{selected.length} 条请求上下文</span>}
             <button className="request-workbench__nav-back" onClick={onBack} title="返回流量" aria-label="返回流量"><ArrowLeft size={15} /></button>
           </div>
         </nav>
-        <main className={`request-workbench__content ${mode === "lab" ? "is-lab" : ""}`}>
+        <div className={`request-workbench__content ${mode === "lab" ? "is-lab" : ""}`}>
           {error && <Notice>{error}</Notice>}
           {loading && !["collections", "environment", "rules"].includes(mode) ? <div className="workbench-loading"><LoaderCircle className="spin" size={20} /><span>正在读取请求证据</span></div> : <>
             {mode === "replay" && <ReplayPanel sessionId={sessionId} selected={selected} onOpenRequest={onOpenRequest} />}
@@ -111,12 +121,13 @@ export function RequestWorkbench({ sessionId, selected, initialMode, autoCreateF
             {mode === "environment" && <EnvironmentPanel />}
             {mode === "rules" && <RulesPanel selected={selected} details={details} />}
           </>}
-        </main>
+        </div>
       </div>
     </section>;
 }
 
 function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string; selected: RequestListItem[]; onOpenRequest: (id: string) => void }) {
+  const { confirm, dialog } = useConfirm();
   const [settings, setSettings] = useState(replayDefaults);
   const [batch, setBatch] = useState<ReplayBatch>();
   const [message, setMessage] = useState("");
@@ -133,7 +144,11 @@ function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string
   }, [batch?.id]);
 
   const start = async () => {
-    if (total > 20 && !window.confirm("即将发送 " + total + " 次请求，确认目标允许这次操作？")) return;
+    if (total > 20 && !await confirm({
+      title: `即将发送 ${total} 次请求`,
+      detail: "请确认目标服务允许这样的重放量。",
+      confirmLabel: "开始重放",
+    })) return;
     if (!isTauri()) { setMessage("真实重放需要在桌面应用中运行"); return; }
     setStarting(true); setMessage("");
     try {
@@ -146,6 +161,7 @@ function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string
   };
 
   return <div className="workbench-panel replay-panel">
+    {dialog}
     <section className="workbench-band">
       <Heading title={selected.length + " 条来源请求，计划发送 " + total + " 次"} meta="RANGE" value="硬上限 100" warning={total > 20} />
       <div className="replay-settings-grid">
@@ -158,9 +174,9 @@ function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string
         <Toggle label="经过 ShowNet 抓包" detail="要求当前 Session 正在抓包" checked={settings.throughCapture} onChange={(throughCapture) => setSettings({ ...settings, throughCapture })} />
         <Toggle label="保留 Cookie" detail="默认按原请求携带" checked={settings.includeCookie} onChange={(includeCookie) => setSettings({ ...settings, includeCookie })} />
         <Toggle label="保留 Authorization" detail="默认按原请求携带" checked={settings.includeAuthorization} onChange={(includeAuthorization) => setSettings({ ...settings, includeAuthorization })} />
-        <Toggle label="跟随重定向" detail="最多 10 次" checked={settings.followRedirects} onChange={(followRedirects) => setSettings({ ...settings, followRedirects })} />
-        <Toggle label="验证 TLS" detail="关闭仅用于授权测试" checked={settings.verifyTls} onChange={(verifyTls) => setSettings({ ...settings, verifyTls })} />
-        <Toggle label="使用上游代理" detail="沿用设置中的出口" checked={settings.useUpstreamProxy} onChange={(useUpstreamProxy) => setSettings({ ...settings, useUpstreamProxy })} />
+        <Toggle label={SEND_SETTINGS.followRedirects.label} detail={SEND_SETTINGS.followRedirects.detail} checked={settings.followRedirects} onChange={(followRedirects) => setSettings({ ...settings, followRedirects })} />
+        <Toggle label={SEND_SETTINGS.verifyTls.label} detail={SEND_SETTINGS.verifyTls.detail} checked={settings.verifyTls} onChange={(verifyTls) => setSettings({ ...settings, verifyTls })} />
+        <Toggle label={SEND_SETTINGS.useUpstreamProxy.label} detail={SEND_SETTINGS.useUpstreamProxy.detail} checked={settings.useUpstreamProxy} onChange={(useUpstreamProxy) => setSettings({ ...settings, useUpstreamProxy })} />
       </div>
       <div className="workbench-actions"><span>自动删除 hop-by-hop Header，并重算 Content-Length</span><button className="primary-button" onClick={() => void start()} disabled={starting || total > 100 || !!batch && ["queued", "running"].includes(batch.status)}><Play size={14} />{starting ? "正在创建" : "开始重放"}</button></div>
       {message && <p className="workbench-inline-error">{message}</p>}
@@ -178,6 +194,17 @@ function DiffPanel({ details }: { details: RequestRecord[] }) {
   const [ignored, setIgnored] = useState("headers.x-request-id\nheaders.date\nbody.timestamp");
   const differences = useMemo(() => details.length === 2 ? compareRequestRecords(details[0], details[1], ignored.split(/\r?\n/)) : [], [details, ignored]);
   const sections: RequestDiffEntry["section"][] = ["request", "response", "transport", "evidence"];
+  // Reaching this mode with the wrong selection used to render a bare shell
+  // reading "0 项差异", which looks like "these requests are identical".
+  if (details.length !== 2) {
+    return <div className="workbench-panel diff-panel">
+      <div className="workbench-empty">
+        <GitCompareArrows size={22} />
+        <strong>{details.length < 2 ? "请先选中两条请求" : "一次只能对比两条请求"}</strong>
+        <small>在流量列表按住 ⌘ / Ctrl 点选两条，再从操作栏选「对比」。</small>
+      </div>
+    </div>;
+  }
   return <div className="workbench-panel diff-panel">
     <section className="diff-overview">{details.map((request, index) => <div key={request.id}><span>{index ? "对比 B" : "基线 A"}</span><strong>{request.method} {request.host}{request.path}</strong><small>HTTP {request.status} · {request.protocol} · {request.duration}ms</small></div>)}<div className="diff-count"><strong>{differences.length}</strong><span>项差异</span></div></section>
     <section className="workbench-band diff-ignore"><label><span>忽略动态字段</span><small>每行一个 Header 或 JSON key 路径</small></label><textarea value={ignored} onChange={(event) => setIgnored(event.target.value)} /></section>
@@ -189,6 +216,7 @@ function DiffPanel({ details }: { details: RequestRecord[] }) {
 }
 
 function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initialDraftId, onSelectCapture }: { sessionId: string; selected: RequestListItem[]; details: RequestRecord[]; autoCreateFromSelection: boolean; initialDraftId?: string; onSelectCapture: () => void }) {
+  const { confirm, dialog } = useConfirm();
   const [drafts, setDrafts] = useState<RequestDraft[]>([]);
   const [draft, setDraft] = useState<RequestDraft>();
   const [runs, setRuns] = useState<RequestRun[]>([]);
@@ -198,6 +226,11 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
   const [tab, setTab] = useState<"query" | "headers" | "body" | "auth" | "settings">("headers");
   const [responseTab, setResponseTab] = useState<"body" | "headers" | "history">("body");
   const [curlInput, setCurlInput] = useState("");
+  // cURL import used to exist only on the empty lab screen; once a draft was
+  // open there was no way back to it.
+  const [curlMenuOpen, setCurlMenuOpen] = useState(false);
+  const curlMenuRef = useRef<HTMLDivElement>(null);
+  useDismissibleLayer(curlMenuOpen, curlMenuRef, () => setCurlMenuOpen(false));
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [codeOpen, setCodeOpen] = useState(false);
@@ -361,7 +394,13 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
     } catch (reason) { setMessage(String(reason)); }
   };
   const clearCookies = async () => {
-    if (!isTauri() || !cookies.length || !window.confirm(`清除 Cookie Jar 中的 ${cookies.length} 条 Cookie？`)) return;
+    if (!isTauri() || !cookies.length) return;
+    if (!await confirm({
+      title: `清除 Cookie Jar 中的 ${cookies.length} 条 Cookie？`,
+      detail: "之后的请求将不再携带这些 Cookie。",
+      confirmLabel: "清除",
+      tone: "danger",
+    })) return;
     try {
       setCookies(await invoke<RequestCookieRecord[]>("clear_request_cookies"));
       setMessage("Cookie Jar 已清空");
@@ -390,7 +429,7 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
 
   if (!draft) return <div className="lab-start">
     <header className="lab-start__header">
-      <div><span className="section-kicker">REQUEST LAB</span><h3>新建请求</h3></div>
+      <div><span className="section-kicker">REQUEST LAB</span><h2>新建请求</h2></div>
       <button className="primary-button" onClick={createBlank}><Plus size={14} />空白请求</button>
     </header>
     <div className="lab-start__create-grid">
@@ -459,8 +498,9 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
         : "尚未发送";
   const generatedCode = generateRequestCode({ method: draft.method, url: draft.url, headers: draft.headers, body: draft.body }, codeTemplate);
   return <div className="workbench-panel lab-panel">
-    <header className="lab-request-line"><select value={draft.method} onChange={(event) => setDraft({ ...draft, method: event.target.value })}>{["GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"].map((method) => <option key={method}>{method}</option>)}</select><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />{sending ? <button className="secondary-button lab-cancel-button lab-send-button" onClick={() => void cancel()} title="取消请求"><Square size={13} /><span>取消</span></button> : <button className="primary-button lab-send-button" onClick={() => void send()} title="发送请求"><Send size={14} /><span>发送</span></button>}</header>
-    <div className="lab-context-line"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /><select value={draft.environmentId ?? ""} onChange={(event) => setDraft({ ...draft, environmentId: event.target.value || undefined })}><option value="">{automaticEnvironment ? `自动 · ${automaticEnvironment.name}` : "仅全局环境"}</option>{environments.filter((item) => item.kind === "named").map((item) => <option key={item.id} value={item.id}>{item.name}{item.active ? "（当前）" : ""}</option>)}</select><select className="lab-location-select" aria-label="请求归属" value={draftLocationValue(draft)} onChange={(event) => changeDraftLocation(event.target.value)}><option value="">未归档</option>{collectionLocationOptions(collectionWorkspace).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button className={codeOpen ? "icon-button is-active" : "icon-button"} onClick={() => setCodeOpen((open) => !open)} title="生成代码" aria-label="生成代码" aria-pressed={codeOpen}><Code2 size={14} /></button><button className="icon-button" onClick={() => void openDraftList()} title="草稿列表"><History size={14} /></button><button className="icon-button" onClick={() => void copyCurl()} title="复制完整 cURL"><Copy size={14} /></button><button className="icon-button" onClick={() => void invoke("save_request_draft", { input: draftInput(draft) }).then(() => { setMessage("草稿已保存"); void loadCollections(); })} title="保存草稿"><Save size={14} /></button></div>
+    {dialog}
+    <header className="lab-request-line"><select value={draft.method} onChange={(event) => setDraft({ ...draft, method: event.target.value })}>{BUILDABLE_METHODS.map((method) => <option key={method}>{method}</option>)}</select><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />{sending ? <button className="secondary-button lab-cancel-button lab-send-button" onClick={() => void cancel()} title="取消请求"><Square size={13} /><span>取消</span></button> : <button className="primary-button lab-send-button" onClick={() => void send()} title="发送请求"><Send size={14} /><span>发送</span></button>}</header>
+    <div className="lab-context-line"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /><select value={draft.environmentId ?? ""} onChange={(event) => setDraft({ ...draft, environmentId: event.target.value || undefined })}><option value="">{automaticEnvironment ? `自动 · ${automaticEnvironment.name}` : "仅全局环境"}</option>{environments.filter((item) => item.kind === "named").map((item) => <option key={item.id} value={item.id}>{item.name}{item.active ? "（当前）" : ""}</option>)}</select><select className="lab-location-select" aria-label="请求归属" value={draftLocationValue(draft)} onChange={(event) => changeDraftLocation(event.target.value)}><option value="">未归档</option>{collectionLocationOptions(collectionWorkspace).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button className={codeOpen ? "icon-button is-active" : "icon-button"} onClick={() => setCodeOpen((open) => !open)} title="生成代码" aria-label="生成代码" aria-pressed={codeOpen}><Code2 size={14} /></button><button className="icon-button" onClick={() => void openDraftList()} title="草稿列表"><History size={14} /></button><div className="lab-curl-anchor" ref={curlMenuRef}><button className={curlMenuOpen ? "icon-button is-active" : "icon-button"} onClick={() => setCurlMenuOpen((open) => !open)} title="cURL 导入与导出" aria-expanded={curlMenuOpen}><Terminal size={14} /></button>{curlMenuOpen && <div className="lab-curl-menu"><div className="lab-curl-menu__head"><strong>cURL</strong><button className="secondary-button" onClick={() => { void copyCurl(); setCurlMenuOpen(false); }}><Copy size={13} />复制当前请求</button></div><textarea value={curlInput} onChange={(event) => setCurlInput(event.target.value)} aria-label="粘贴 cURL 命令" placeholder="curl https://api.example.com/..." rows={4} /><div className="lab-curl-menu__foot"><small>导入会覆盖当前草稿的方法、URL、Header 与正文</small><button className="primary-button" onClick={() => { importCurl(); setCurlMenuOpen(false); }} disabled={!curlInput.trim()}>导入</button></div></div>}</div><button className="icon-button" onClick={() => void invoke("save_request_draft", { input: draftInput(draft) }).then(() => { setMessage("草稿已保存"); void loadCollections(); }).catch((reason) => setMessage(`保存草稿失败：${String(reason)}`))} title="保存草稿"><Save size={14} /></button></div>
     {codeOpen && <section className="lab-code-panel" aria-label="生成代码">
       <header><div><Code2 size={14} /><strong>生成代码</strong></div><div className="lab-code-panel__actions"><select aria-label="代码语言" value={codeTemplate} onChange={(event) => setCodeTemplate(event.target.value as RequestCodeTemplate)}>{requestCodeTemplates.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><button className="icon-button" onClick={() => void copyGeneratedCode()} title="复制代码" aria-label="复制代码"><Copy size={14} /></button><button className="icon-button" onClick={() => setCodeOpen(false)} title="关闭生成代码" aria-label="关闭生成代码"><X size={14} /></button></div></header>
       <pre className="lab-generated-code">{generatedCode}</pre>
@@ -470,7 +510,7 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
     <div className="lab-split">
       <div className="lab-request-pane">
         <div className="lab-tabs">{(["query","headers","body","auth","settings"] as const).map((item) => {
-          const label = ({ query: "Query", headers: "Headers", body: "Body", auth: "Auth", settings: "Settings" })[item];
+          const label = ({ query: "参数", headers: "请求头", body: "请求体", auth: "认证", settings: "发送设置" })[item];
           const badge = item === "query" ? queryCount : item === "headers" ? (inheritedHeaderCount ? `${draft.headers.length}+${inheritedHeaderCount}` : draft.headers.length) : item === "body" ? bodyTypeBadges[draft.bodyType] : item === "auth" && (String(draft.auth.kind ?? "none") !== "none" || inheritedAuthKind !== "none") ? "ON" : undefined;
           return <button key={item} className={tab === item ? "is-active" : ""} onClick={() => setTab(item)}><span>{label}</span>{badge !== undefined && <em>{badge}</em>}</button>;
         })}</div>
@@ -479,7 +519,7 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
           {tab === "headers" && <HeaderEditor headers={draft.headers} inheritedCount={inheritedHeaderCount} onChange={(headers) => setDraft({ ...draft, headers })} />}
           {tab === "body" && <><div className="lab-body-type"><select aria-label="正文类型" value={draft.bodyType} onChange={(event) => { const type = event.target.value as typeof bodyTypes[number]; setDraft({ ...draft, bodyType: type, body: bodyForType(type, draft.bodyType, draft.body) }); }}>{bodyTypes.map((type) => <option key={type} value={type}>{bodyTypeLabels[type]}</option>)}</select></div>{draft.bodyType === "form-data" || draft.bodyType === "urlencoded" ? <StructuredBodyEditor mode={draft.bodyType} value={draft.body} onChange={(body) => setDraft({ ...draft, body })} /> : draft.bodyType === "file" ? <FileBodyEditor value={draft.body} onChange={(body) => setDraft({ ...draft, body })} /> : <textarea className="lab-body-editor" value={draft.body} disabled={draft.bodyType === "none"} onChange={(event) => setDraft({ ...draft, body: event.target.value })} />}</>}
           {tab === "auth" && <AuthEditor auth={draft.auth} inheritedKind={inheritedAuthKind} onChange={(auth) => setDraft({ ...draft, auth })} onReveal={() => invoke<Record<string, unknown>>("reveal_request_draft_auth", { draftId: draft.id })} />}
-          {tab === "settings" && <div className="lab-settings-stack"><div className="lab-settings"><Toggle label="跟随重定向" detail="最多 10 次" checked={draft.settings.followRedirects !== false} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, followRedirects: value } })} /><Toggle label="验证 TLS" detail="默认开启" checked={draft.settings.verifyTls !== false} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, verifyTls: value } })} /><Toggle label="Cookie Jar" detail={`${cookies.length} 条 · 本机密文`} checked={draft.settings.cookieJar === true} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, cookieJar: value } })} /><Toggle label="使用上游代理" detail="沿用全局出口设置" checked={draft.settings.useUpstreamProxy === true} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, useUpstreamProxy: value } })} /></div>{draft.settings.cookieJar === true && <CookieJarManager cookies={cookies} onDelete={deleteCookie} onClear={clearCookies} />}</div>}
+          {tab === "settings" && <div className="lab-settings-stack"><div className="lab-settings"><Toggle label={SEND_SETTINGS.followRedirects.label} detail={SEND_SETTINGS.followRedirects.detail} checked={draft.settings.followRedirects !== false} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, followRedirects: value } })} /><Toggle label={SEND_SETTINGS.verifyTls.label} detail={SEND_SETTINGS.verifyTls.detail} checked={draft.settings.verifyTls !== false} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, verifyTls: value } })} /><Toggle label="Cookie Jar" detail={`${cookies.length} 条 · 本机密文`} checked={draft.settings.cookieJar === true} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, cookieJar: value } })} /><Toggle label={SEND_SETTINGS.useUpstreamProxy.label} detail={SEND_SETTINGS.useUpstreamProxy.detail} checked={draft.settings.useUpstreamProxy === true} onChange={(value) => setDraft({ ...draft, settings: { ...draft.settings, useUpstreamProxy: value } })} /></div>{draft.settings.cookieJar === true && <CookieJarManager cookies={cookies} onDelete={deleteCookie} onClear={clearCookies} />}</div>}
         </section>
         {message && <p className="workbench-inline-error lab-message">{message}</p>}
       </div>
@@ -487,7 +527,7 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
         <header><div><span>响应</span><strong>{responseStatus}</strong></div><span>{response?.durationMs ? String(response.durationMs) + "ms" : ""}</span></header>
         {runs.length > 0 && <>
           {runs[0]?.error && <Notice>{runs[0].error}</Notice>}
-          <div className="lab-response-tabs">{(["body","headers","history"] as const).map((item) => <button key={item} className={responseTab === item ? "is-active" : ""} onClick={() => setResponseTab(item)}>{({ body: "Body", headers: "Headers", history: `历史 ${runs.length}` })[item]}</button>)}</div>
+          <div className="lab-response-tabs">{(["body","headers","history"] as const).map((item) => <button key={item} className={responseTab === item ? "is-active" : ""} onClick={() => setResponseTab(item)}>{({ body: "响应体", headers: "响应头", history: `历史 ${runs.length}` })[item]}</button>)}</div>
           <div className="lab-response-content">
             {responseTab === "body" && <HttpBodyViewer content={response?.body == null ? undefined : String(response.body)} headers={responseHeaders} metadata={responseMetadata} filename={`${draft.id}-response-body.txt`} />}
             {responseTab === "headers" && <pre>{responseHeaders.length ? responseHeaders.map((header) => header.name + ": " + header.value).join("\n") : "响应 Header 为空"}</pre>}
@@ -511,12 +551,16 @@ interface CollectionDefaultsDraft {
 }
 
 function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: string; selected: RequestListItem[]; onOpenDraft: (draftId: string) => void }) {
+  const { confirm, dialog } = useConfirm();
   const [workspace, setWorkspace] = useState<RequestCollectionWorkspace>(emptyCollectionWorkspace());
   const [selectedCollectionId, setSelectedCollectionId] = useState<string>();
   const [selectedFolderId, setSelectedFolderId] = useState<string>();
   const [expandedCollections, setExpandedCollections] = useState<Set<string>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [editor, setEditor] = useState<CollectionEditor>();
+  const [paneMenuOpen, setPaneMenuOpen] = useState(false);
+  const paneMenuRef = useRef<HTMLDivElement>(null);
+  useDismissibleLayer(paneMenuOpen, paneMenuRef, () => setPaneMenuOpen(false));
   const [preview, setPreview] = useState<CollectionImportPreview>();
   const [syncPreview, setSyncPreview] = useState<CollectionSyncPreview>();
   const [syncSelection, setSyncSelection] = useState<Set<string>>(new Set());
@@ -533,9 +577,15 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
   const [tagInput, setTagInput] = useState("");
 
   const load = async () => {
-    const result = isTauri()
-      ? await invoke<RequestCollectionWorkspace>("list_request_collection_workspace")
-      : initialRequestCollectionWorkspace;
+    let result: RequestCollectionWorkspace;
+    try {
+      result = isTauri()
+        ? await invoke<RequestCollectionWorkspace>("list_request_collection_workspace")
+        : initialRequestCollectionWorkspace;
+    } catch (reason) {
+      setMessage(`读取请求集合失败：${String(reason)}`);
+      return;
+    }
     setWorkspace(result);
     setSelectedDraftIds((current) => new Set([...current].filter((id) => result.drafts.some((draft) => draft.id === id))));
     setExpandedCollections((current) => {
@@ -608,13 +658,27 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
   const removeCurrent = async () => {
     if (!isTauri()) return;
     if (selectedFolder) {
-      if (!window.confirm(`删除文件夹“${selectedFolder.name}”？其中的请求会移到集合根目录，不会被删除。`)) return;
-      await invoke("delete_request_collection_folder", { folderId: selectedFolder.id });
-      setSelectedFolderId(selectedFolder.parentId); setMessage("文件夹已删除，请求已保留"); await load();
+      if (!await confirm({
+        title: `删除文件夹“${selectedFolder.name}”？`,
+        detail: "其中的请求会移到集合根目录，不会被删除。",
+        confirmLabel: "删除文件夹",
+        tone: "danger",
+      })) return;
+      try {
+        await invoke("delete_request_collection_folder", { folderId: selectedFolder.id });
+        setSelectedFolderId(selectedFolder.parentId); setMessage("文件夹已删除，请求已保留"); await load();
+      } catch (reason) { setMessage(`删除文件夹失败：${String(reason)}`); }
     } else if (selectedCollection) {
-      if (!window.confirm(`删除集合“${selectedCollection.name}”？其中的请求会变为未归档，不会被删除。`)) return;
-      await invoke("delete_request_collection", { collectionId: selectedCollection.id });
-      setSelectedCollectionId(undefined); setMessage("集合已删除，请求已移到未归档"); await load();
+      if (!await confirm({
+        title: `删除集合“${selectedCollection.name}”？`,
+        detail: "其中的请求会变为未归档，不会被删除。",
+        confirmLabel: "删除集合",
+        tone: "danger",
+      })) return;
+      try {
+        await invoke("delete_request_collection", { collectionId: selectedCollection.id });
+        setSelectedCollectionId(undefined); setMessage("集合已删除，请求已移到未归档"); await load();
+      } catch (reason) { setMessage(`删除集合失败：${String(reason)}`); }
     }
   };
   const toggleDraftSelection = (draftId: string) => {
@@ -794,6 +858,7 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
   };
 
   return <div className="collection-workspace">
+    {dialog}
     <aside className="collection-tree-pane">
       <header><div><span className="section-kicker">REQUEST ASSETS</span><strong>请求集合</strong></div><span><button onClick={() => setEditor({ kind: "collection", name: "" })} title="新建集合"><Plus size={14} /></button></span></header>
       <button className="collection-import-action" onClick={() => void chooseImport()} title="导入浏览器 HAR、Postman、Insomnia、OpenAPI 或 ShowNet 集合"><FileUp size={13} /><span>导入 HAR / API 集合</span></button>
@@ -807,7 +872,7 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
       })}</div>
       {!workspace.collections.length && <div className="collection-tree-empty"><FolderPlus size={18} /><span>还没有请求集合</span></div>}
     </aside>
-    <main className="collection-main-pane">
+    <div className="collection-main-pane">
       {syncPreview ? <CollectionSyncPanel
         preview={syncPreview}
         selection={syncSelection}
@@ -824,7 +889,23 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
         <div className="collection-import-list">{preview.items.map((item, index) => <label key={`${index}-${item.name}`}><input type="checkbox" checked={importSelection.has(index)} onChange={() => setImportSelection(toggleSet(importSelection, index))} /><span className={`method method-${item.method.toLowerCase()}`}>{item.method}</span><span><strong>{item.name}</strong><small>{[...item.folderPath, item.url].join(" / ")}</small></span></label>)}</div>
         <footer><span>导入在单个数据库事务中完成，失败不会留下半个集合</span><button className="primary-button" onClick={() => void commitImport()} disabled={busy || !importSelection.size || (!importCollectionId && !importName.trim())}>{busy ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}导入选中请求</button></footer>
       </section> : defaultsOpen && selectedCollection ? <CollectionDefaultsPanel key={`${selectedCollection.id}-${selectedCollection.updatedAt}`} collection={selectedCollection} environments={environments} busy={busy} onClose={() => setDefaultsOpen(false)} onSave={saveCollectionDefaults} /> : <>
-        <header className="collection-pane-heading"><div><span>{searchActive ? "SEARCH" : selectedFolder ? "FOLDER" : selectedCollection ? "COLLECTION" : "UNFILED"}</span><h3>{searchActive ? "搜索结果" : selectedFolder?.name ?? selectedCollection?.name ?? "未归档请求"}</h3></div><div className="collection-pane-actions">{selectedCollection && <>{selectedCollection.sourceFormat === "openapi" && <button onClick={() => void previewCollectionSync()} title="同步 OpenAPI 规范"><RefreshCw size={14} /></button>}<button onClick={() => { setDefaultsOpen(true); setEditor(undefined); }} title="集合公共配置"><SlidersHorizontal size={14} /></button><button onClick={() => setEditor({ kind: "folder", collectionId: selectedCollection.id, parentId: selectedFolder?.id, name: "" })} title="新建文件夹"><FolderPlus size={14} /></button>{selected.length === 1 && <button onClick={() => void archiveCapture()} title="归档当前抓包请求"><Archive size={14} /></button>}<button onClick={() => void exportCollection("shownet")} title="导出 ShowNet JSON"><Download size={14} /></button><button onClick={() => void exportCollection("postman")} title="导出 Postman"><FileJson size={14} /></button><button onClick={() => selectedFolder ? setEditor({ kind: "folder", id: selectedFolder.id, collectionId: selectedFolder.collectionId, parentId: selectedFolder.parentId, name: selectedFolder.name }) : setEditor({ kind: "collection", id: selectedCollection.id, name: selectedCollection.name })} title="重命名"><Pencil size={14} /></button><button className="is-danger" onClick={() => void removeCurrent()} title={selectedFolder ? "删除文件夹并保留请求" : "删除集合并保留请求"}><Trash2 size={14} /></button></>}</div></header>
+        <header className="collection-pane-heading"><div><span>{searchActive ? "SEARCH" : selectedFolder ? "FOLDER" : selectedCollection ? "COLLECTION" : "UNFILED"}</span><h3>{searchActive ? "搜索结果" : selectedFolder?.name ?? selectedCollection?.name ?? "未归档请求"}</h3></div><div className="collection-pane-actions">{selectedCollection && <>
+          {selected.length === 1 && <button className="collection-pane-action" onClick={() => void archiveCapture()} title="把当前选中的抓包请求存进这个集合"><Archive size={14} />归档抓包</button>}
+          <button className="collection-pane-action" onClick={() => setEditor({ kind: "folder", collectionId: selectedCollection.id, parentId: selectedFolder?.id, name: "" })}><FolderPlus size={14} />新建文件夹</button>
+          <div className="collection-pane-more" ref={paneMenuRef}>
+            <button className="collection-pane-action" onClick={() => setPaneMenuOpen((open) => !open)} aria-expanded={paneMenuOpen} title="更多集合操作"><MoreHorizontal size={14} />更多</button>
+            {paneMenuOpen && <div className="collection-pane-menu" role="menu" aria-label="集合操作">
+              <button role="menuitem" onClick={() => { setDefaultsOpen(true); setEditor(undefined); setPaneMenuOpen(false); }}><SlidersHorizontal size={14} />集合公共配置</button>
+              {selectedCollection.sourceFormat === "openapi" && <button role="menuitem" onClick={() => { void previewCollectionSync(); setPaneMenuOpen(false); }}><RefreshCw size={14} />同步 OpenAPI 规范</button>}
+              <button role="menuitem" onClick={() => { setPaneMenuOpen(false); selectedFolder ? setEditor({ kind: "folder", id: selectedFolder.id, collectionId: selectedFolder.collectionId, parentId: selectedFolder.parentId, name: selectedFolder.name }) : setEditor({ kind: "collection", id: selectedCollection.id, name: selectedCollection.name }); }}><Pencil size={14} />重命名</button>
+              <i />
+              <button role="menuitem" onClick={() => { void exportCollection("shownet"); setPaneMenuOpen(false); }}><Download size={14} />导出 ShowNet JSON</button>
+              <button role="menuitem" onClick={() => { void exportCollection("postman"); setPaneMenuOpen(false); }}><FileJson size={14} />导出 Postman</button>
+              <i />
+              <button role="menuitem" className="is-danger" onClick={() => { void removeCurrent(); setPaneMenuOpen(false); }}><Trash2 size={14} />{selectedFolder ? "删除文件夹（保留请求）" : "删除集合（保留请求）"}</button>
+            </div>}
+          </div>
+        </>}</div></header>
         <div className="collection-search-bar">
           <label className="collection-search-field"><Search size={13} /><input aria-label="搜索请求集合" value={search} onChange={(event) => { setSearch(event.target.value); setSelectedDraftIds(new Set()); }} placeholder="搜索名称、方法、URL、标签或集合路径" />{search && <button onClick={() => { setSearch(""); setSelectedDraftIds(new Set()); }} title="清除搜索"><X size={12} /></button>}</label>
           <label className="collection-select-visible"><input type="checkbox" checked={allVisibleSelected} disabled={!visibleDrafts.length} onChange={toggleVisibleSelection} /><span>{searchActive ? `${visibleDrafts.length} 个结果` : `选择当前 ${visibleDrafts.length} 条`}</span></label>
@@ -855,7 +936,7 @@ function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: stri
         </footer>}
       </>}
       {message && <p className={`workbench-inline-error collection-message ${selectedDraftIds.size ? "has-batch" : ""}`}>{message}</p>}
-    </main>
+    </div>
   </div>;
 }
 
@@ -953,6 +1034,7 @@ function QueryEditor({ url, onChange }: { url: string; onChange: (url: string) =
 }
 
 function EnvironmentPanel() {
+  const { confirm, dialog } = useConfirm();
   const [environments, setEnvironments] = useState<EnvironmentRecord[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [name, setName] = useState("");
@@ -962,39 +1044,57 @@ function EnvironmentPanel() {
   const selected = environments.find((item) => item.id === selectedId) ?? environments[0];
   const load = async () => {
     if (!isTauri()) return;
-    const result = await invoke<EnvironmentRecord[]>("list_environments");
-    setEnvironments(result);
-    setSelectedId((current) => current || result.find((item) => item.active)?.id || result[0]?.id || "");
+    try {
+      const result = await invoke<EnvironmentRecord[]>("list_environments");
+      setEnvironments(result);
+      setSelectedId((current) => current || result.find((item) => item.active)?.id || result[0]?.id || "");
+    } catch (reason) { setMessage(`读取环境失败：${String(reason)}`); }
   };
   useEffect(() => { void load(); }, []);
   const create = async (kind: "global" | "named") => {
     if (!isTauri()) { setMessage("环境持久化需要桌面应用"); return; }
-    const saved = await invoke<EnvironmentRecord>("save_environment", { input: { name: kind === "global" ? "全局环境" : name.trim(), kind, active: kind === "named" && !environments.some((item) => item.kind === "named" && item.active) } });
-    setName(""); await load(); setSelectedId(saved.id);
+    try {
+      const saved = await invoke<EnvironmentRecord>("save_environment", { input: { name: kind === "global" ? "全局环境" : name.trim(), kind, active: kind === "named" && !environments.some((item) => item.kind === "named" && item.active) } });
+      setName(""); await load(); setSelectedId(saved.id);
+    } catch (reason) { setMessage(`创建环境失败：${String(reason)}`); }
   };
   const activate = async (item: EnvironmentRecord) => {
     if (!isTauri()) return;
-    await invoke("save_environment", { input: { id: item.id, name: item.name, kind: item.kind, active: true } });
-    await load();
+    try {
+      await invoke("save_environment", { input: { id: item.id, name: item.name, kind: item.kind, active: true } });
+      await load();
+    } catch (reason) { setMessage(`切换环境失败：${String(reason)}`); }
   };
   const saveVariable = async () => {
     if (!selected || !variable.name.trim() || !isTauri()) return;
-    await invoke("save_environment_variable", { input: { id: variable.id, environmentId: selected.id, name: variable.name, value: variable.value || undefined, secret: variable.secret, enabled: true } });
-    if (variable.id) setRevealedValues((current) => { const next = { ...current }; delete next[variable.id!]; return next; });
-    setVariable({ name: "", value: "", secret: false }); await load();
+    try {
+      await invoke("save_environment_variable", { input: { id: variable.id, environmentId: selected.id, name: variable.name, value: variable.value || undefined, secret: variable.secret, enabled: true } });
+      if (variable.id) setRevealedValues((current) => { const next = { ...current }; delete next[variable.id!]; return next; });
+      setVariable({ name: "", value: "", secret: false }); await load();
+    } catch (reason) { setMessage(`保存变量失败：${String(reason)}`); }
   };
   const editVariable = (item: EnvironmentVariable) => setVariable({ id: item.id, name: item.name, value: item.secret ? "" : item.value, secret: item.secret });
   const toggleVariable = async (item: EnvironmentVariable) => {
     if (!selected || !isTauri()) return;
-    await invoke("save_environment_variable", { input: { id: item.id, environmentId: selected.id, name: item.name, secret: item.secret, enabled: !item.enabled } });
-    await load();
+    try {
+      await invoke("save_environment_variable", { input: { id: item.id, environmentId: selected.id, name: item.name, secret: item.secret, enabled: !item.enabled } });
+      await load();
+    } catch (reason) { setMessage(`更新变量失败：${String(reason)}`); }
   };
   const deleteVariable = async (item: EnvironmentVariable) => {
-    if (!isTauri() || !window.confirm(`删除变量“${item.name}”？`)) return;
-    await invoke("delete_environment_variable", { variableId: item.id });
-    setRevealedValues((current) => { const next = { ...current }; delete next[item.id]; return next; });
-    if (variable.id === item.id) setVariable({ name: "", value: "", secret: false });
-    await load();
+    if (!isTauri()) return;
+    try {
+      if (!await confirm({
+        title: `删除变量“${item.name}”？`,
+        detail: item.secret ? "这是一个 Secret，删除后无法恢复。" : "引用该变量的请求会解析失败。",
+        confirmLabel: "删除",
+        tone: "danger",
+      })) return;
+      await invoke("delete_environment_variable", { variableId: item.id });
+      setRevealedValues((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      if (variable.id === item.id) setVariable({ name: "", value: "", secret: false });
+      await load();
+    } catch (reason) { setMessage(`删除变量失败：${String(reason)}`); }
   };
   const toggleVariableValue = async (item: EnvironmentVariable) => {
     if (item.id in revealedValues) {
@@ -1008,12 +1108,21 @@ function EnvironmentPanel() {
     } catch (reason) { setMessage(String(reason)); }
   };
   const deleteSelectedEnvironment = async () => {
-    if (!selected || !isTauri() || !window.confirm(`删除环境“${selected.name}”及其变量？`)) return;
-    await invoke("delete_environment", { environmentId: selected.id });
-    setSelectedId(""); await load();
+    if (!selected || !isTauri()) return;
+    try {
+      if (!await confirm({
+        title: `删除环境“${selected.name}”？`,
+        detail: "环境中的全部变量会一并删除，包括 Secret。",
+        confirmLabel: "删除环境",
+        tone: "danger",
+      })) return;
+      await invoke("delete_environment", { environmentId: selected.id });
+      setSelectedId(""); await load();
+    } catch (reason) { setMessage(`删除环境失败：${String(reason)}`); }
   };
 
   return <div className="workbench-panel environment-panel">
+    {dialog}
     <aside className="environment-list"><header><strong>环境</strong><span>{environments.length}</span></header>{environments.map((item) => <button key={item.id} className={selected?.id === item.id ? "is-active" : ""} onClick={() => setSelectedId(item.id)}><span>{item.name}</span><small>{item.kind === "global" ? "全局" : item.active ? "当前激活" : "命名环境"}</small>{item.active && <Check size={13} />}</button>)}{!environments.some((item) => item.kind === "global") && <button className="environment-global-create" onClick={() => void create("global")}><Plus size={13} /><span>创建全局环境</span></button>}<div className="environment-create"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="命名环境" onKeyDown={(event) => { if (event.key === "Enter" && name.trim()) void create("named"); }} /><button className="environment-create__submit" disabled={!name.trim()} onClick={() => void create("named")} title="创建命名环境" aria-label="创建命名环境"><Plus size={13} /></button></div></aside>
     <section className="environment-editor">{selected ? <>
       <Heading meta={selected.kind === "global" ? "GLOBAL" : "NAMED"} title={selected.name} value={selected.active ? "当前激活" : ""} />
@@ -1022,11 +1131,23 @@ function EnvironmentPanel() {
       <div className="environment-builtins"><code>{"{{timestamp}}"}</code><code>{"{{timestamp_ms}}"}</code><code>{"{{iso_datetime}}"}</code><code>{"{{uuid}}"}</code></div>
       <div className="environment-table"><div><span>变量</span><span>值</span><span>类型</span><span>状态 / 操作</span></div>{selected.variables.map((item) => <div key={item.id}><code>{item.name}</code><span>{item.secret ? revealedValues[item.id] ?? "••••••••" : item.value}</span><small>{item.secret ? "Secret" : "普通"}</small><span className="environment-row-actions">{item.secret && <button onClick={() => void toggleVariableValue(item)} title={item.id in revealedValues ? "隐藏实际值" : "显示实际值"}>{item.id in revealedValues ? <EyeOff size={11} /> : <Eye size={11} />}</button>}<button className={item.enabled ? "is-enabled" : ""} onClick={() => void toggleVariable(item)}>{item.enabled ? "启用" : "停用"}</button><button onClick={() => editVariable(item)} title="编辑变量"><Pencil size={11} /></button><button onClick={() => void deleteVariable(item)} title="删除变量"><Trash2 size={11} /></button></span></div>)}</div>
       <div className="environment-variable-create"><input value={variable.name} onChange={(event) => setVariable({ ...variable, name: event.target.value })} placeholder="variable_name" /><input type={variable.secret ? "password" : "text"} value={variable.value} onChange={(event) => setVariable({ ...variable, value: event.target.value })} placeholder={variable.id && variable.secret ? "留空保留原 Secret" : "变量值"} /><label><input type="checkbox" checked={variable.secret} onChange={(event) => setVariable({ ...variable, secret: event.target.checked })} />Secret</label><button className="primary-button" onClick={() => void saveVariable()} disabled={!variable.name.trim()}>{variable.id ? <Save size={13} /> : <Plus size={13} />}{variable.id ? "保存" : "添加"}</button>{variable.id && <button className="secondary-button" onClick={() => setVariable({ name: "", value: "", secret: false })}><X size={13} /></button>}</div>
-    </> : <div className="workbench-loading"><KeyRound size={22} /><span>创建环境后管理变量</span></div>}{message && <p className="workbench-inline-error">{message}</p>}</section>
+    </> : <div className="workbench-empty">
+      <KeyRound size={22} />
+      <strong>还没有环境</strong>
+      {/* A bare "创建环境后管理变量" left the reader with no idea what an
+          environment is for, or which of the two create buttons to use. */}
+      <small>
+        把域名、Token、密钥这类会变的值抽成变量，请求里写 <code>{"{{base_url}}"}</code> 就能在开发、测试、线上之间切换，不用改每一条请求。
+      </small>
+      <small>
+        <strong>全局环境</strong>始终生效，适合放固定不变的值；<strong>命名环境</strong>可以建多个并随时切换，同名变量优先于全局。
+      </small>
+    </div>}{message && <p className="workbench-inline-error">{message}</p>}</section>
   </div>;
 }
 
 function RulesPanel({ selected, details }: { selected: RequestListItem[]; details: RequestRecord[] }) {
+  const { confirm, dialog } = useConfirm();
   const [rules, setRules] = useState<CaptureRule[]>([]);
   const [draft, setDraft] = useState<RuleDraft>(createEmptyRuleDraft);
   const [editingId, setEditingId] = useState("");
@@ -1037,7 +1158,12 @@ function RulesPanel({ selected, details }: { selected: RequestListItem[]; detail
   const [message, setMessage] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
   const selectedRequestId = selected.length === 1 ? selected[0].id : "";
-  const load = async () => { if (isTauri()) setRules(await invoke<CaptureRule[]>("list_capture_rules")); };
+  const load = async () => {
+    if (!isTauri()) return;
+    try {
+      setRules(await invoke<CaptureRule[]>("list_capture_rules"));
+    } catch (reason) { setMessage(`读取规则失败：${String(reason)}`); }
+  };
   useEffect(() => { void load(); }, []);
   useEffect(() => {
     if (!isTauri() || !selectedRequestId) { setRuleTraces([]); return; }
@@ -1071,7 +1197,12 @@ function RulesPanel({ selected, details }: { selected: RequestListItem[]; detail
     } catch (reason) { setMessage(String(reason)); }
   };
   const restoreRevision = async (item: CaptureRuleRevision) => {
-    if (!isTauri() || !window.confirm(`恢复 v${item.revision} 的内容为新的停用版本？`)) return;
+    if (!isTauri()) return;
+    if (!await confirm({
+      title: `恢复 v${item.revision} 的内容？`,
+      detail: "会创建一个新的停用版本，当前版本保留在历史中。",
+      confirmLabel: "恢复为新版本",
+    })) return;
     try {
       const restored = await invoke<CaptureRule>("restore_capture_rule_revision", { ruleId: item.ruleId, revision: item.revision });
       setMessage(`已从 v${item.revision} 创建 v${restored.revision}，规则保持停用`);
@@ -1083,14 +1214,20 @@ function RulesPanel({ selected, details }: { selected: RequestListItem[]; detail
     const isBreakpoint = rule.action.kind === "breakpoint";
     const isMirror = rule.action.kind === "mirror";
     const isRedirect = rule.action.kind === "redirect";
+    const confirmKind = isBreakpoint ? "人工断点" : isMirror ? "镜像" : isRedirect ? "请求转发" : "规则";
     const confirmation = isBreakpoint
-      ? `启用人工断点“${rule.name}”？匹配流量会暂停，等待你放行或中止。`
+      ? "匹配流量会暂停，等待你放行或中止。"
       : isMirror
-        ? `启用镜像“${rule.name}”？新建连接会改向 ${String(rule.action.targetHost ?? "目标地址")}，已有 Keep-Alive 连接不受影响。`
+        ? `新建连接会改向 ${String(rule.action.targetHost ?? "目标地址")}，已有 Keep-Alive 连接不受影响。`
         : isRedirect
-          ? `启用请求转发“${rule.name}”？匹配请求会改发到 ${String(rule.action.targetTemplate ?? "目标地址")}。${rule.action.preserveCredentials === true ? "此规则会保留认证信息与 Cookie，请确认目标可信。" : "跨域时默认移除认证信息与 Cookie。"}`
-      : `启用规则“${rule.name}”（优先级 ${rule.priority}）？规则会影响后续匹配流量。`;
-    if (!rule.enabled && !window.confirm(confirmation)) return;
+          ? `匹配请求会改发到 ${String(rule.action.targetTemplate ?? "目标地址")}。${rule.action.preserveCredentials === true ? "此规则会保留认证信息与 Cookie，请确认目标可信。" : "跨域时默认移除认证信息与 Cookie。"}`
+      : `优先级 ${rule.priority}，会影响后续匹配流量。`;
+    if (!rule.enabled && !await confirm({
+      title: `启用${confirmKind}“${rule.name}”？`,
+      detail: confirmation,
+      confirmLabel: "启用规则",
+      tone: isBreakpoint || isMirror || isRedirect ? "danger" : "default",
+    })) return;
     try { await invoke("set_capture_rule_enabled", { ruleId: rule.id, enabled: !rule.enabled, confirmed: !rule.enabled }); await load(); } catch (reason) { setMessage(String(reason)); }
   };
   const runPreview = async (rule: CaptureRule) => {
@@ -1134,8 +1271,16 @@ function RulesPanel({ selected, details }: { selected: RequestListItem[]; detail
 
   const validationError = captureRuleDraftValidationError(draft);
   return <div className="workbench-panel rules-panel">
+    {dialog}
     <BreakpointConsole />
-    <section className="rule-list"><div className="rule-list-heading"><Heading meta="DECLARATIVE RULES" title="规则、版本与执行轨迹" value={rules.filter((rule) => rule.enabled).length + " 条启用"} /><div><button className="secondary-button" onClick={exportRules} disabled={!rules.length}><Download size={13} />导出</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={13} />导入</button><input ref={importRef} type="file" accept="application/json,.json" onChange={(event) => void importRules(event)} hidden /></div></div>{rules.map((rule) => <div key={rule.id} className="rule-row"><button className={"rule-toggle " + (rule.enabled ? "is-on" : "")} onClick={() => void toggle(rule)} title={rule.enabled ? "停用规则" : "确认并启用规则"}><i /></button><span><strong>{rule.name}</strong><small>{ruleStageLabel(rule.stage)} · 优先级 {rule.priority} · v{rule.revision} · 命中 {rule.hitCount}</small></span><code>{ruleActionLabel(String(rule.action.kind))}</code><div className="rule-row-actions"><button onClick={() => editRule(rule)} title="编辑规则"><Pencil size={12} /></button><button className={revisionRuleId === rule.id ? "is-active" : ""} onClick={() => void loadRevisions(rule.id)} title="查看版本"><History size={12} /></button><button disabled={selected.length !== 1} onClick={() => void runPreview(rule)} title="用选中请求预览"><Activity size={12} /></button></div></div>)}{!rules.length && <p className="rule-empty">还没有规则草稿</p>}</section>
+    <section className="rule-list"><div className="rule-list-heading"><Heading meta="DECLARATIVE RULES" title="规则、版本与执行轨迹" value={rules.filter((rule) => rule.enabled).length + " 条启用"} /><div><button className="secondary-button" onClick={exportRules} disabled={!rules.length}><Download size={13} />导出</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={13} />导入</button><input ref={importRef} type="file" accept="application/json,.json" onChange={(event) => void importRules(event)} hidden /></div></div>{rules.map((rule) => <div key={rule.id} className="rule-row"><button className={"rule-toggle " + (rule.enabled ? "is-on" : "")} onClick={() => void toggle(rule)} title={rule.enabled ? "停用规则" : "确认并启用规则"}><i /></button><span><strong>{rule.name}</strong><small>{ruleStageLabel(rule.stage)} · 优先级 {rule.priority} · v{rule.revision} · 命中 {rule.hitCount}</small></span><code>{ruleActionLabel(String(rule.action.kind))}</code><div className="rule-row-actions"><button onClick={() => editRule(rule)} title="编辑规则"><Pencil size={12} /></button><button className={revisionRuleId === rule.id ? "is-active" : ""} onClick={() => void loadRevisions(rule.id)} title="查看版本"><History size={12} /></button><button disabled={selected.length !== 1} onClick={() => void runPreview(rule)} title="用选中请求预览"><Activity size={12} /></button></div></div>)}{!rules.length && <div className="workbench-empty workbench-empty--inline">
+      <SlidersHorizontal size={20} />
+      <strong>还没有规则</strong>
+      {/* "还没有规则草稿" alone did not say what a rule does or why one is a
+          draft, and every rule starts life disabled. */}
+      <small>规则按条件改写、转发或暂停匹配到的流量：改 Header、把请求转到本地服务、模拟弱网、或在人工断点处停下来手改包。</small>
+      <small>新建的规则默认<strong>停用</strong>，确认条件无误后再启用，避免误伤正在跑的流量。</small>
+    </div>}</section>
     {revisionRuleId && <section className="rule-revisions"><header><strong>{rules.find((rule) => rule.id === revisionRuleId)?.name ?? "规则版本"}</strong><span>{revisions.length} 个版本</span><button onClick={() => { setRevisionRuleId(""); setRevisions([]); }} title="关闭版本列表"><X size={12} /></button></header>{revisions.map((item, index) => <div key={item.id}><span><strong>v{item.revision}</strong><small>{new Date(item.createdAt).toLocaleString("zh-CN")}</small></span>{index === 0 && item.revision === rules.find((rule) => rule.id === item.ruleId)?.revision ? <em>当前</em> : <button className="secondary-button" onClick={() => void restoreRevision(item)}><History size={12} />恢复为新版本</button>}</div>)}</section>}
     <section className="rule-editor">
       <div className="workbench-heading"><div><span>{editingId ? "EDIT REVISION" : "DRAFT"}</span><h3>{editingId ? "编辑规则并创建新版本" : "新建禁用规则草稿"}</h3></div><ShieldCheck size={18} /></div>
@@ -1531,7 +1676,9 @@ function bodyFromRunSnapshot(body: unknown, bodyType: unknown): Pick<RequestDraf
 }
 
 function CookieJarManager({ cookies, onDelete, onClear }: { cookies: RequestCookieRecord[]; onDelete: (cookie: RequestCookieRecord) => void; onClear: () => void }) {
+  const { confirm, dialog } = useConfirm();
   return <section className="lab-cookie-jar">
+    {dialog}
     <header><div><Cookie size={14} /><strong>Cookie Jar</strong><span>{cookies.length}</span></div><button onClick={onClear} disabled={!cookies.length} title="清空 Cookie Jar"><Trash2 size={13} /></button></header>
     <div className="lab-cookie-list">{cookies.map((cookie) => <div key={`${cookie.domain}\n${cookie.path}\n${cookie.name}`}>
       <span><strong>{cookie.name}</strong><small>{cookie.domain}{cookie.path}</small></span>
@@ -1596,8 +1743,6 @@ function boundedNumber(value: string, min: number, max: number) {
 
 function ruleStageLabel(stage: CaptureRule["stage"]) { return ({ request: "请求", response: "响应", connection: "连接" } as const)[stage]; }
 function ruleActionLabel(kind: string) { return ({ mirror: "镜像", rewrite: "重写", redirect: "转发", delay: "延迟", throttle: "弱网", block: "阻断", breakpoint: "断点" } as Record<string, string>)[kind] ?? kind; }
-function ruleTraceResultLabel(result: string) { return ({ applied: "已执行", inherited: "沿用连接", skipped: "已跳过", preview: "预览", error: "错误", "not-matched": "未命中" } as Record<string, string>)[result] ?? result; }
-
 function downloadJson(value: unknown, filename: string) {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
   const link = document.createElement("a");

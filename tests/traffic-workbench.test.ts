@@ -183,7 +183,9 @@ describe("request lab navigation", () => {
     assert.match(types, /defaultHeaders: HeaderEntry\[\]/);
     assert.match(types, /defaultAuth: Record<string, unknown>/);
     assert.match(workbench, /CollectionDefaultsPanel/);
-    assert.match(workbench, /title="集合公共配置"/);
+    // Labelled item in the collection overflow menu; it used to be an icon whose
+    // only label was a tooltip.
+    assert.match(workbench, /<SlidersHorizontal size=\{14\} \/>集合公共配置/);
     assert.match(workbench, /inheritCollection/);
     assert.match(workbench, /请求同名项优先/);
     assert.match(workbench, /scopeLabel="公共"/);
@@ -281,7 +283,7 @@ describe("request lab navigation", () => {
 
     assert.match(types, /export interface CollectionSyncPreview/);
     assert.match(types, /sourceFormat\?: string/);
-    assert.match(workbench, /title="同步 OpenAPI 规范"/);
+    assert.match(workbench, /<RefreshCw size=\{14\} \/>同步 OpenAPI 规范/);
     assert.match(workbench, /change\.kind !== "remove"/);
     assert.match(workbench, /新增 \{counts\.add\}/);
     assert.match(workbench, /修改 \{counts\.modify\}/);

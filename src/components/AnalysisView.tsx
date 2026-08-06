@@ -32,6 +32,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ANALYSIS_MODES } from "../analysisModes";
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
 import { pickReplayExportDirectory } from "../replayExport";
@@ -52,18 +53,7 @@ import type {
   SkillRunAudit,
 } from "../types";
 
-const modes: Array<{
-  id: AnalysisMode;
-  label: string;
-  icon: typeof Sparkles;
-  focus: string;
-}> = [
-  { id: "auto", label: "自动识别", icon: WandSparkles, focus: "自动选择最合适的分析路径" },
-  { id: "api", label: "API 逆向", icon: Code2, focus: "接口、参数、鉴权与调用链" },
-  { id: "security", label: "安全审计", icon: ShieldCheck, focus: "敏感数据、越权与配置风险" },
-  { id: "performance", label: "性能分析", icon: Gauge, focus: "瀑布、重复请求与慢接口" },
-  { id: "crypto", label: "JS 加密逆向", icon: FileCode2, focus: "Hook、算法与动态签名" },
-];
+const modes = ANALYSIS_MODES;
 
 const fallbackAiSettings: AiProviderSettings = {
   provider: "claudegpt",
@@ -200,6 +190,14 @@ interface AnalysisViewProps {
   scopeRequestId?: number;
   onScopeConsumed: () => void;
   onOpenEvidenceRequest: (requestId: string) => void;
+  /**
+   * The analysis mode is shared with the Skill 编排 view and outlives this
+   * component, which unmounts whenever the user navigates away.
+   */
+  mode: AnalysisMode;
+  onModeChange: (mode: AnalysisMode) => void;
+  /** True once the user has chosen a mode; a restored report must not override it. */
+  modePinned: boolean;
 }
 
 type ChatItem = Pick<AnalysisChatMessage, "id" | "role" | "content">;
@@ -241,18 +239,13 @@ const replayLanguages = [
   { id: "javascript", label: "JavaScript" },
   { id: "typescript", label: "TypeScript" },
   { id: "go", label: "Go" },
-  { id: "rust", label: "Rust" },
   { id: "java", label: "Java" },
   { id: "csharp", label: "C#" },
-  { id: "c++", label: "C++" },
-  { id: "c", label: "C" },
-  { id: "zig", label: "Zig" },
 ] as const;
 
 type ReplayLanguage = (typeof replayLanguages)[number]["id"];
 
-export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, autoRunId, onAutoRunConsumed, initialRequestIds, scopeRequestId, onScopeConsumed, onOpenEvidenceRequest }: AnalysisViewProps) {
-  const [mode, setMode] = useState<AnalysisMode>("auto");
+export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, autoRunId, onAutoRunConsumed, initialRequestIds, scopeRequestId, onScopeConsumed, onOpenEvidenceRequest, mode, onModeChange: setMode, modePinned }: AnalysisViewProps) {
   const [status, setStatus] = useState<AnalysisStatus>("idle");
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [reports, setReports] = useState<AnalysisReport[]>([]);
@@ -305,7 +298,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     const ids = new Set(scopedRequestIds);
     return requests.filter((request) => ids.has(request.id));
   }, [keyRequests, requests, scopedRequestIds]);
-  const selectedMode = modes.find((item) => item.id === mode)!;
+  // The skill plan is fetched for the picker mode, so it only describes the
+  // displayed report while the two agree.
+  const planDescribesReport = !report || report.mode === mode;
   const hookCount = requests.filter((request) => request.hasHook).length;
   const scopeEstimate = useMemo(() => estimateAnalysisScope(requests, {
     mode, includeStatic, manualScope, manualRequestIds: scopedRequestIds, includeAnnotations,
@@ -371,7 +366,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       const latest = history[0];
       if (latest) {
         activeAnalysisId.current = latest.id;
-        setMode(latest.mode);
+        if (!modePinned) setMode(latest.mode);
         setReport(latest);
         setContent(latest.content);
         setStreamKeyCount(latest.keyRequestCount);
@@ -388,7 +383,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
         setReports(history);
         const latest = history[0];
         if (!latest) return;
-        await restoreReport(latest, () => disposed);
+        // On a first visit there is no choice to protect, so the report may
+        // set the mode; once the user has picked one, it may not.
+        await restoreReport(latest, () => disposed, !modePinned);
       })
       .catch((loadError) => {
         if (!disposed) setError(`读取历史报告失败：${String(loadError)}`);
@@ -401,9 +398,15 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     };
   }, [sessionId]);
 
-  const restoreReport = async (selected: AnalysisReport, isDisposed: () => boolean = () => false) => {
+  /**
+   * @param adoptMode whether the report should take over the mode selection.
+   *   True when the user picks a report from history. False when we merely
+   *   restore the last report on mount — that is a convenience, and it must
+   *   not overwrite a mode the user chose, possibly over in Skill 编排.
+   */
+  const restoreReport = async (selected: AnalysisReport, isDisposed: () => boolean = () => false, adoptMode = true) => {
     activeAnalysisId.current = selected.id;
-    setMode(selected.mode);
+    if (adoptMode) setMode(selected.mode);
     setReport(selected);
     setContent(selected.content);
     setStreamKeyCount(selected.keyRequestCount);
@@ -809,6 +812,21 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     }
   };
 
+  const scopeControls = (
+    <>
+          <div className="analysis-section-heading"><div><span className="section-kicker">SCOPE</span><h2>分析范围</h2></div><span className="count-pill">{scopeEstimate.requestCount} / {requests.length}</span></div>
+          <label className="switch-row"><span><strong>手动聚焦</strong><small>仅分析已标记关键请求</small></span><input type="checkbox" checked={manualScope} onChange={(event) => setManualScope(event.target.checked)} disabled={running} /><i /></label>
+          <label className="switch-row"><span><strong>包含静态资源</strong><small>JS 文件用于代码提取</small></span><input type="checkbox" checked={includeStatic} onChange={(event) => setIncludeStatic(event.target.checked)} disabled={running} /><i /></label>
+          <label className="switch-row"><span><strong>包含请求备注</strong><small>默认不发送用户备注</small></span><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={running} /><i /></label>
+          <div className="key-request-list">
+            {manualRequests.slice(0, 4).map((request) => (
+              <div key={request.id}><span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.method}</span><span><strong>{request.path}</strong><small>{request.host}</small></span></div>
+            ))}
+          </div>
+          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 384 KiB 上限保护</footer></div>
+    </>
+  );
+
   return (
     <section className="analysis-view">
       <aside className="analysis-config">
@@ -829,18 +847,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           </div>
         </div>
 
-        <div className="analysis-config__section analysis-scope">
-          <div className="analysis-section-heading"><div><span className="section-kicker">SCOPE</span><h2>分析范围</h2></div><span className="count-pill">{scopeEstimate.requestCount} / {requests.length}</span></div>
-          <label className="switch-row"><span><strong>手动聚焦</strong><small>仅分析已标记关键请求</small></span><input type="checkbox" checked={manualScope} onChange={(event) => setManualScope(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含静态资源</strong><small>JS 文件用于代码提取</small></span><input type="checkbox" checked={includeStatic} onChange={(event) => setIncludeStatic(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含请求备注</strong><small>默认不发送用户备注</small></span><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={running} /><i /></label>
-          <div className="key-request-list">
-            {manualRequests.slice(0, 4).map((request) => (
-              <div key={request.id}><span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.method}</span><span><strong>{request.path}</strong><small>{request.host}</small></span></div>
-            ))}
-          </div>
-          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 384 KiB 上限保护</footer></div>
-        </div>
+        <div className="analysis-config__section analysis-scope">{scopeControls}</div>
 
         <div className="analysis-config__section agent-skill-plan">
           <div className="analysis-section-heading"><div><span className="section-kicker">AGENT PLAN</span><h2>内置 Agent 编排</h2></div><span className="count-pill">{skillPlan?.selectedSkillIds.length ?? 0}</span></div>
@@ -863,7 +870,10 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
 
       <div className="analysis-report">
         <header className="report-header">
-          <div><span className="section-kicker">AI REPORT</span><h2>{selectedMode.label}报告</h2></div>
+          {/* A displayed report describes its own mode. The picker below is
+              what the next run will use, and the two can legitimately differ
+              once the user starts setting up a different analysis. */}
+          <div><span className="section-kicker">AI REPORT</span><h2>{modeLabel(report?.mode ?? mode)}报告</h2></div>
           <div className="report-header__actions">
             {reports.length > 0 && (
               <label className="report-history-select" title="切换历史分析报告">
@@ -906,18 +916,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           <button className={running ? "is-running" : ""} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (running && !activeAnalysisId.current)}>{running ? (cancelling ? <LoaderCircle className="spin" size={15} /> : <Square size={12} fill="currentColor" />) : <Play size={14} fill="currentColor" />}{cancelling ? "停止中" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}</button>
         </div>
 
-        <section className={`analysis-mobile-scope ${mobileScopeOpen ? "is-open" : ""}`} aria-label="移动端分析范围">
-          <div className="analysis-section-heading"><div><span className="section-kicker">SCOPE</span><h2>分析范围</h2></div><span className="count-pill">{scopeEstimate.requestCount} / {requests.length}</span></div>
-          <label className="switch-row"><span><strong>手动聚焦</strong><small>仅分析已标记关键请求</small></span><input type="checkbox" checked={manualScope} onChange={(event) => setManualScope(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含静态资源</strong><small>JS 文件用于代码提取</small></span><input type="checkbox" checked={includeStatic} onChange={(event) => setIncludeStatic(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含请求备注</strong><small>默认不发送用户备注</small></span><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={running} /><i /></label>
-          <div className="key-request-list">
-            {manualRequests.slice(0, 4).map((request) => (
-              <div key={request.id}><span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.method}</span><span><strong>{request.path}</strong><small>{request.host}</small></span></div>
-            ))}
-          </div>
-          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 384 KiB 上限保护</footer></div>
-        </section>
+        <section className={`analysis-mobile-scope ${mobileScopeOpen ? "is-open" : ""}`} aria-label="移动端分析范围">{scopeControls}</section>
 
         {status === "idle" ? (
           <div className="analysis-idle">
@@ -949,7 +948,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
             )}
             {content && (
               <article className="generated-report">
-                <div className="report-meta"><Clock3 size={13} />{report?.keyRequestCount ?? selectedRequestCount} 条关键请求 · {report?.model ?? aiSettings.model} · 内置 Agent · {skillPlan?.selectedSkillIds.length ?? 0} Skills</div>
+                <div className="report-meta"><Clock3 size={13} />{report?.keyRequestCount ?? selectedRequestCount} 条关键请求 · {report?.model ?? aiSettings.model} · 内置 Agent{planDescribesReport && skillPlan ? ` · ${skillPlan.selectedSkillIds.length} Skills` : ""}</div>
                 {report?.selectedRequestIds.length ? <div className="report-evidence-links"><span>证据请求</span>{report.selectedRequestIds.slice(0, 24).map((requestId) => { const request = requests.find((candidate) => candidate.id === requestId); return <button key={requestId} onClick={() => onOpenEvidenceRequest(requestId)}>{request ? `#${request.order} ${request.method} ${request.host}${request.path}` : requestId}</button>; })}{report.selectedRequestIds.length > 24 && <small>另有 {report.selectedRequestIds.length - 24} 条</small>}</div> : null}
                 <MarkdownReport content={content} />
                 {status === "analyzing" && analysisSettings.streamingOutput && <span className="stream-caret" />}

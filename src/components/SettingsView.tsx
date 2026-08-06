@@ -3,6 +3,7 @@ import {
   Braces,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   Code2,
   Copy,
@@ -25,6 +26,7 @@ import {
   RadioTower,
   RefreshCw,
   Save,
+  Search,
   Server,
   ShieldCheck,
   ShieldOff,
@@ -40,8 +42,23 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import { QRCodeCanvas } from "qrcode.react";
-import { useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { formatBytes } from "../format";
+import { sourceLabels } from "../data";
+import { defaultMcpServerStatus } from "../mcpDefaults";
+import {
+  computeDirtySections,
+  seedMissingBaselines,
+  serializeSectionValue,
+  type SettingsBaselines,
+} from "../settingsDirty";
+import {
+  parseOpenSections,
+  searchSettings,
+  SETTINGS_INDEX,
+  SETTINGS_OPEN_SECTIONS_KEY,
+} from "../settingsIndex";
 import type { AiAnalysisSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
@@ -146,19 +163,7 @@ const defaultTlsInterception: TlsInterceptionSettings = {
   showBypassedConnections: true,
 };
 
-const defaultMcpStatus: McpServerStatus = {
-  enabled: true,
-  running: false,
-  starting: false,
-  host: "127.0.0.1",
-  port: 8899,
-  endpoint: "http://127.0.0.1:8899/mcp",
-  protocolVersion: "2025-06-18",
-  toolCount: 28,
-  allowWrites: false,
-  hasAccessToken: false,
-  recentClients: [],
-};
+const defaultMcpStatus: McpServerStatus = defaultMcpServerStatus({ enabled: true });
 
 function McpGuideClientIcon({ id, size = 16 }: { id: McpGuideClientId; size?: number }) {
   if (id === "codex") return <SquareTerminal size={size} />;
@@ -193,6 +198,22 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const effectiveRuntimeAccessMode = runtime.accessMode ?? "private";
   const effectiveRuntimeAccessRules = runtime.accessRules ?? [];
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [settingsQuery, setSettingsQuery] = useState("");
+  const [openSections, setOpenSections] = useState<string[]>(
+    () => parseOpenSections(globalThis.localStorage?.getItem(SETTINGS_OPEN_SECTIONS_KEY)),
+  );
+  const [revealedSection, setRevealedSection] = useState("");
+  const [baselines, setBaselines] = useState<SettingsBaselines>({});
+
+  /**
+   * Adopt a value as the saved state of a section. The value is passed in
+   * rather than read from state, because every call site fires in the same tick
+   * as the setState that produced it.
+   */
+  const commitBaseline = useCallback((id: string, value: unknown) => {
+    setBaselines((current) => ({ ...current, [id]: serializeSectionValue(value) }));
+  }, []);
+
   const [routingMode, setRoutingMode] = useState<"proxy" | "transparent">("proxy");
   const [systemProxy, setSystemProxy] = useState(defaultSystemProxy);
   const [systemProxyBypass, setSystemProxyBypass] = useState(defaultSystemProxy.bypass.join(", "));
@@ -324,6 +345,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     invoke<UpstreamProxySettings>("get_upstream_proxy_settings")
       .then((settings) => {
         setUpstream(settings);
+        commitBaseline("capture.upstream", settings);
         if (settings.mode === "direct") {
           void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
             .then(setEnvProxyHint)
@@ -339,6 +361,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     invoke<TlsInterceptionSettings>("get_tls_interception_settings")
       .then((settings) => {
         setTlsInterception(settings);
+        commitBaseline("capture.https", settings);
         setTlsBypassRules(settings.bypass.join("\n"));
       })
       .catch((error) => onNotify(`读取 HTTPS 解密策略失败：${String(error)}`));
@@ -347,7 +370,10 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   useEffect(() => {
     if (!isTauri()) return;
     invoke<AiAnalysisSettings>("get_ai_analysis_settings")
-      .then(setAiAnalysisSettings)
+      .then((settings) => {
+        setAiAnalysisSettings(settings);
+        commitBaseline("ai.strategy", settings);
+      })
       .catch((error) => onNotify(`读取 AI 分析策略失败：${String(error)}`));
   }, [onNotify]);
 
@@ -357,6 +383,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       .then((settings) => {
         setSystemProxy(settings);
         setSystemProxyBypass(settings.bypass.join(", "));
+        commitBaseline("capture.routing", { enabled: settings.enabled, bypass: settings.bypass.join(", ") });
       })
       .catch((error) => onNotify(`读取系统代理设置失败：${String(error)}`));
   }, [onNotify]);
@@ -368,7 +395,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       active: runtime.systemProxyActive,
       recoveryPending: runtime.systemProxyRecoveryPending,
     }));
-  }, [runtime.systemProxyActive, runtime.systemProxyEnabled, runtime.systemProxyRecoveryPending]);
+    // Runtime is authoritative for this flag, so mirroring it is not an edit.
+    setSystemProxyBypass((bypass) => {
+      commitBaseline("capture.routing", { enabled: runtime.systemProxyEnabled, bypass });
+      return bypass;
+    });
+  }, [commitBaseline, runtime.systemProxyActive, runtime.systemProxyEnabled, runtime.systemProxyRecoveryPending]);
 
   const runtimeAccessRulesText = effectiveRuntimeAccessRules.join("\n");
 
@@ -385,7 +417,11 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   useEffect(() => {
     if (!isTauri()) return;
     invoke<McpServerStatus>("get_mcp_server_status")
-      .then(setMcpStatus)
+      .then((status) => {
+        setMcpStatus(status);
+      commitBaseline("mcp.server", { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites });
+        commitBaseline("mcp.server", { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites });
+      })
       .catch((error) => onNotify(`读取 MCP 服务状态失败：${String(error)}`));
   }, [onNotify]);
 
@@ -394,7 +430,10 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     let disposed = false;
     let stopListening: (() => void) | undefined;
     void listen<McpServerStatus>("settings://mcp-server", (event) => {
-      if (!disposed) setMcpStatus(event.payload);
+      if (disposed) return;
+      // A push from the backend is the saved state, not a local edit.
+      setMcpStatus(event.payload);
+      commitBaseline("mcp.server", { port: event.payload.port, enabled: event.payload.enabled, allowWrites: event.payload.allowWrites });
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stopListening = unlisten;
@@ -422,6 +461,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         setProvider(settings.provider);
         setEndpoint(settings.baseUrl);
         setModel(settings.model);
+        commitBaseline("ai.provider", { provider: settings.provider, endpoint: settings.baseUrl, model: settings.model });
         setHasSavedApiKey(settings.hasApiKey);
         setAiSettingsLoaded(true);
       })
@@ -469,6 +509,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       .then(([settings, stats]) => {
         if (disposed) return;
         setDataStorageSettings(settings);
+        commitBaseline("data.database", settings);
         setStorageStats(stats);
       })
       .catch((error) => {
@@ -496,6 +537,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       const saved = { ...systemProxy, bypass };
       setSystemProxy(saved);
       setSystemProxyBypass(saved.bypass.join(", "));
+      commitBaseline("capture.routing", { enabled: saved.enabled, bypass: saved.bypass.join(", ") });
       onNotify("系统代理接管设置已保存");
       return;
     }
@@ -744,6 +786,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         settings: upstreamProbeInput(),
       });
       setUpstream(saved);
+      commitBaseline("capture.upstream", saved);
       setUpstreamPassword("");
       if (saved.mode === "direct") {
         onNotify("出口代理配置已加密保存（直连）");
@@ -782,6 +825,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       }
       const saved = await invoke<TlsInterceptionSettings>("save_tls_interception_settings", { settings: next });
       setTlsInterception(saved);
+      commitBaseline("capture.https", saved);
       setTlsBypassRules(saved.bypass.join("\n"));
       onNotify(
         notify
@@ -1039,6 +1083,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setModel(saved.model);
       setHasSavedApiKey(saved.hasApiKey);
       setAiAnalysisSettings(savedAnalysisSettings);
+      commitBaseline("ai.strategy", savedAnalysisSettings);
+      commitBaseline("ai.provider", { provider, endpoint, model });
       setApiKey("");
       onNotify("AI 配置、凭据与分析策略已保存");
       void refreshAiModels(false, { baseUrl: saved.baseUrl, apiKey: "" });
@@ -1090,6 +1136,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         settings: dataStorageSettings,
       });
       setDataStorageSettings(saved);
+      commitBaseline("data.database", saved);
       setStorageStats(await invoke<StorageStats>("get_storage_stats"));
       onNotify("数据存储策略已保存并生效");
     } catch (error) {
@@ -1372,11 +1419,85 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   );
   const latestMcpClient = mcpStatus.recentClients[0];
 
+  const sectionValues = useMemo(() => ({
+    "capture.routing": serializeSectionValue({ enabled: systemProxy.enabled, bypass: systemProxyBypass }),
+    "capture.upstream": serializeSectionValue(upstream),
+    "capture.https": serializeSectionValue(tlsInterception),
+    "capture.devices": serializeSectionValue({ accessMode, rules: accessRulesDraft }),
+    "ai.provider": serializeSectionValue({ provider, endpoint, model }),
+    "ai.strategy": serializeSectionValue(aiAnalysisSettings),
+    "data.database": serializeSectionValue(dataStorageSettings),
+    "mcp.server": serializeSectionValue({ port: mcpStatus.port, enabled: mcpStatus.enabled, allowWrites: mcpStatus.allowWrites }),
+  }), [
+    accessMode, accessRulesDraft, aiAnalysisSettings, dataStorageSettings, endpoint, model,
+    mcpStatus.allowWrites, mcpStatus.enabled, mcpStatus.port, provider,
+    systemProxy.enabled, systemProxyBypass, tlsInterception, upstream,
+  ]);
+
+  // A section with no baseline has nothing to be different from; seeding on
+  // first sight is what keeps a cold load from lighting up every indicator.
+  useEffect(() => {
+    setBaselines((current) => seedMissingBaselines(sectionValues, current));
+  }, [sectionValues]);
+
+  const dirtySections = useMemo(
+    () => computeDirtySections(sectionValues, baselines),
+    [baselines, sectionValues],
+  );
+
+  // Open state is shared across tabs and persisted, so a user who expanded
+  // 出口代理 does not find it folded again after a trip to the AI tab.
+  const sectionController = useMemo(() => ({
+    isOpen: (id: string) => openSections.includes(id),
+    toggle: (id: string, open: boolean) => setOpenSections((current) => {
+      const next = open ? [...new Set([...current, id])] : current.filter((entry) => entry !== id);
+      globalThis.localStorage?.setItem(SETTINGS_OPEN_SECTIONS_KEY, JSON.stringify(next));
+      return next;
+    }),
+    revealed: revealedSection,
+    dirty: dirtySections,
+  }), [dirtySections, openSections, revealedSection]);
+
+  const settingsHits = useMemo(() => searchSettings(settingsQuery), [settingsQuery]);
+
+  const revealSection = (id: string) => {
+    const entry = SETTINGS_INDEX.find((item) => item.id === id);
+    if (!entry) return;
+    setTab(entry.tab);
+    setSettingsQuery("");
+    setOpenSections((current) => (current.includes(id) ? current : [...current, id]));
+    setRevealedSection(id);
+  };
+
+  // Scroll to the revealed section only after the tab switch has painted.
+  useEffect(() => {
+    if (!revealedSection) return;
+    document.querySelector(`[data-settings-section="${revealedSection}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const timeout = window.setTimeout(() => setRevealedSection(""), 1600);
+    return () => window.clearTimeout(timeout);
+  }, [revealedSection, tab]);
+
+  // Deep links from the command palette and other views must land on the tab
+  // they asked for, not on wherever this component was left last time.
+  useEffect(() => setTab(initialTab), [initialTab]);
+
   return (
-    <>
+    <SettingsSectionContext.Provider value={sectionController}>
     <section className="settings-view">
       <aside className="settings-nav">
         <span className="section-kicker">PREFERENCES</span>
+        <label className="settings-search">
+          <Search size={14} />
+          <input
+            value={settingsQuery}
+            onChange={(event) => setSettingsQuery(event.target.value)}
+            placeholder="搜索设置"
+            aria-label="搜索设置"
+            spellCheck={false}
+          />
+          {settingsQuery && <button type="button" onClick={() => setSettingsQuery("")} title="清除搜索"><X size={13} /></button>}
+        </label>
         {[
           { id: "capture", label: "抓包与 HTTPS", icon: Network },
           { id: "ai", label: "AI 模型", icon: Sparkles },
@@ -1384,16 +1505,83 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
           { id: "mcp", label: "MCP 服务", icon: RadioTower },
         ].map((item) => {
           const Icon = item.icon;
-          return <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id as SettingsTab)}><Icon size={16} />{item.label}</button>;
+          return <button key={item.id} className={tab === item.id && !settingsQuery ? "is-active" : ""} onClick={() => { setSettingsQuery(""); setTab(item.id as SettingsTab); }}><Icon size={16} />{item.label}</button>;
         })}
         <div className="settings-version"><strong>ShowNet {runtime.appVersion}</strong><span>Tauri 2 · {runtime.platform}</span><button onClick={() => void checkForUpdates()} disabled={checkingForUpdates}><RefreshCw className={checkingForUpdates ? "spin" : ""} size={13} />{checkingForUpdates ? "检查中" : "检查更新"}</button></div>
       </aside>
 
       <div className="settings-content">
-        {tab === "capture" && (
+        {settingsQuery ? (
+          <>
+            <SettingsHeader kicker="SEARCH" title={`「${settingsQuery}」的设置`} />
+            {settingsHits.length === 0 ? (
+              <p className="settings-search-empty">没有匹配的设置项。试试「证书」「端口」「模型」「令牌」。</p>
+            ) : (
+              <div className="settings-search-results">
+                {settingsHits.map((hit) => (
+                  <button key={hit.id} onClick={() => revealSection(hit.id)}>
+                    <span>
+                      <strong>{hit.title}</strong>
+                      <small>{hit.summary}</small>
+                    </span>
+                    <em>{hit.tabLabel}</em>
+                    <ChevronRight size={15} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        ) : null}
+        {!settingsQuery && tab === "capture" && (
           <>
             <SettingsHeader kicker="CAPTURE ENGINE" title="抓包与 HTTPS" />
-            <SettingsSection title="流量路由" defaultOpen>
+            <SettingsSection id="capture.https" title="HTTPS 解密">
+              <div className={`certificate-status ${runtime.caInstalled ? "is-installed" : ""}`}>
+                <span className="certificate-status__icon">{runtime.caInstalled ? <ShieldCheck size={22} /> : <KeyRound size={22} />}</span>
+                <div><strong>ShowNet Root CA</strong><small>{runtime.caInstalled ? "已安装并受系统信任" : "已生成，安装后可解密 HTTPS"}</small><code>SHA256 {caStatus?.fingerprint ?? "正在读取证书指纹"}</code></div>
+                <span className="certificate-status__actions"><button className="secondary-button" onClick={exportCertificate}><Download size={14} />手动导出</button><button className={runtime.caInstalled ? "secondary-button" : "primary-button"} onClick={installCertificate} disabled={installingCa}>{runtime.caInstalled ? <><RefreshCw size={14} />重新安装</> : <><ShieldCheck size={14} />{installingCa ? "安装中" : "一键安装"}</>}</button></span>
+              </div>
+              {certificateError && <div className="certificate-install-error"><CircleAlert size={14} /><span><strong>自动安装未完成</strong><small>{certificateError}</small></span><button className="secondary-button" onClick={exportCertificate}><Download size={13} />手动安装</button></div>}
+              <div className="tls-interception-policy">
+                <header>
+                  <div><strong>解密策略</strong><small>只影响新建立的 HTTPS 连接，保存后立即生效</small></div>
+                  <span className={tlsInterception.mode === "intercept_all" ? "is-active" : ""}><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "正在解密" : "绕行已开启"}</span>
+                </header>
+                <div className="tls-interception-modes" role="group" aria-label="HTTPS 解密策略">
+                  <button type="button" className={tlsInterception.mode === "intercept_all" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "intercept_all"} onClick={() => selectTlsInterceptionMode("intercept_all")} title="解密所有 HTTPS"><ShieldCheck size={14} />解密全部</button>
+                  <button type="button" className={tlsInterception.mode === "bypass_selected" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "bypass_selected"} onClick={() => selectTlsInterceptionMode("bypass_selected")} title="只绕行指定域名"><ListFilter size={14} />绕行指定</button>
+                  <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title="不解密任何 HTTPS"><ShieldOff size={14} />全部绕行</button>
+                </div>
+                <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。新安装默认已包含常见静态 CDN 绕行。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
+                <div className="tls-static-cdn-preset">
+                  <button
+                    type="button"
+                    className={`secondary-button tls-static-cdn-preset__button ${staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected" ? "is-applied" : ""}`}
+                    onClick={() => void applyStaticCdnBypassPreset()}
+                    disabled={savingTlsInterception || tlsInterception.mode === "bypass_all"}
+                    aria-label="推荐：绕过常见静态 CDN"
+                    title="写入 *.bdstatic.com / *.bcebos.com 并切换为绕行指定；这些域名将不解密正文"
+                  >
+                    <ShieldCheck size={14} />
+                    {staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected"
+                      ? "已启用推荐静态 CDN 绕行"
+                      : "推荐：绕过常见静态 CDN（修复百度等站图裂/脚本）"}
+                  </button>
+                  <small>命中域名保持浏览器端到端 TLS，ShowNet 只记隧道元数据，<strong>不解密正文</strong>。主站（如 www.baidu.com）仍解密。</small>
+                </div>
+                {tlsInterception.mode === "bypass_selected" && <label className="tls-bypass-editor"><span>保持原始 TLS 的域名</span><textarea aria-label="HTTPS 绕行域名" value={tlsBypassRules} onChange={(event) => setTlsBypassRules(event.target.value)} placeholder={"*.bank.example\napi.secure.example"} spellCheck={false} /><small>每行一个，支持 * 和 ?。也会匹配 ClientHello 中的 SNI。</small></label>}
+                {tlsInterception.mode === "bypass_all" && <div className="tls-bypass-warning"><CircleAlert size={14} /><span>这会关闭 HTTPS 正文分析；HTTP 抓包不受影响。</span></div>}
+                {tlsInterception.mode !== "intercept_all" && <label className="settings-switch-row tls-bypass-visibility"><span><strong>在流量列表显示绕行连接</strong><small>{tlsInterception.showBypassedConnections ? "连接会标记为“未解密”，正文不可见" : "只隐藏成功连接；连接失败仍会保留用于排查"}</small></span><input type="checkbox" checked={tlsInterception.showBypassedConnections} onChange={(event) => setTlsInterception((current) => ({ ...current, showBypassedConnections: event.target.checked }))} /><i /></label>}
+                <footer><span><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "解密失败的连接仍会保留诊断信息" : tlsInterception.showBypassedConnections ? "绕行连接仍会显示，并标记为“未解密”" : "成功绕行连接将隐藏，失败仍保留"}</span><button className="save-settings-button" onClick={() => void saveTlsInterception()} disabled={savingTlsInterception}><Save size={14} />{savingTlsInterception ? "保存中" : "保存解密策略"}</button></footer>
+              </div>
+              <div className="https-matrix">
+                <div><span><Globe2 size={16} /></span><strong>浏览器 / 桌面应用</strong><em className="is-good">可解密</em></div>
+                <div><span><Smartphone size={16} /></span><strong>手机 / 平板</strong><em className="is-good">安装 CA 后可解密</em></div>
+                <div><span><LockKeyhole size={16} /></span><strong>证书锁定应用</strong><em className="is-limited">绕行后可连接</em></div>
+              </div>
+            </SettingsSection>
+
+            <SettingsSection id="capture.routing" title="流量路由">
               <div className={`routing-modes ${runtime.transparentModeAvailable ? "" : "is-single"}`}>
                 <button className={routingMode === "proxy" ? "is-active" : ""} onClick={() => setRoutingMode("proxy")}><span><PlugZap size={19} /></span><div><strong>标准代理</strong><small>系统代理 / 手动代理 / Wi-Fi 代理</small></div>{routingMode === "proxy" && <Check size={15} />}</button>
                 {runtime.transparentModeAvailable && <button className={routingMode === "transparent" ? "is-active" : ""} onClick={() => setRoutingMode("transparent")} title="透明导流"><span><Network size={19} /></span><div><strong>透明模式</strong><small>TUN 自动导流到本机代理</small></div>{routingMode === "transparent" && <Check size={15} />}</button>}
@@ -1401,12 +1589,49 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               {routingMode === "transparent" && <div className="settings-notice"><CircleAlert size={15} /><span>TUN 负责透明导流，HTTPS 内容仍由本地 CA 与 MITM 解密。</span></div>}
               <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxy((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
               {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError || "检测到尚未完成的系统代理恢复记录"}</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
-              <div className="settings-field-row"><label><span>监听地址</span><input value={runtime.listenHost} readOnly /></label><label><span>代理端口</span><input type="number" value={runtime.proxyPort} readOnly /></label></div>
+              {/* These were `readOnly` inputs, which read as "editable but
+                  broken" — there is no command anywhere that changes the
+                  listener address or port. Present them as the facts they are. */}
+              <div className="settings-fact-row">
+                <div className="settings-fact"><span>监听地址</span><code>{runtime.listenHost}</code></div>
+                <div className="settings-fact">
+                  <span>代理端口</span>
+                  <code>{runtime.proxyPort}</code>
+                  <button type="button" onClick={() => void copyText(`${runtime.listenHost}:${runtime.proxyPort}`, "代理地址")} title="复制代理地址"><Copy size={13} /></button>
+                </div>
+                <p className="settings-fact__note">端口固定为 {runtime.proxyPort}。若被占用，请先停止占用该端口的程序；客户端一律指向上面这个地址。</p>
+              </div>
               <label className="settings-text-field"><span>绕过域名</span><input value={systemProxyBypass} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxyBypass(event.target.value)} /></label>
               <button className="save-settings-button" onClick={saveSystemProxy} disabled={runtime.proxyRunning || savingSystemProxy}><Save size={15} />{savingSystemProxy ? "保存中" : "保存路由设置"}</button>
             </SettingsSection>
 
-            <SettingsSection title="出口代理">
+            <SettingsSection id="capture.devices" title="设备接入">
+              <label className="settings-switch-row"><span><strong>允许局域网设备接入</strong><small>{lanEnabled ? `当前范围：${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "开启时会自动恢复当前抓包与运行入口"}</small></span><input type="checkbox" checked={lanEnabled} disabled={savingLanAccess} onChange={(event) => void saveLanAccess(event.target.checked)} /><i /></label>
+              <div className="client-access-policy">
+                <header><div><strong>设备访问范围</strong><small>代理、免代理入口与证书安装页共用</small></div><span className={lanEnabled ? "is-active" : ""}><ShieldCheck size={12} />{lanEnabled ? "已启用" : "未监听"}</span></header>
+                <div className="client-access-modes" role="radiogroup" aria-label="设备访问范围">
+                  <button type="button" role="radio" aria-checked={accessMode === "private"} className={accessMode === "private" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("private")}><Wifi size={14} />所有私网设备</button>
+                  <button type="button" role="radio" aria-checked={accessMode === "allow"} className={accessMode === "allow" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("allow")}><ShieldCheck size={14} />仅受信设备</button>
+                  <button type="button" role="radio" aria-checked={accessMode === "deny"} className={accessMode === "deny" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("deny")}><ShieldOff size={14} />除已阻止设备外</button>
+                </div>
+                <p>{accessMode === "private" ? "当前私网和链路本地设备可接入，公网来源始终拒绝。" : accessMode === "allow" ? "只有命中名单的设备可接入；本机始终可用。" : "命中名单的设备会被拒绝，其余私网设备可接入。"}</p>
+                {accessMode !== "private" && <label className="client-access-rules"><span>{accessMode === "allow" ? "受信设备" : "已阻止设备"}<em>{draftedAccessRules.length}/128</em></span><textarea aria-label={accessMode === "allow" ? "受信设备 IP 或 CIDR" : "已阻止设备 IP 或 CIDR"} value={accessRulesDraft} disabled={savingLanAccess} onChange={(event) => setAccessRulesDraft(event.target.value)} placeholder={accessMode === "allow" ? "192.168.1.23\n192.168.20.0/24" : "192.168.1.66\nfd12:3456::9"} spellCheck={false} /><small>每行一个私网 IPv4、IPv6 或 CIDR，最多 128 条。</small></label>}
+                <footer><span><LockKeyhole size={12} />规则会规范化、去重，并拒绝公网范围</span><button className="save-settings-button" onClick={() => void saveAccessPolicy()} disabled={savingLanAccess || !accessPolicyDirty}><Save size={14} />{savingLanAccess ? "应用中" : accessPolicyDirty ? "保存访问范围" : "已保存"}</button></footer>
+              </div>
+              <div className="device-access-row">
+                <span><Wifi size={18} /></span>
+                <div>
+                  <strong>{lanEnabled ? (runtime.lanAddresses[0] ? `${runtime.lanAddresses[0]}:${runtime.proxyPort}` : "未检测到局域网地址") : `127.0.0.1:${runtime.proxyPort}`}</strong>
+                  <small>{lanEnabled ? (runtime.lanAddresses.length ? `${runtime.proxyRunning ? "正在监听" : "开始抓包后监听"} · ${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "请检查 Wi-Fi 或有线网络连接") : `开启后可供${sourceLabels.mobile}与 ${sourceLabels.iot} 设备接入`}</small>
+                </div>
+                <span className="device-access-actions">
+                  <button className="primary-button" onClick={() => setDeviceSetupOpen(true)}><Smartphone size={14} />一键接入</button>
+                  <button className="secondary-button" onClick={exportCertificate}><Download size={14} />导出 CA</button>
+                </span>
+              </div>
+            </SettingsSection>
+
+            <SettingsSection id="capture.upstream" title="出口代理与 TLS 指纹">
               <p className="upstream-proxy-help">
                 ShowNet <strong>不会</strong>自动继承系统或环境变量里的 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>。
                 抓包后访问外网时，必须在此单独配置二级出口；端口填错（例如 8080 而非 1080）会导致 502 与「连接超时」。
@@ -1595,85 +1820,13 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 </div>
               </div>
             </SettingsSection>
-
-            <SettingsSection title="HTTPS 解密">
-              <div className={`certificate-status ${runtime.caInstalled ? "is-installed" : ""}`}>
-                <span className="certificate-status__icon">{runtime.caInstalled ? <ShieldCheck size={22} /> : <KeyRound size={22} />}</span>
-                <div><strong>ShowNet Root CA</strong><small>{runtime.caInstalled ? "已安装并受系统信任" : "已生成，安装后可解密 HTTPS"}</small><code>SHA256 {caStatus?.fingerprint ?? "正在读取证书指纹"}</code></div>
-                <span className="certificate-status__actions"><button className="secondary-button" onClick={exportCertificate}><Download size={14} />手动导出</button><button className={runtime.caInstalled ? "secondary-button" : "primary-button"} onClick={installCertificate} disabled={installingCa}>{runtime.caInstalled ? <><RefreshCw size={14} />重新安装</> : <><ShieldCheck size={14} />{installingCa ? "安装中" : "一键安装"}</>}</button></span>
-              </div>
-              {certificateError && <div className="certificate-install-error"><CircleAlert size={14} /><span><strong>自动安装未完成</strong><small>{certificateError}</small></span><button className="secondary-button" onClick={exportCertificate}><Download size={13} />手动安装</button></div>}
-              <div className="tls-interception-policy">
-                <header>
-                  <div><strong>解密策略</strong><small>只影响新建立的 HTTPS 连接，保存后立即生效</small></div>
-                  <span className={tlsInterception.mode === "intercept_all" ? "is-active" : ""}><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "正在解密" : "绕行已开启"}</span>
-                </header>
-                <div className="tls-interception-modes" role="group" aria-label="HTTPS 解密策略">
-                  <button type="button" className={tlsInterception.mode === "intercept_all" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "intercept_all"} onClick={() => selectTlsInterceptionMode("intercept_all")} title="解密所有 HTTPS"><ShieldCheck size={14} />解密全部</button>
-                  <button type="button" className={tlsInterception.mode === "bypass_selected" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "bypass_selected"} onClick={() => selectTlsInterceptionMode("bypass_selected")} title="只绕行指定域名"><ListFilter size={14} />绕行指定</button>
-                  <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title="不解密任何 HTTPS"><ShieldOff size={14} />全部绕行</button>
-                </div>
-                <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。新安装默认已包含常见静态 CDN 绕行。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
-                <div className="tls-static-cdn-preset">
-                  <button
-                    type="button"
-                    className={`secondary-button tls-static-cdn-preset__button ${staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected" ? "is-applied" : ""}`}
-                    onClick={() => void applyStaticCdnBypassPreset()}
-                    disabled={savingTlsInterception || tlsInterception.mode === "bypass_all"}
-                    aria-label="推荐：绕过常见静态 CDN"
-                    title="写入 *.bdstatic.com / *.bcebos.com 并切换为绕行指定；这些域名将不解密正文"
-                  >
-                    <ShieldCheck size={14} />
-                    {staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected"
-                      ? "已启用推荐静态 CDN 绕行"
-                      : "推荐：绕过常见静态 CDN（修复百度等站图裂/脚本）"}
-                  </button>
-                  <small>命中域名保持浏览器端到端 TLS，ShowNet 只记隧道元数据，<strong>不解密正文</strong>。主站（如 www.baidu.com）仍解密。</small>
-                </div>
-                {tlsInterception.mode === "bypass_selected" && <label className="tls-bypass-editor"><span>保持原始 TLS 的域名</span><textarea aria-label="HTTPS 绕行域名" value={tlsBypassRules} onChange={(event) => setTlsBypassRules(event.target.value)} placeholder={"*.bank.example\napi.secure.example"} spellCheck={false} /><small>每行一个，支持 * 和 ?。也会匹配 ClientHello 中的 SNI。</small></label>}
-                {tlsInterception.mode === "bypass_all" && <div className="tls-bypass-warning"><CircleAlert size={14} /><span>这会关闭 HTTPS 正文分析；HTTP 抓包不受影响。</span></div>}
-                {tlsInterception.mode !== "intercept_all" && <label className="settings-switch-row tls-bypass-visibility"><span><strong>在流量列表显示绕行连接</strong><small>{tlsInterception.showBypassedConnections ? "连接会标记为“未解密”，正文不可见" : "只隐藏成功连接；连接失败仍会保留用于排查"}</small></span><input type="checkbox" checked={tlsInterception.showBypassedConnections} onChange={(event) => setTlsInterception((current) => ({ ...current, showBypassedConnections: event.target.checked }))} /><i /></label>}
-                <footer><span><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "解密失败的连接仍会保留诊断信息" : tlsInterception.showBypassedConnections ? "绕行连接仍会显示，并标记为“未解密”" : "成功绕行连接将隐藏，失败仍保留"}</span><button className="save-settings-button" onClick={() => void saveTlsInterception()} disabled={savingTlsInterception}><Save size={14} />{savingTlsInterception ? "保存中" : "保存解密策略"}</button></footer>
-              </div>
-              <div className="https-matrix">
-                <div><span><Globe2 size={16} /></span><strong>浏览器 / 桌面应用</strong><em className="is-good">可解密</em></div>
-                <div><span><Smartphone size={16} /></span><strong>手机 / 平板</strong><em className="is-good">安装 CA 后可解密</em></div>
-                <div><span><LockKeyhole size={16} /></span><strong>证书锁定应用</strong><em className="is-limited">绕行后可连接</em></div>
-              </div>
-            </SettingsSection>
-
-            <SettingsSection title="设备接入">
-              <label className="settings-switch-row"><span><strong>允许局域网设备接入</strong><small>{lanEnabled ? `当前范围：${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "开启时会自动恢复当前抓包与运行入口"}</small></span><input type="checkbox" checked={lanEnabled} disabled={savingLanAccess} onChange={(event) => void saveLanAccess(event.target.checked)} /><i /></label>
-              <div className="client-access-policy">
-                <header><div><strong>设备访问范围</strong><small>代理、免代理入口与证书安装页共用</small></div><span className={lanEnabled ? "is-active" : ""}><ShieldCheck size={12} />{lanEnabled ? "已启用" : "未监听"}</span></header>
-                <div className="client-access-modes" role="radiogroup" aria-label="设备访问范围">
-                  <button type="button" role="radio" aria-checked={accessMode === "private"} className={accessMode === "private" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("private")}><Wifi size={14} />所有私网设备</button>
-                  <button type="button" role="radio" aria-checked={accessMode === "allow"} className={accessMode === "allow" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("allow")}><ShieldCheck size={14} />仅受信设备</button>
-                  <button type="button" role="radio" aria-checked={accessMode === "deny"} className={accessMode === "deny" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("deny")}><ShieldOff size={14} />除已阻止设备外</button>
-                </div>
-                <p>{accessMode === "private" ? "当前私网和链路本地设备可接入，公网来源始终拒绝。" : accessMode === "allow" ? "只有命中名单的设备可接入；本机始终可用。" : "命中名单的设备会被拒绝，其余私网设备可接入。"}</p>
-                {accessMode !== "private" && <label className="client-access-rules"><span>{accessMode === "allow" ? "受信设备" : "已阻止设备"}<em>{draftedAccessRules.length}/128</em></span><textarea aria-label={accessMode === "allow" ? "受信设备 IP 或 CIDR" : "已阻止设备 IP 或 CIDR"} value={accessRulesDraft} disabled={savingLanAccess} onChange={(event) => setAccessRulesDraft(event.target.value)} placeholder={accessMode === "allow" ? "192.168.1.23\n192.168.20.0/24" : "192.168.1.66\nfd12:3456::9"} spellCheck={false} /><small>每行一个私网 IPv4、IPv6 或 CIDR，最多 128 条。</small></label>}
-                <footer><span><LockKeyhole size={12} />规则会规范化、去重，并拒绝公网范围</span><button className="save-settings-button" onClick={() => void saveAccessPolicy()} disabled={savingLanAccess || !accessPolicyDirty}><Save size={14} />{savingLanAccess ? "应用中" : accessPolicyDirty ? "保存访问范围" : "已保存"}</button></footer>
-              </div>
-              <div className="device-access-row">
-                <span><Wifi size={18} /></span>
-                <div>
-                  <strong>{lanEnabled ? (runtime.lanAddresses[0] ? `${runtime.lanAddresses[0]}:${runtime.proxyPort}` : "未检测到局域网地址") : `127.0.0.1:${runtime.proxyPort}`}</strong>
-                  <small>{lanEnabled ? (runtime.lanAddresses.length ? `${runtime.proxyRunning ? "正在监听" : "开始抓包后监听"} · ${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "请检查 Wi-Fi 或有线网络连接") : "开启后可供手机、平板和 IoT 设备使用"}</small>
-                </div>
-                <span className="device-access-actions">
-                  <button className="primary-button" onClick={() => setDeviceSetupOpen(true)}><Smartphone size={14} />一键接入</button>
-                  <button className="secondary-button" onClick={exportCertificate}><Download size={14} />导出 CA</button>
-                </span>
-              </div>
-            </SettingsSection>
           </>
         )}
 
-        {tab === "ai" && (
+        {!settingsQuery && tab === "ai" && (
           <>
             <SettingsHeader kicker="AI ENGINE" title="AI 模型" />
-            <SettingsSection title="分析提供商" defaultOpen>
+            <SettingsSection id="ai.provider" title="分析提供商">
               <div className="recommended-service">
                 <span className="recommended-service__mark"><Sparkles size={20} /></span>
                 <div className="recommended-service__body"><span>SHOWNET 首选 · 免费 AI 服务</span><strong>ClaudeGPT.org <em>一次性 $5 免费额度</em></strong><small>加入 QQ 群 553354813，联系管理员申请一次性 5 美金免费额度</small><code>默认模型 gpt-5.5 · https://claudegpt.org/v1</code></div>
@@ -1711,7 +1864,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 <label><span>上下文上限</span><input value="128K" readOnly /></label>
               </div>
             </SettingsSection>
-            <SettingsSection title="分析策略">
+            <SettingsSection id="ai.strategy" title="分析策略">
               <div className="settings-field-row agent-turn-limit-row">
                 <label><span>Agent 最大分析轮次</span><input type="number" min="1" step="1" value={aiAnalysisSettings.maxAgentTurns} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, maxAgentTurns: Math.max(1, Math.trunc(Number(event.target.value)) || 1) }))} /></label>
                 <div><strong>单次最多 {aiAnalysisSettings.maxAgentTurns} 轮</strong><small>不设固定上限；提高轮次可能增加分析时长与模型费用</small></div>
@@ -1721,7 +1874,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               <label className="settings-switch-row"><span><strong>流式输出</strong><small>分析内容实时写入报告</small></span><input type="checkbox" checked={aiAnalysisSettings.streamingOutput} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, streamingOutput: event.target.checked }))} /><i /></label>
               <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? "保存中" : "保存设置"}</button>
             </SettingsSection>
-            <SettingsSection title="服务与支持">
+            <SettingsSection id="ai.support" title="服务与支持">
               <div className="support-channel">
                 <button className="support-channel__qr" onClick={() => setQrOpen(true)} title="查看QQ群二维码"><img src={qqGroupQr} alt="QQ群 553354813 二维码" /></button>
                 <div className="support-channel__body"><span className="support-channel__label"><MessageCircle size={13} />免费 AI 服务申请</span><strong>QQ 群 553354813</strong><small>加群后联系管理员，申请一次性 5 美金免费额度</small></div>
@@ -1732,27 +1885,27 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
           </>
         )}
 
-        {tab === "data" && (
+        {!settingsQuery && tab === "data" && (
           <>
             <SettingsHeader kicker="DATA & STORAGE" title="数据与存储" />
-            <SettingsSection title="会话数据库" defaultOpen>
+            <SettingsSection id="data.database" title="会话数据库">
               <div className="storage-path"><span><Database size={19} /></span><div><strong>{storageFileName}</strong><code title={storageStats.dataDirectory}>{storageStats.dataDirectory}</code></div><button className="icon-button" onClick={openStorageDirectory} title="打开数据目录" aria-label="打开数据目录"><FolderOpen size={16} /></button></div>
-              <div className={`storage-metrics ${storageStatsLoading ? "is-loading" : ""}`}><div><strong>{storageStatsLoading ? "读取中" : formatStorageBytes(storageStats.databaseBytes)}</strong><span>SQLite 总占用</span></div><div><strong>{storageStatsLoading ? "读取中" : formatStorageBytes(storageStats.responseBodyBytes)}</strong><span>已存响应正文</span></div><div><strong>{storageStatsLoading ? "读取中" : storageStats.sessionCount}</strong><span>{storageStats.requestCount} 条请求</span></div></div>
+              <div className={`storage-metrics ${storageStatsLoading ? "is-loading" : ""}`}><div><strong>{storageStatsLoading ? "读取中" : formatBytes(storageStats.databaseBytes)}</strong><span>SQLite 总占用</span></div><div><strong>{storageStatsLoading ? "读取中" : formatBytes(storageStats.responseBodyBytes)}</strong><span>已存响应正文</span></div><div><strong>{storageStatsLoading ? "读取中" : storageStats.sessionCount}</strong><span>{storageStats.requestCount} 条请求</span></div></div>
               <label className="settings-switch-row"><span><strong>自动清理</strong><small>按会话最后活动时间执行保留策略</small></span><input type="checkbox" checked={dataStorageSettings.autoCleanupEnabled} onChange={(event) => setDataStorageSettings((current) => ({ ...current, autoCleanupEnabled: event.target.checked }))} /><i /></label>
               <div className="settings-field-row storage-retention-row"><label><span>会话保留天数</span><input type="number" min="1" max="3650" step="1" disabled={!dataStorageSettings.autoCleanupEnabled} value={dataStorageSettings.retentionDays} onChange={(event) => setDataStorageSettings((current) => ({ ...current, retentionDays: Number(event.target.value) || 0 }))} /></label><div><strong>保留最近 {dataStorageSettings.retentionDays || 0} 天</strong><small>启动、保存策略及后台维护时清理空闲会话</small></div></div>
               <label className="settings-switch-row"><span><strong>保存二进制响应</strong><small>图片、字体与媒体正文；关闭后仍保留标头、大小与策略标记</small></span><input type="checkbox" checked={dataStorageSettings.saveBinaryResponses} onChange={(event) => setDataStorageSettings((current) => ({ ...current, saveBinaryResponses: event.target.checked }))} /><i /></label>
               <button className="save-settings-button" onClick={saveDataStorage} disabled={savingDataStorage}><Save size={15} />{savingDataStorage ? "正在应用" : "保存存储策略"}</button>
             </SettingsSection>
-            <SettingsSection title="危险操作">
+            <SettingsSection id="data.danger" title="危险操作">
               <div className="danger-row"><span><Trash2 size={18} /></span><div><strong>清除所有会话数据</strong><small>删除请求、WebSocket 消息、SSE 事件、Hook 与分析报告；保留应用设置和凭据</small></div><button onClick={() => setClearDataOpen(true)} disabled={runtime.proxyRunning || clearingData} title={runtime.proxyRunning ? "停止抓包后才能清除" : "清除所有会话数据"}>{runtime.proxyRunning ? "抓包中" : "清除数据"}</button></div>
             </SettingsSection>
           </>
         )}
 
-        {tab === "mcp" && (
+        {!settingsQuery && tab === "mcp" && (
           <>
             <SettingsHeader kicker="MODEL CONTEXT PROTOCOL" title="MCP 服务" />
-            <SettingsSection title="ShowNet MCP Server">
+            <SettingsSection id="mcp.server" title="ShowNet MCP Server">
               <div className="mcp-settings-status"><span className="server-emblem"><RadioTower size={20} /></span><div><strong>Streamable HTTP</strong><small>{mcpStatus.toolCount} Tools · MCP {mcpStatus.protocolVersion}</small></div><span className={`server-running ${mcpStatus.running ? "" : "is-stopped"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? "启动中" : mcpStatus.running ? "运行中" : "已停止"}</span></div>
               {mcpStatus.lastError && <div className="settings-notice"><CircleAlert size={15} /><span>{mcpStatus.lastError}</span></div>}
               <div className="settings-field-row"><label><span>监听地址</span><input value={mcpStatus.host} readOnly /></label><label><span>端口</span><input type="number" min="1024" max="65535" value={mcpStatus.port} onChange={(event) => setMcpStatus((current) => ({ ...current, port: Number(event.target.value) || 0, endpoint: `http://127.0.0.1:${Number(event.target.value) || 0}/mcp` }))} /></label></div>
@@ -1761,11 +1914,11 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               <label className="settings-switch-row"><span><strong>允许写入型工具</strong><small>开放创建、删除会话与运行 AI 分析</small></span><input type="checkbox" checked={mcpStatus.allowWrites} onChange={(event) => setMcpStatus((current) => ({ ...current, allowWrites: event.target.checked, toolCount: event.target.checked ? 36 : 28 }))} /><i /></label>
               <button className="save-settings-button" onClick={saveMcpSettings} disabled={savingMcp}><Save size={15} />{savingMcp ? "正在应用" : "保存并应用"}</button>
             </SettingsSection>
-            <SettingsSection title="认证">
+            <SettingsSection id="mcp.auth" title="认证">
               <label className="settings-text-field"><span>访问令牌</span><div className="secret-input"><input type={showMcpToken ? "text" : "password"} value={showMcpToken ? mcpToken : mcpStatus.hasAccessToken ? "shownet_mcp_••••••••••" : ""} readOnly /><button onClick={showMcpToken ? () => setShowMcpToken(false) : revealMcpToken} title={showMcpToken ? "隐藏访问令牌" : "显示访问令牌"}>{showMcpToken ? <EyeOff size={15} /> : <Eye size={15} />}</button><button onClick={() => void copyMcpAccessToken()} title="复制访问令牌"><Copy size={14} /></button><button onClick={rotateMcpToken} title="轮换访问令牌"><RefreshCw size={15} /></button></div></label>
               <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>Bearer 令牌使用 AES-256-GCM 加密保存在 SQLite；服务仅监听本机。</span></div>
             </SettingsSection>
-            <SettingsSection title="连接 AI 客户端" defaultOpen>
+            <SettingsSection id="mcp.clients" title="连接 AI 客户端">
               <div className="mcp-guide-tabs" role="tablist" aria-label="选择 AI 客户端">
                 {MCP_GUIDE_CLIENTS.map((client) => <button key={client.id} role="tab" aria-selected={mcpGuideClient === client.id} className={mcpGuideClient === client.id ? "is-active" : ""} onClick={() => { setMcpGuideClient(client.id); setMcpGuideIncludeToken(false); }}><McpGuideClientIcon id={client.id} />{client.name}</button>)}
               </div>
@@ -1795,7 +1948,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 {latestMcpClient ? <><strong>最近接入 {latestMcpClient.name}{latestMcpClient.version ? ` ${latestMcpClient.version}` : ""}</strong><small>{new Date(latestMcpClient.connectedAt).toLocaleString()}</small></> : <><strong>等待客户端首次连接</strong><small>合法握手后会在这里显示客户端与时间</small></>}
               </div>
             </SettingsSection>
-            <SettingsSection title="外部 MCP Servers">
+            <SettingsSection id="mcp.external" title="外部 MCP Servers">
               <div className="mcp-clients-toolbar"><div><strong>{mcpClients.length} 个连接</strong><small>{mcpClients.filter((server) => server.enabled).length} 个供内置 Agent 使用</small></div><button className="secondary-button" onClick={() => setMcpClientDraft({ ...emptyMcpClientDraft })}><Plus size={14} />添加 Server</button></div>
               {mcpClients.length === 0 && !mcpClientDraft && <div className="mcp-clients-empty"><PlugZap size={20} /><span>尚未连接外部 MCP Server</span></div>}
               {mcpClients.length > 0 && <div className="mcp-client-list">{mcpClients.map((server) => {
@@ -1815,6 +1968,17 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>外部工具使用独立命名空间；调用参数与结果受大小限制并写入审计日志。</span></div>
             </SettingsSection>
           </>
+        )}
+
+        {/* Seven independent save buttons and nothing that said "you still have
+            edits". A collapsed section hid them entirely, and leaving the view
+            dropped them without a word. */}
+        {dirtySections.length > 0 && (
+          <div className="settings-unsaved" role="status">
+            <CircleAlert size={15} />
+            <span><strong>{dirtySections.length} 处未保存的更改</strong><small>{dirtySections.map(sectionTitle).join("、")}</small></span>
+            <button className="secondary-button" onClick={() => revealSection(dirtySections[0])}>去查看</button>
+          </div>
         )}
       </div>
     </section>
@@ -1887,25 +2051,60 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         </section>
       </div>
     )}
-    </>
+    </SettingsSectionContext.Provider>
   );
+}
+
+function sectionTitle(id: string) {
+  return SETTINGS_INDEX.find((entry) => entry.id === id)?.title ?? id;
 }
 
 function SettingsHeader({ kicker, title }: { kicker: string; title: string }) {
   return <header className="settings-content__header"><span className="section-kicker">{kicker}</span><h2>{title}</h2></header>;
 }
 
-function SettingsSection({ title, children, defaultOpen = false }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen);
-  return <details className="settings-section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary><h3>{title}</h3><ChevronDown size={15} /></summary><div className="settings-section__body">{children}</div></details>;
+interface SettingsSectionController {
+  isOpen: (id: string) => boolean;
+  toggle: (id: string, open: boolean) => void;
+  /** Section to flash after a search jump, so the eye lands in the right place. */
+  revealed: string;
+  /** Sections holding edits that have not been saved. */
+  dirty: string[];
 }
 
-function formatStorageBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+const SettingsSectionContext = createContext<SettingsSectionController | null>(null);
+
+/**
+ * A collapsible settings group. The summary line under the heading is what makes
+ * a folded section still answer "is what I want in here" without opening it.
+ */
+function SettingsSection({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  const controller = useContext(SettingsSectionContext);
+  const entry = SETTINGS_INDEX.find((item) => item.id === id);
+  const open = controller?.isOpen(id) ?? true;
+  const isDirty = controller?.dirty.includes(id) ?? false;
+  return (
+    <details
+      className={`settings-section ${controller?.revealed === id ? "is-revealed" : ""} ${isDirty ? "is-dirty" : ""}`}
+      data-settings-section={id}
+      open={open}
+      onToggle={(event) => controller?.toggle(id, event.currentTarget.open)}
+    >
+      <summary>
+        <span className="settings-section__heading">
+          <h3>
+            {title}
+            {/* Most sections are collapsed, so an unsaved edit inside one is
+                otherwise completely invisible. */}
+            {isDirty && <em className="settings-section__dirty" title="有未保存的更改">未保存</em>}
+          </h3>
+          {entry && <small>{entry.summary}</small>}
+        </span>
+        <ChevronDown size={15} />
+      </summary>
+      <div className="settings-section__body">{children}</div>
+    </details>
+  );
 }
 
 function formatUpdateDate(value: string) {

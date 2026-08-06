@@ -1,4 +1,5 @@
 import type { HeaderEntry, RequestRecord } from "./types";
+import { shellQuote } from "./shellQuote.ts";
 
 export const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -104,10 +105,6 @@ export function sanitizeReplayHeaders(
     result.push({ name: "Content-Length", value: String(Math.max(0, options.bodyByteLength)) });
   }
   return result;
-}
-
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 export function draftToCurl(draft: CurlDraft) {

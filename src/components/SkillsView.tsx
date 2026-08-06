@@ -27,7 +27,9 @@ import {
 } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ANALYSIS_MODES } from "../analysisModes";
 import { buildPreviewSkillPlan, builtInSkillPreview, mcpToolPreview } from "../capabilities";
+import { defaultMcpServerStatus } from "../mcpDefaults";
 import { calculateWorkflowLayout, partitionWorkflowStages } from "../workflowLayout";
 import type {
   AnalysisMode,
@@ -42,27 +44,9 @@ import type {
 
 type CapabilityTab = "skills" | "mcp" | "workflow";
 
-const fallbackStatus: McpServerStatus = {
-  enabled: false,
-  running: false,
-  starting: false,
-  host: "127.0.0.1",
-  port: 8899,
-  endpoint: "http://127.0.0.1:8899/mcp",
-  protocolVersion: "2025-06-18",
-  toolCount: mcpToolPreview.length,
-  allowWrites: false,
-  hasAccessToken: true,
-  recentClients: [],
-};
+const fallbackStatus: McpServerStatus = defaultMcpServerStatus();
 
-const workflows: Array<{ mode: AnalysisMode; name: string; icon: typeof Sparkles }> = [
-  { mode: "auto", name: "自动场景分析", icon: Sparkles },
-  { mode: "api", name: "API 协议逆向", icon: Code2 },
-  { mode: "security", name: "安全审计", icon: ShieldCheck },
-  { mode: "performance", name: "性能分析", icon: Gauge },
-  { mode: "crypto", name: "JS 加密逆向", icon: KeyRound },
-];
+const workflows = ANALYSIS_MODES.map((entry) => ({ mode: entry.id, name: entry.label, icon: entry.icon }));
 
 const iconBySkill: Record<string, typeof Sparkles> = {
   "noise-filter": Filter,
@@ -78,16 +62,20 @@ const iconBySkill: Record<string, typeof Sparkles> = {
 interface SkillsViewProps {
   sessionId: string;
   requests: RequestListItem[];
+  /** External MCP servers are configured in Settings, not here. */
+  onOpenMcpSettings: () => void;
+  /** Shared with AI 分析 — the same pipeline, so the same selected mode. */
+  mode: AnalysisMode;
+  onModeChange: (mode: AnalysisMode) => void;
 }
 
-export function SkillsView({ sessionId, requests }: SkillsViewProps) {
+export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workflowMode, onModeChange: setWorkflowMode }: SkillsViewProps) {
   const [tab, setTab] = useState<CapabilityTab>("skills");
   const [skills, setSkills] = useState<SkillDefinition[]>(builtInSkillPreview);
   const [tools, setTools] = useState<ToolDefinition[]>(mcpToolPreview);
   const [mcpStatus, setMcpStatus] = useState<McpServerStatus>(fallbackStatus);
   const [selectedSkill, setSelectedSkill] = useState("crypto-reverse");
-  const [workflowMode, setWorkflowMode] = useState<AnalysisMode>("auto");
-  const [plan, setPlan] = useState<SkillPlan>(() => buildPreviewSkillPlan("auto", requests));
+  const [plan, setPlan] = useState<SkillPlan>(() => buildPreviewSkillPlan(workflowMode, requests));
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
   const [harnessCopied, setHarnessCopied] = useState(false);
@@ -191,6 +179,8 @@ export function SkillsView({ sessionId, requests }: SkillsViewProps) {
         <button className={tab === "workflow" ? "is-active" : ""} onClick={() => setTab("workflow")}><GitBranch size={16} />Agent 编排<span>{plan.selectedSkillIds.length}</span></button>
       </div>
 
+      {error && <div className="capability-error">{error}</div>}
+
       {tab === "skills" && selected && (
         <div className="skills-layout">
           <div className="skill-directory">
@@ -253,9 +243,8 @@ export function SkillsView({ sessionId, requests }: SkillsViewProps) {
           <section className="mcp-own-server">
             <header><div><span className="server-emblem"><RadioTower size={22} /></span><div><span className="section-kicker">SHOWNET MCP SERVER</span><h2>本机服务</h2></div></div><span className={`server-running ${mcpStatus.running ? "" : "is-off"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? "启动中" : mcpStatus.running ? "运行中" : "已停止"}</span></header>
             <div className="endpoint-row"><code>{mcpStatus.endpoint}</code><button onClick={copyEndpoint} title="复制地址">{copied ? <Check size={15} /> : <Copy size={15} />}</button></div>
-            <div className="server-metrics"><div><strong>{tools.length}</strong><span>Tools</span></div><div><strong>3</strong><span>Resources</span></div><div><strong>Streamable</strong><span>HTTP Transport</span></div><div><strong>{mcpStatus.protocolVersion}</strong><span>Protocol</span></div></div>
+            <div className="server-metrics"><div><strong>{tools.length}</strong><span>Tools</span></div><div><strong>{mcpStatus.allowWrites ? "读写" : "只读"}</strong><span>Access</span></div><div><strong>Streamable</strong><span>HTTP Transport</span></div><div><strong>{mcpStatus.protocolVersion}</strong><span>Protocol</span></div></div>
             <div className="mcp-tools-header"><h3>对外工具 · {mcpStatus.allowWrites ? "读写" : "只读"}</h3><button onClick={() => void refreshCapabilities()}><RefreshCw className={refreshing ? "spin" : ""} size={14} />刷新</button></div>
-            {error && <div className="capability-error">{error}</div>}
             <div className="mcp-tool-grid">{tools.map((tool) => <div className="mcp-tool-item" key={tool.name} title={tool.description}><Wrench size={13} /><code>{tool.name}</code><span className={`tool-access tool-access--${tool.access}`}>{tool.access === "write" ? "写" : "读"}</span></div>)}</div>
           </section>
           <aside className="mcp-connections">
@@ -263,7 +252,7 @@ export function SkillsView({ sessionId, requests }: SkillsViewProps) {
             <div className="connection-list">
               <div className="connection-item"><span className="connection-logo connection-logo--fs"><Sparkles size={17} /></span><span><strong>内置 Agent</strong><small>{plan.toolNames.length} 个按需取证工具</small></span><i className="is-ready">可用</i></div>
               <div className="connection-item"><span className="connection-logo connection-logo--git"><Server size={17} /></span><span><strong>ShowNet MCP</strong><small>与 Agent 共用工具实现</small></span><i className={mcpStatus.running ? "is-ready" : ""}>{mcpStatus.running ? "已连接" : "关闭"}</i></div>
-              <div className="connection-item"><span className="connection-logo connection-logo--db"><Unplug size={17} /></span><span><strong>外部 MCP</strong><small>尚无连接</small></span><i>未配置</i></div>
+              <button type="button" className="connection-item is-actionable" onClick={onOpenMcpSettings} title="在设置里添加外部 MCP Server"><span className="connection-logo connection-logo--db"><Unplug size={17} /></span><span><strong>外部 MCP</strong><small>接入第三方 MCP 工具</small></span><i>去配置</i></button>
             </div>
           </aside>
         </div>
@@ -318,7 +307,7 @@ function WorkflowView({ mode, plan, refreshing, onModeChange, onRefresh }: { mod
 
   return (
     <div className="workflow-layout">
-      <aside className="workflow-list"><div className="workflow-list__head"><span className="section-kicker">WORKFLOWS</span></div>{workflows.map((workflow) => { const Icon = workflow.icon; return <button key={workflow.mode} className={mode === workflow.mode ? "is-active" : ""} onClick={() => onModeChange(workflow.mode)}><span><Icon size={15} /></span><div><strong>{workflow.name}</strong><small>{mode === workflow.mode ? `${plan.selectedSkillIds.length} Skills · ${plan.toolNames.length} Tools` : "按会话证据编排"}</small></div><ChevronRight size={14} /></button>; })}</aside>
+      <aside className="workflow-list" aria-label="分析流程"><div className="workflow-list__head"><span className="section-kicker">WORKFLOWS</span></div>{workflows.map((workflow) => { const Icon = workflow.icon; return <button key={workflow.mode} className={mode === workflow.mode ? "is-active" : ""} onClick={() => onModeChange(workflow.mode)}><span><Icon size={15} /></span><div><strong>{workflow.name}</strong><small>{mode === workflow.mode ? `${plan.selectedSkillIds.length} Skills · ${plan.toolNames.length} Tools` : "按会话证据编排"}</small></div><ChevronRight size={14} /></button>; })}</aside>
       <section className="workflow-canvas">
         <header><div><span className="section-kicker">CURRENT PLAN</span><h2>{activeWorkflow.name}</h2></div><button className="analysis-start-button" onClick={onRefresh} disabled={refreshing}>{refreshing ? <Activity className="spin" size={15} /> : <RefreshCw size={14} />}{refreshing ? "编排中" : "刷新计划"}</button></header>
         <div className="workflow-flow" ref={flowRef}>
