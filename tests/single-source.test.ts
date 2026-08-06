@@ -585,8 +585,11 @@ describe("repository hygiene", () => {
     // a tree without it. Everything passed here and failed there.
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
+    const { fileURLToPath } = await import("node:url");
     const run = promisify(execFile);
-    const root = new URL("../", import.meta.url).pathname;
+    // `.pathname` yields "/C:/..." on Windows, which is not a path any process
+    // can be spawned in — the failure surfaces as a confusing `git ENOENT`.
+    const root = fileURLToPath(new URL("../", import.meta.url));
 
     const required = [
       ".github/release/body.md",
@@ -599,6 +602,24 @@ describe("repository hygiene", () => {
         stdout.trim(),
         path,
         `${path} is read at build or test time but is not tracked by git`,
+      );
+    }
+  });
+
+  it("never turns a file URL into a path with .pathname", async () => {
+    // On Windows that yields "/C:/..." — not a path any API accepts. It works on
+    // macOS and Linux, so the mistake only ever surfaces on the one runner, and
+    // it surfaces as something unrelated-looking like `spawn git ENOENT`.
+    const { readdir } = await import("node:fs/promises");
+    const root = new URL("../tests/", import.meta.url);
+    const files = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && /\.tsx?$/.test(entry.name));
+
+    for (const file of files) {
+      const text = await readFile(new URL(file.name, root), "utf8");
+      assert.ok(
+        !/new URL\([^)]*import\.meta\.url[^)]*\)\.pathname/.test(text),
+        `${file.name} converts a file URL with .pathname; use fileURLToPath instead`,
       );
     }
   });

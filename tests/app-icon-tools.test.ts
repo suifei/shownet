@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   augmentIco,
   flattenPng,
@@ -64,7 +65,7 @@ describe("app icon tooling", () => {
 
   it("reports a missing official source as an actionable release error", async () => {
     await assert.rejects(
-      validateAppIconSources(new URL("../tmp/missing-brand-assets", import.meta.url).pathname),
+      validateAppIconSources(fileURLToPath(new URL("../tmp/missing-brand-assets", import.meta.url))),
       /Missing required official app icon source: shownet-app-icon-source\.png/,
     );
   });
