@@ -1121,6 +1121,28 @@ fn render_replay_source(
     let fields = one_line(harness.dynamic_fields.join(", "));
     let inputs = one_line(harness.required_inputs.join(", "));
     let gaps = one_line(evidence_gaps.join(" | "));
+    // javac reads source in the platform charset unless told otherwise, so on a
+    // Windows default (windows-1252) any non-ASCII in these comments is a hard
+    // compile error — and the evidence gaps are written in Chinese. Escaping to
+    // \uXXXX keeps the file pure ASCII on disk while javac and every IDE still
+    // render the original text, so `javac *.java` works on any machine.
+    let java_ascii = |text: &str| {
+        text.chars()
+            .flat_map(|ch| {
+                if ch.is_ascii() {
+                    vec![ch]
+                } else {
+                    format!("\\u{:04x}", ch as u32).chars().collect()
+                }
+            })
+            .collect::<String>()
+    };
+    let java_fields = java_ascii(&fields);
+    let java_inputs = java_ascii(&inputs);
+    let java_gaps = java_ascii(&gaps);
+    let java_endpoints = java_ascii(&endpoints_line_comment);
+    let java_adapter = java_ascii(&harness.adapter_id);
+    let java_vendor = java_ascii(&harness.vendor);
     let pow = protocol_schemas
         .pointer("/pow/challengeType")
         .and_then(Value::as_str)
@@ -1129,6 +1151,8 @@ fn render_replay_source(
         .pointer("/signals/identifier")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let java_pow = java_ascii(pow);
+    let java_signal = java_ascii(signal);
     let adapter = &harness.adapter_id;
     let vendor = &harness.vendor;
     let hash = &harness.evidence_hash;
@@ -1927,11 +1951,11 @@ func getenv(key, fallback string) string {{
         ),
         "java" => format!(
             r#"// ShowNet algorithm replay skeleton - runtime credentials supplied by caller.
-// Adapter: {adapter} ({vendor}) | hash: {hash}
-// PoW: {pow} | signal: {signal}
+// Adapter: {java_adapter} ({java_vendor}) | hash: {hash}
+// PoW: {java_pow} | signal: {java_signal}
 // Endpoints:
-{endpoints_line_comment}
-// Fields: {fields} | Inputs: {inputs} | Gaps: {gaps}
+{java_endpoints}
+// Fields: {java_fields} | Inputs: {java_inputs} | Gaps: {java_gaps}
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -2992,6 +3016,37 @@ const difficulty=1; const t="awswaf";
                     "{language}/{verdict} code must not be emitted"
                 );
             }
+        }
+    }
+
+    /// javac reads source in the platform charset unless told otherwise, so a
+    /// generated `.java` file carrying non-ASCII fails to compile on a Windows
+    /// default — and the evidence gaps this project writes are in Chinese. Only
+    /// the Windows runner caught it; this asserts it everywhere.
+    #[test]
+    fn generated_java_sources_are_pure_ascii() {
+        let storage = storage();
+        let session = storage.create_session(Some("java-ascii".into())).unwrap();
+        let sid = session.id.clone();
+        let mut request = base(&sid, "api.example.com", "/v1/order");
+        // Non-ASCII reaches the header comment through the evidence gaps, which
+        // are prose written by the analysis side.
+        request.response_body = Some("缺少关键运行时 Hook，尚不能确认字段生成顺序".into());
+        storage.store_request(request).expect("seed");
+
+        let package = build_algorithm_replay(&storage, &sid, "java").expect("build");
+        for file in package.files.iter().filter(|f| f.name.ends_with(".java")) {
+            let offending: Vec<char> = file
+                .content
+                .chars()
+                .filter(|ch| !ch.is_ascii())
+                .take(5)
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "{} must be pure ASCII so `javac *.java` works on any platform; found {offending:?}",
+                file.name
+            );
         }
     }
 }
