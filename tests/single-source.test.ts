@@ -577,3 +577,41 @@ describe("release publishing", () => {
     );
   });
 });
+
+describe("repository hygiene", () => {
+  it("commits the files the build and tests read", async () => {
+    // `.github/release/body.md` existed locally and was ignored by an unanchored
+    // `release/` rule, so `git add -A` skipped it in silence and CI checked out
+    // a tree without it. Everything passed here and failed there.
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const root = new URL("../", import.meta.url).pathname;
+
+    const required = [
+      ".github/release/body.md",
+      ".github/workflows/release.yml",
+      ".github/workflows/publish-from-run.yml",
+    ];
+    for (const path of required) {
+      const { stdout } = await run("git", ["ls-files", "--", path], { cwd: root });
+      assert.equal(
+        stdout.trim(),
+        path,
+        `${path} is read at build or test time but is not tracked by git`,
+      );
+    }
+  });
+
+  it("anchors root-only ignore rules so they cannot match nested paths", async () => {
+    // `release/` matches at any depth; `/release/` matches only the root build
+    // output it was written for.
+    const ignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
+    for (const line of ignore.split("\n").map((entry) => entry.trim())) {
+      assert.ok(
+        !["release/", "output/", "tmp/", "build/", "dist/"].includes(line),
+        `${line} matches at any depth; anchor it as /${line}`,
+      );
+    }
+  });
+});

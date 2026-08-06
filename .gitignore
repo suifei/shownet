@@ -1,5 +1,5 @@
 node_modules/
-dist/
+/dist/
 src-tauri/target/
 .DS_Store
 *.log
@@ -9,9 +9,12 @@ src-tauri/.sidecar-src/
 src-tauri/binaries/grok-build-*
 !src-tauri/binaries/.gitkeep
 packaging/windows/launcher/target/
-release/
-output/
-tmp/
+# Anchored to the repository root. Without the leading slash these match at any
+# depth, which silently swallowed .github/release/ — the file was never
+# committed and CI checked out a tree that did not contain it.
+/release/
+/output/
+/tmp/
 docs/*.md
 docs/**/*.md
 docs/scorecard-aws-waf-fixture.json
