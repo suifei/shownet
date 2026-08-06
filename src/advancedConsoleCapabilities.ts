@@ -12,9 +12,7 @@ export type ConsoleTabId =
   | "hooks"
   | "rules"
   | "fingerprint"
-  | "px-replay"
-  | "px-compare"
-  | "px-tamper"
+  | "px"
   | "recaptcha"
   | "config";
 
@@ -160,37 +158,15 @@ export const CONSOLE_TAB_GUIDES: ConsoleTabGuide[] = [
     agentTools: ["shownet_get_tls_fingerprints", "shownet_get_outbound_tls_status"],
   },
   {
-    id: "px-replay",
-    label: "PX 替换重放",
+    id: "px",
+    label: "PX 证据",
     phase: "evidence",
-    whenToUse: "会话出现 PerimeterX / HUMAN / ecData 相关请求时查看证据并结构解码。",
-    bestPractice: "解码是结构解析，不是无密钥硬破；重放请用 Request Lab + 规则。",
-    nextStep: "点请求解码查看字段；需要改包时开「拦截 ecData」并进规则台。",
-    emptyHint: "未发现 PX 证据：先抓含 PX 脚本/传感器的页面，或开启拦截 ecData 再操作。",
-    uiActions: ["list_px_evidence", "decode_px_payload", "get_px_settings"],
-    agentTools: ["shownet_list_px_evidence", "shownet_decode_px_payload"],
-  },
-  {
-    id: "px-compare",
-    label: "PX 对比",
-    phase: "evidence",
-    whenToUse: "需要对比两次 PX 传感器/令牌请求差异时。",
-    bestPractice: "选 A/B 后到流量或实验室做字段 diff；本页只标记候选请求。",
-    nextStep: "标记 A/B 后打开流量对比两条请求。",
-    emptyHint: "至少需要两条 PX 相关请求才能有意义对比。",
-    uiActions: ["list_px_evidence", "compareA/B"],
-    agentTools: ["shownet_list_px_evidence", "shownet_get_request"],
-  },
-  {
-    id: "px-tamper",
-    label: "PX 篡改",
-    phase: "capture",
-    whenToUse: "要对 PX 相关包做改写实验时（入口跳转规则，非自动硬破）。",
-    bestPractice: "先解码看结构，再生成/编辑替换规则；保持可回滚。",
-    nextStep: "生成改写规则 → 规则工作台 → 回流量验证。",
-    emptyHint: "无 PX 证据时无法定向改写；先完成含 PX 的抓包。",
-    uiActions: ["onOpenRules", "list_px_evidence"],
-    agentTools: ["shownet_list_px_evidence"],
+    whenToUse: "会话出现 PerimeterX / HUMAN / ecData 相关请求时，查看证据、结构解码、标记对比或生成改写规则。",
+    bestPractice: "解码是结构解析，不是无密钥硬破。先解码看结构，再决定对比字段还是生成可回滚的改写规则。",
+    nextStep: "点请求解码查看字段；切到「对比」标记 A/B 后去流量做 diff，切到「改写」生成规则再进规则台验证。",
+    emptyHint: "未发现 PX 证据：先抓含 PX 脚本/传感器的页面，或开启拦截 ecData 再操作。对比至少需要两条 PX 请求。",
+    uiActions: ["list_px_evidence", "decode_px_payload", "get_px_settings", "compareA/B", "onOpenRules"],
+    agentTools: ["shownet_list_px_evidence", "shownet_decode_px_payload", "shownet_get_request"],
   },
   {
     id: "recaptcha",

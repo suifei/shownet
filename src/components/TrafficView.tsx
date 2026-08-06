@@ -29,6 +29,7 @@ import {
   LockKeyhole,
   MessagesSquare,
   Maximize2,
+  MoreHorizontal,
   Minimize2,
   PanelBottom,
   PanelRight,
@@ -57,7 +58,29 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type CSS
 import { initialRequests, sourceLabels } from "../data";
 import type { WorkbenchMode } from "./RequestWorkbench";
 import { HttpBodyMetadataGrid, HttpBodyStatus, HttpBodyViewer } from "./HttpBodyViewer";
-import { buildQuickFilter, createPredicate, emptyQuickFilter, normalizeFilterExpression, type QuickFilterState, type QuickShownet, type QuickStatus } from "../requestFilters";
+import {
+  buildQuickFilter,
+  createPredicate,
+  describeActiveFilters,
+  emptyQuickFilter,
+  METHOD_VALUES,
+  normalizeFilterExpression,
+  PROTOCOL_LABELS,
+  PROTOCOL_VALUES,
+  removeActiveFilter,
+  requestStateLabel,
+  RISK_LABELS,
+  SHOWNET_LABELS,
+  SHOWNET_VALUES,
+  STATUS_LABELS,
+  STATUS_VALUES,
+  TYPE_LABELS,
+  TYPE_VALUES,
+  type ActiveFilterChip,
+  type QuickFilterState,
+  type QuickShownet,
+  type QuickStatus,
+} from "../requestFilters";
 import { headerValue, INSPECTOR_PREFERENCES_KEY, legacyBodyMetadata, parseCookies, parseInspectorPreferences, parseQueryEntries, timingEvidence, type InspectorLayout } from "../requestInspector";
 import { initialRequestSelection, requestSelectionReducer } from "../requestSelection";
 import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
@@ -67,20 +90,16 @@ import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestC
 import { classifyTrafficStatus, looksLikeProxyErrorBody } from "../trafficStatus";
 import { filterAndOrderSseEvents, isSseTerminal, prettySseData, sseEventLabel, type SseOrder } from "../sseInspector";
 import type { CaptureRuleRun, CryptoCodeSnippet, FilterExpression, RequestAnnotation, RequestAnnotationInput, RequestAnnotationSummary, RequestFacets, RequestField, RequestListItem, RequestRecord, RequestSort, RiskLevel, SavedRequestView, SourceType, SseEvent, WebSocketFrameEvent } from "../types";
+import { formatBytes, formatClock, formatListBytes, isSlowRequest } from "../format";
+import { QUICK_FILTER_METHODS } from "../httpMethods";
+import { ruleTraceResultLabel } from "../ruleTrace";
 import { useDismissibleLayer, useEscapeDismiss } from "../useDismissibleLayer";
+import { sourceIcons } from "../sourceIcons";
 
-const sourceIcons: Record<SourceType, typeof Browser> = {
-  browser: Browser,
-  desktop: Laptop,
-  terminal: Terminal,
-  script: Braces,
-  mobile: Wifi,
-  iot: Radio,
-  reverse: Route,
-};
 
 type DetailTab = "overview" | "query" | "requestHeaders" | "responseHeaders" | "cookies" | "requestBody" | "responseBody" | "messages" | "sse" | "code" | "fingerprint" | "hook" | "rules" | "timing" | "annotation";
-type TrafficMenu = "quick" | "columns" | "advanced" | "views" | "live";
+type TrafficMenu = "filter" | "columns" | "live";
+type FilterTab = "quick" | "advanced" | "views";
 
 const defaultGridSort: RequestSort[] = [{ field: "order", direction: "asc" }];
 
@@ -121,12 +140,19 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
   const [advancedFilter, setAdvancedFilter] = useState<FilterExpression>();
   const [sort, setSort] = useState<RequestSort[]>(defaultGridSort);
   const [selection, dispatchSelection] = useReducer(requestSelectionReducer, initialRequestSelection);
+  /**
+   * The first row is auto-selected on load so the detail pane has something to
+   * show. That is not a user action, and the contextual action bar must not
+   * appear as though the user asked for it.
+   */
+  const [selectionFromUser, setSelectionFromUser] = useState(false);
   const selectionCacheRef = useRef(new Map<string, RequestListItem>());
   const [bookmarkCountDelta, setBookmarkCountDelta] = useState(0);
   const [pendingFocus, setPendingFocus] = useState<{ index: number; extend: boolean }>();
   const [detailOpen, setDetailOpen] = useState(true);
   const [facetsOpen, setFacetsOpen] = useState(() => (globalThis.innerWidth ?? 0) >= 1440);
   const [menu, setMenu] = useState<TrafficMenu>();
+  const [filterTab, setFilterTab] = useState<FilterTab>("quick");
   const [savedViews, setSavedViews] = useState<SavedRequestView[]>([]);
   const [savedViewName, setSavedViewName] = useState("");
   const [annotationOverrides, setAnnotationOverrides] = useState<Record<string, RequestAnnotationSummary>>({});
@@ -140,10 +166,21 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
   const scrollRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const [selectionMoreOpen, setSelectionMoreOpen] = useState(false);
+  /** Short-lived inline error for actions that have no other feedback surface. */
+  const [actionError, setActionError] = useState("");
+  const selectionMoreRef = useRef<HTMLDivElement>(null);
   const locatingFocusIdRef = useRef<string | undefined>(undefined);
 
   useDismissibleLayer(Boolean(menu), toolbarRef, () => setMenu(undefined));
   useDismissibleLayer(Boolean(contextMenu), contextMenuRef, () => setContextMenu(undefined));
+  useDismissibleLayer(selectionMoreOpen, selectionMoreRef, () => setSelectionMoreOpen(false));
+
+  useEffect(() => {
+    if (!actionError) return;
+    const timer = window.setTimeout(() => setActionError(""), 6_000);
+    return () => window.clearTimeout(timer);
+  }, [actionError]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -217,6 +254,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
   useEffect(() => {
     if (requestWindowOffset === 0 && requests.length > 0 && selection.selectedIds.length === 0 && !selection.focusedId) {
       dispatchSelection({ type: "click", id: requests[0].id, ids: requests.map((request) => request.id) });
+      setSelectionFromUser(false);
     }
   }, [requestWindowOffset, requests, selection.focusedId, selection.selectedIds.length]);
 
@@ -314,6 +352,20 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
     setAdvancedFilter(undefined);
   };
 
+  // One read-out of everything narrowing the list, whichever surface set it.
+  const activeFilterChips = useMemo(
+    () => describeActiveFilters(quickFilter, advancedFilter, sourceLabels),
+    [advancedFilter, quickFilter],
+  );
+
+  const removeFilterChip = (chip: ActiveFilterChip) => {
+    if (chip.group === "advanced") { setAdvancedFilter(undefined); return; }
+    // The search box owns `query`; `quickFilter.text` is its debounced copy, so
+    // clearing the chip has to reset the input or the text reappears.
+    if (chip.group === "text") { setQuery(""); return; }
+    setQuickFilter((current) => removeActiveFilter(current, chip));
+  };
+
   useEffect(() => {
     if (!focusRequestId) return;
     const request = requests.find((candidate) => candidate.id === focusRequestId);
@@ -365,6 +417,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         Math.max(0, visibleAbsoluteIndex - requestWindowOffset),
       );
       dispatchSelection({ type: "selectAll", ids, focusedId: requests[visibleLocalIndex]?.id });
+      setSelectionFromUser(true);
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
@@ -376,6 +429,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
       const targetLocalIndex = targetIndex - requestWindowOffset;
       if (targetLocalIndex >= 0 && targetLocalIndex < requests.length && focusedLocalIndex >= 0) {
         dispatchSelection({ type: "move", direction, ids, extend: event.shiftKey });
+        setSelectionFromUser(true);
       } else if (targetIndex !== currentIndex) {
         setPendingFocus({ index: targetIndex, extend: event.shiftKey });
         const targetOffset = nextRequestListWindowOffset(
@@ -404,8 +458,10 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
     const now = Date.now();
     const input = { name, sessionId, filter: buildQuickFilter(quickFilter, normalizeFilterExpression(advancedFilter)), sort, columns: preferences };
     if (isTauri()) {
-      await invoke("save_request_view", { input });
-      await loadSavedViews();
+      try {
+        await invoke("save_request_view", { input });
+        await loadSavedViews();
+      } catch (reason) { setActionError(`保存视图失败：${String(reason)}`); return; }
     } else {
       const next = [...savedViews, { ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now }];
       setSavedViews(next);
@@ -416,8 +472,10 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
 
   const deleteSavedView = async (view: SavedRequestView) => {
     if (isTauri()) {
-      await invoke("delete_request_view", { viewId: view.id });
-      await loadSavedViews();
+      try {
+        await invoke("delete_request_view", { viewId: view.id });
+        await loadSavedViews();
+      } catch (reason) { setActionError(`删除视图失败：${String(reason)}`); return; }
     } else {
       const next = savedViews.filter((candidate) => candidate.id !== view.id);
       setSavedViews(next);
@@ -466,13 +524,19 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
   const toggleSelectedBookmark = async () => {
     const request = selectedRequests[0];
     if (!request || selectedRequests.length !== 1) return;
-    const current = annotationOverrides[request.id] ?? request.annotation;
-    const loaded = isTauri() ? await invoke<RequestAnnotation | null>("get_request_annotation", { requestId: request.id }) : null;
-    const base = loaded ?? emptyAnnotation(request.id, current);
-    const input: RequestAnnotationInput = { requestId: request.id, bookmarked: !base.bookmarked, color: base.color, struckThrough: base.struckThrough, note: base.note, tags: base.tags };
-    const saved = isTauri() ? await invoke<RequestAnnotation>("save_request_annotation", { input }) : { ...base, ...input, updatedAt: Date.now() };
-    setAnnotationOverrides((currentOverrides) => ({ ...currentOverrides, [request.id]: annotationSummary(saved) }));
-    setBookmarkCountDelta((delta) => delta + (saved.bookmarked ? 1 : -1));
+    try {
+      const current = annotationOverrides[request.id] ?? request.annotation;
+      const loaded = isTauri() ? await invoke<RequestAnnotation | null>("get_request_annotation", { requestId: request.id }) : null;
+      const base = loaded ?? emptyAnnotation(request.id, current);
+      const input: RequestAnnotationInput = { requestId: request.id, bookmarked: !base.bookmarked, color: base.color, struckThrough: base.struckThrough, note: base.note, tags: base.tags };
+      const saved = isTauri() ? await invoke<RequestAnnotation>("save_request_annotation", { input }) : { ...base, ...input, updatedAt: Date.now() };
+      setAnnotationOverrides((currentOverrides) => ({ ...currentOverrides, [request.id]: annotationSummary(saved) }));
+      setBookmarkCountDelta((delta) => delta + (saved.bookmarked ? 1 : -1));
+    } catch (reason) {
+      // A bookmark is how the user marks evidence; a silent no-op means they
+      // believe it is marked when it is not.
+      setActionError(`书签保存失败：${String(reason)}`);
+    }
   };
 
   return (
@@ -486,9 +550,14 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         <div className="summary-metric"><strong>{apiCount}</strong><span>API</span></div>
         <div className={`summary-metric ${errorCount ? "has-error" : ""}`}><strong>{errorCount}</strong><span>异常响应</span></div>
         <div className="summary-metric"><strong>{hookCount}</strong><span>加密调用</span></div>
-        <button className="analyze-compact-button" onClick={onOpenAnalysis} disabled={requests.length === 0}>
+        <button
+          className="analyze-compact-button"
+          onClick={onOpenAnalysis}
+          disabled={requests.length === 0}
+          title={requests.length === 0 ? "先抓到请求再分析" : "分析整个会话，范围可在分析页调整"}
+        >
           <Sparkles size={15} />
-          AI 分析
+          分析整个会话
         </button>
       </div>
 
@@ -499,42 +568,66 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
           {query && <button onClick={() => setQuery("")} title="清除搜索"><X size={14} /></button>}
         </div>
         <div className="method-filter" aria-label="请求方法">
-          {["GET", "POST", "PUT", "DELETE"].map((item) => (
+          {QUICK_FILTER_METHODS.map((item) => (
             <button key={item} className={quickFilter.methods.includes(item) ? "is-active" : ""} onClick={() => toggleQuickValue("methods", item)}>
               {item}
             </button>
           ))}
         </div>
+        {/* One filter surface. Quick facets, the condition builder and saved
+            views used to be three sibling popovers behind three toolbar
+            buttons, each of which wrote into the same query. */}
         <div className="traffic-menu-anchor">
-          <button className={`toolbar-icon-button ${menu === "quick" || hasQuickFilters(quickFilter) ? "is-active" : ""}`} onClick={() => setMenu(menu === "quick" ? undefined : "quick")} title="快捷筛选">
-            <Filter size={15} />
+          <button
+            className={`toolbar-command-button ${menu === "filter" ? "is-active" : ""} ${activeFilterChips.length ? "has-filters" : ""}`}
+            onClick={() => setMenu(menu === "filter" ? undefined : "filter")}
+            aria-expanded={menu === "filter"}
+            title="筛选、条件与保存的视图"
+          >
+            <Filter size={15} /><span>筛选</span>
+            {activeFilterChips.length > 0 && <em className="toolbar-filter-count">{activeFilterChips.length}</em>}
           </button>
-          {menu === "quick" && <QuickFilterMenu state={quickFilter} facets={facets} onToggle={toggleQuickValue} />}
+          {menu === "filter" && (
+            <div className="traffic-popover filter-panel">
+              <div className="filter-panel__tabs" role="tablist" aria-label="筛选方式">
+                {([["quick", "快捷"], ["advanced", "条件"], ["views", "视图"]] as const).map(([id, label]) => (
+                  <button
+                    key={id}
+                    role="tab"
+                    aria-selected={filterTab === id}
+                    className={filterTab === id ? "is-active" : ""}
+                    onClick={() => setFilterTab(id)}
+                  >
+                    {label}
+                    {id === "views" && savedViews.length > 0 && <em>{savedViews.length}</em>}
+                    {id === "advanced" && advancedFilter && <em>·</em>}
+                  </button>
+                ))}
+              </div>
+              {filterTab === "quick" && <QuickFilterMenu state={quickFilter} facets={facets} onToggle={toggleQuickValue} />}
+              {filterTab === "advanced" && (
+                <FilterBuilder value={advancedFilter ?? { kind: "group", operator: "and", children: [createPredicate()] }} onChange={setAdvancedFilter} />
+              )}
+              {filterTab === "views" && (
+                <div className="saved-views-pane">
+                  <p className="saved-views-pane__hint">保存当前的搜索、快捷筛选、条件与排序，之后一键复用。</p>
+                  <div className="saved-view-create"><input value={savedViewName} onChange={(event) => setSavedViewName(event.target.value)} placeholder="视图名称" /><button onClick={() => void saveCurrentView()} disabled={!savedViewName.trim()} title="保存当前筛选为视图"><Plus size={14} /></button></div>
+                  <div className="saved-view-list">
+                    {savedViews.map((view) => <div key={view.id}><button onClick={() => applySavedView(view)}><span>{view.name}</span><small>{view.sort.length} 个排序条件</small></button><button onClick={() => void deleteSavedView(view)} title="删除视图"><Trash2 size={13} /></button></div>)}
+                    {savedViews.length === 0 && <span className="popover-empty">还没有保存视图</span>}
+                  </div>
+                </div>
+              )}
+              {/* Always present, so resetting is not a button that appears and
+                  disappears from the toolbar depending on filter state. */}
+              <footer className="filter-panel__footer">
+                <span>{activeFilterChips.length ? `${activeFilterChips.length} 项筛选生效` : "当前没有筛选"}</span>
+                <button onClick={clearFilters} disabled={!activeFilterChips.length}><RotateCcw size={13} />重置全部</button>
+              </footer>
+            </div>
+          )}
         </div>
         <button className={`toolbar-icon-button ${facetsOpen ? "is-active" : ""}`} onClick={() => setFacetsOpen((open) => !open)} title={facetsOpen ? "收起统计侧栏" : "展开统计侧栏"}><ListFilter size={15} /></button>
-        <div className="traffic-menu-anchor">
-          <button className={`toolbar-command-button ${menu === "advanced" || advancedFilter ? "is-active" : ""}`} onClick={() => setMenu(menu === "advanced" ? undefined : "advanced")}>
-            <SlidersHorizontal size={15} /><span>条件</span>
-          </button>
-          {menu === "advanced" && (
-            <div className="traffic-popover filter-builder-popover">
-              <FilterBuilder value={advancedFilter ?? { kind: "group", operator: "and", children: [createPredicate()] }} onChange={setAdvancedFilter} />
-            </div>
-          )}
-        </div>
-        <div className="traffic-menu-anchor">
-          <button className={`toolbar-icon-button ${menu === "views" ? "is-active" : ""}`} onClick={() => setMenu(menu === "views" ? undefined : "views")} title="保存视图"><Save size={15} /></button>
-          {menu === "views" && (
-            <div className="traffic-popover saved-views-popover">
-              <div className="popover-title"><strong>保存视图</strong><span>{savedViews.length} 个</span></div>
-              <div className="saved-view-create"><input value={savedViewName} onChange={(event) => setSavedViewName(event.target.value)} placeholder="视图名称" /><button onClick={() => void saveCurrentView()} disabled={!savedViewName.trim()}><Plus size={14} /></button></div>
-              <div className="saved-view-list">
-                {savedViews.map((view) => <div key={view.id}><button onClick={() => applySavedView(view)}><span>{view.name}</span><small>{view.sort.length} 个排序条件</small></button><button onClick={() => void deleteSavedView(view)} title="删除视图"><Trash2 size={13} /></button></div>)}
-                {savedViews.length === 0 && <span className="popover-empty">还没有保存视图</span>}
-              </div>
-            </div>
-          )}
-        </div>
         <div className="traffic-menu-anchor">
           <button className={`toolbar-icon-button ${menu === "columns" ? "is-active" : ""}`} onClick={() => setMenu(menu === "columns" ? undefined : "columns")} title="配置列"><Columns3 size={15} /></button>
           {menu === "columns" && (
@@ -544,9 +637,6 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
             </div>
           )}
         </div>
-        {(query || hasQuickFilters(quickFilter) || advancedFilter) && (
-          <button className="toolbar-icon-button" onClick={clearFilters} title="重置筛选"><RotateCcw size={15} /></button>
-        )}
         <button className="toolbar-command-button" onClick={() => onOpenWorkbench("lab", selectedRequests, { createFromSelection: selectedRequests.length === 1 })}><FlaskConical size={15} /><span>Request Lab</span></button>
         <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("collections", selectedRequests)} title="请求集合"><FolderTree size={15} /></button>
         <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("rules", selectedRequests)} title="规则工作台"><SlidersHorizontal size={15} /></button>
@@ -566,6 +656,34 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         </div>
         <span className="toolbar-result-count">{filteredCount.toLocaleString()} / {totalCount.toLocaleString()}</span>
       </div>
+
+      {/* Without this, a list narrowed from the search box, the method chips and
+          the facet sidebar at once looks exactly like an empty session. */}
+      {actionError && (
+        <div className="traffic-action-error" role="alert">
+          <CircleAlert size={14} />
+          <span>{actionError}</span>
+          <button onClick={() => setActionError("")} title="关闭"><X size={13} /></button>
+        </div>
+      )}
+
+      {activeFilterChips.length > 0 && (
+        <div className="active-filters" role="region" aria-label="生效中的筛选">
+          {activeFilterChips.map((chip) => (
+            <button
+              key={chip.id}
+              className="active-filter-chip"
+              onClick={() => removeFilterChip(chip)}
+              title={`移除筛选：${chip.groupLabel} ${chip.label}`}
+            >
+              <em>{chip.groupLabel}</em>
+              <span>{chip.label}</span>
+              <X size={12} />
+            </button>
+          ))}
+          <button className="active-filters__clear" onClick={clearFilters}>清除全部</button>
+        </div>
+      )}
 
       {totalCount === 0 && loading ? (
         <div className="traffic-empty traffic-empty--loading" role="status">
@@ -606,13 +724,23 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
           {facetsOpen && <FacetSidebar facets={facets} state={quickFilter} savedViews={savedViews} bookmarkCount={Math.max(0, bookmarkedCount + bookmarkCountDelta)} onToggle={toggleQuickValue} onApplyView={applySavedView} onClose={() => setFacetsOpen(false)} />}
           <div className={`traffic-split ${detailOpen && selected ? `has-detail layout-${inspectorPreferences.layout}` : ""}`} style={splitStyle}>
           <div className="request-grid-shell">
-            <div className="request-grid-scroll" ref={scrollRef} tabIndex={0} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)} onKeyDown={handleGridKeyDown} aria-label="请求数据网格">
-              <div className="request-grid-header" style={{ gridTemplateColumns: gridTemplate, width: gridWidth }} role="row">
-                {columns.map((column) => {
+            <div
+              className="request-grid-scroll"
+              ref={scrollRef}
+              tabIndex={0}
+              onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+              onKeyDown={handleGridKeyDown}
+              role="grid"
+              aria-label="请求数据网格"
+              aria-rowcount={filteredCount + 1}
+              aria-colcount={columns.length}
+            >
+              <div className="request-grid-header" style={{ gridTemplateColumns: gridTemplate, width: gridWidth }} role="row" aria-rowindex={1}>
+                {columns.map((column, columnIndex) => {
                   const sortIndex = sort.findIndex((entry) => entry.field === column.field);
                   const sorting = sortIndex >= 0 ? sort[sortIndex] : undefined;
                   const ariaSort = sorting ? (sorting.direction === "asc" ? "ascending" : "descending") : "none";
-                  return <div key={column.id} className="request-grid-header-cell" role="columnheader" aria-sort={ariaSort} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu("columns"); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => setPreferences((current) => reorderRequestColumn(current, event.dataTransfer.getData("text/request-column") as RequestColumnId, column.id))}>
+                  return <div key={column.id} className="request-grid-header-cell" role="columnheader" aria-colindex={columnIndex + 1} aria-sort={ariaSort} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu("columns"); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => setPreferences((current) => reorderRequestColumn(current, event.dataTransfer.getData("text/request-column") as RequestColumnId, column.id))}>
                     {!column.locked && <span className="column-drag-handle" draggable onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/request-column", column.id); }} title={`拖动“${column.label}”列`}><GripVertical size={12} /></span>}
                     <button type="button" className="request-grid-sort-button" data-sort-field={column.field} onClick={(event) => setSort((current) => nextRequestSort(current, column.field, event.shiftKey))} title={`${column.label}：${sorting ? (sorting.direction === "asc" ? "升序，点击切换降序" : "降序，点击取消排序") : "点击升序排列"}`}>
                       <span>{column.label}</span>
@@ -624,19 +752,20 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
               </div>
               <div className="request-grid-body" style={{ height: virtualWindow.totalHeight, width: gridWidth }} role="rowgroup">
                 {visibleRows.map(({ request, absoluteIndex }) => {
-                  if (!request) return <div key={`loading-${absoluteIndex}`} className="request-grid-row is-loading" style={{ gridTemplateColumns: gridTemplate, width: gridWidth, transform: `translateY(${absoluteIndex * REQUEST_GRID_ROW_HEIGHT}px)` } as CSSProperties} role="row" aria-busy="true">
+                  if (!request) return <div key={`loading-${absoluteIndex}`} className="request-grid-row is-loading" style={{ gridTemplateColumns: gridTemplate, width: gridWidth, transform: `translateY(${absoluteIndex * REQUEST_GRID_ROW_HEIGHT}px)` } as CSSProperties} role="row" aria-rowindex={absoluteIndex + 2} aria-busy="true">
                     {columns.map((column) => <div key={column.id} className={`request-grid-cell request-grid-cell--${column.id}`} role="gridcell"><span className="request-grid-loading-bar" /></div>)}
                   </div>;
                   const annotation = annotationOverrides[request.id] ?? request.annotation;
                   const displayedRequest = annotation === request.annotation ? request : { ...request, annotation };
                   const isSelected = selectedSet.has(request.id);
                   const isFocused = selection.focusedId === request.id;
-                  return <div key={request.id} data-request-id={request.id} className={`request-grid-row ${isSelected ? "is-selected" : ""} ${isFocused ? "is-focused" : ""} ${request.risk === "critical" ? "has-risk" : ""} ${annotation?.color ? `annotation-${annotation.color}` : ""} ${annotation?.struckThrough ? "is-struck" : ""}`} style={{ gridTemplateColumns: gridTemplate, width: gridWidth, transform: `translateY(${absoluteIndex * REQUEST_GRID_ROW_HEIGHT}px)` } as CSSProperties} role="row" aria-selected={isSelected} onContextMenu={(event) => {
+                  return <div key={request.id} data-request-id={request.id} className={`request-grid-row ${isSelected ? "is-selected" : ""} ${isFocused ? "is-focused" : ""} ${request.risk === "critical" ? "has-risk" : ""} ${annotation?.color ? `annotation-${annotation.color}` : ""} ${annotation?.struckThrough ? "is-struck" : ""}`} style={{ gridTemplateColumns: gridTemplate, width: gridWidth, transform: `translateY(${absoluteIndex * REQUEST_GRID_ROW_HEIGHT}px)` } as CSSProperties} role="row" aria-rowindex={absoluteIndex + 2} aria-selected={isSelected} onContextMenu={(event) => {
                     event.preventDefault();
-                    if (!selectedSet.has(request.id)) dispatchSelection({ type: "click", id: request.id, ids: requests.map((item) => item.id) });
+                    if (!selectedSet.has(request.id)) { dispatchSelection({ type: "click", id: request.id, ids: requests.map((item) => item.id) }); setSelectionFromUser(true); }
                     setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 230), y: Math.min(event.clientY, window.innerHeight - 280) });
                   }} onClick={(event) => {
                     dispatchSelection({ type: "click", id: request.id, ids: requests.map((item) => item.id), toggle: event.metaKey || event.ctrlKey, range: event.shiftKey });
+                    setSelectionFromUser(true);
                     if (!event.metaKey && !event.ctrlKey) setDetailOpen(true);
                   }}>
                     {columns.map((column) => <div key={column.id} className={`request-grid-cell request-grid-cell--${column.id}`} role="gridcell" title={requestCellTitle(displayedRequest, column.id)}>{renderRequestCell(displayedRequest, column.id)}</div>)}
@@ -656,9 +785,55 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
               <span>总数 {totalCount.toLocaleString()}</span>
               <span>筛选 {filteredCount.toLocaleString()}</span>
               <strong className="request-selection-count">已选择 {selection.selectedIds.length.toLocaleString()}{selectedCurrentWindow && <><span className="selection-window-label"> · 当前窗口</span><span className="selection-window-compact">/{requests.length.toLocaleString()}</span></>}</strong>
-              {selection.selectedIds.length > 0 && <div className="selection-actions"><button onClick={() => void copySelectedUrls()} title="复制选中 URL"><Copy size={12} /></button><button onClick={() => onOpenWorkbench("replay", selectedRequests)} title="重放选中请求"><ListRestart size={12} /></button><button onClick={() => onOpenWorkbench("diff", selectedRequests)} disabled={selection.selectedIds.length !== 2} title="对比两条请求"><GitCompareArrows size={12} /></button><button onClick={() => onOpenWorkbench("lab", selectedRequests, { createFromSelection: true })} disabled={selection.selectedIds.length !== 1} title="转为 Request Lab 草稿"><FlaskConical size={12} /></button><button onClick={() => onOpenWorkbench("collections", selectedRequests)} disabled={selection.selectedIds.length !== 1} title="归档到请求集合"><FolderTree size={12} /></button><button onClick={() => onAnalyzeSelection(selection.selectedIds)} title="AI 分析选中请求"><Sparkles size={12} /></button><button onClick={exportSelectedSummary} title="导出证据摘要"><Download size={12} /></button><button onClick={() => dispatchSelection({ type: "clear" })} title="清除选择"><X size={12} /></button></div>}
               {loading ? <span className="request-query-progress" role="status"><LoaderCircle className="spin" size={11} /><span>{cancelling ? "正在停止" : "正在载入"}</span><button data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling} title={cancelling ? "正在等待查询停止" : "取消当前查询"} aria-label={cancelling ? "正在等待查询停止" : "取消当前查询"}>{cancelling ? <LoaderCircle className="spin" size={11} /> : <X size={11} />}</button></span> : <span>{requests.length ? `${(requestWindowOffset + 1).toLocaleString()}–${(requestWindowOffset + requests.length).toLocaleString()}` : "0 条"}</span>}
             </div>
+            {/* Contextual bar over the grid. The same actions used to be eight
+                unlabelled icons wedged into the status bar, where a first-time
+                user had to hover each one to find out what it did. */}
+            {selectionFromUser && selection.selectedIds.length > 0 && (
+              <div className="selection-bar" role="toolbar" aria-label="选中请求操作">
+                <span className="selection-bar__count"><strong>{selection.selectedIds.length.toLocaleString()}</strong> 条已选</span>
+                <span className="selection-bar__divider" aria-hidden="true" />
+                {/* The summary strip's button analyses the whole session; this
+                    one is scoped to the selection. Both used to read "AI 分析". */}
+                <button className="selection-bar__action is-primary" onClick={() => onAnalyzeSelection(selection.selectedIds)} title={`只分析选中的 ${selection.selectedIds.length} 条请求`}>
+                  <Sparkles size={14} />分析选中
+                </button>
+                <button className="selection-bar__action" onClick={() => onOpenWorkbench("replay", selectedRequests)} title="按原样重新发送这些请求">
+                  <ListRestart size={14} />重放
+                </button>
+                <button
+                  className="selection-bar__action"
+                  onClick={() => onOpenWorkbench("lab", selectedRequests, { createFromSelection: true })}
+                  disabled={selection.selectedIds.length !== 1}
+                  title={selection.selectedIds.length === 1 ? "在请求实验室里改参数、改 Header 并生成代码" : "请只选择一条请求"}
+                >
+                  <FlaskConical size={14} />改写与生成代码
+                </button>
+                <button
+                  className="selection-bar__action"
+                  onClick={() => onOpenWorkbench("diff", selectedRequests)}
+                  disabled={selection.selectedIds.length !== 2}
+                  title={selection.selectedIds.length === 2 ? "逐字段对比两条请求" : "请选择两条请求"}
+                >
+                  <GitCompareArrows size={14} />对比
+                </button>
+                <div className="selection-bar__more" ref={selectionMoreRef}>
+                  <button className="selection-bar__action" onClick={() => setSelectionMoreOpen((open) => !open)} aria-expanded={selectionMoreOpen} title="更多操作">
+                    <MoreHorizontal size={14} />更多
+                  </button>
+                  {selectionMoreOpen && (
+                    <div className="selection-more-menu" role="menu" aria-label="更多选中操作">
+                      <button role="menuitem" onClick={() => { void copySelectedUrls(); setSelectionMoreOpen(false); }}><Copy size={14} />复制 URL</button>
+                      <button role="menuitem" onClick={() => { onOpenWorkbench("collections", selectedRequests); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><FolderTree size={14} />归档到请求集合</button>
+                      <button role="menuitem" onClick={() => { void toggleSelectedBookmark(); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><Bookmark size={14} />{selectedRequests[0] && (annotationOverrides[selectedRequests[0].id] ?? selectedRequests[0].annotation)?.bookmarked ? "取消书签" : "添加书签"}</button>
+                      <button role="menuitem" onClick={() => { exportSelectedSummary(); setSelectionMoreOpen(false); }}><Download size={14} />导出证据摘要</button>
+                    </div>
+                  )}
+                </div>
+                <button className="selection-bar__clear" onClick={() => { dispatchSelection({ type: "clear" }); setSelectionFromUser(false); }} title="清除选择" aria-label="清除选择"><X size={14} /></button>
+              </div>
+            )}
           </div>
 
           {detailOpen && selected && inspectorPreferences.layout !== "maximized" && <div className={`inspector-resize-handle is-${inspectorPreferences.layout}`} onPointerDown={(event) => setInspectorResizing({ startX: event.clientX, startY: event.clientY, startSize: inspectorPreferences.layout === "right" ? inspectorPreferences.rightWidth : inspectorPreferences.bottomHeight })} />}
@@ -671,7 +846,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         <button role="menuitem" onClick={() => { void copySelectedUrls(); setContextMenu(undefined); }}><Copy size={14} />复制 URL</button>
         <button role="menuitem" onClick={() => { setDetailOpen(true); setContextMenu(undefined); }}><PanelRight size={14} />打开详情</button>
         <button role="menuitem" onClick={() => { setInspectorLayout("maximized"); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><Maximize2 size={14} />最大化详情</button>
-        <button role="menuitem" onClick={() => { onAnalyzeSelection(selection.selectedIds); setContextMenu(undefined); }}><Sparkles size={14} />AI 分析选中请求</button>
+        <button role="menuitem" onClick={() => { onAnalyzeSelection(selection.selectedIds); setContextMenu(undefined); }}><Sparkles size={14} />分析选中的 {selectedRequests.length} 条请求</button>
         <button role="menuitem" onClick={() => { onOpenWorkbench("replay", selectedRequests); setContextMenu(undefined); }}><ListRestart size={14} />重放选中请求</button>
         <button role="menuitem" onClick={() => { onOpenWorkbench("diff", selectedRequests); setContextMenu(undefined); }} disabled={selectedRequests.length !== 2}><GitCompareArrows size={14} />对比两条请求</button>
         <button role="menuitem" onClick={() => { onOpenWorkbench("lab", selectedRequests, { createFromSelection: true }); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><FlaskConical size={14} />转为 Request Lab 草稿</button>
@@ -685,12 +860,12 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
 
 function QuickFilterMenu({ state, facets, onToggle }: { state: QuickFilterState; facets: RequestFacets; onToggle: <K extends "hosts" | "methods" | "protocols" | "types" | "statuses" | "exactStatuses" | "sources" | "risks" | "shownet">(key: K, value: QuickFilterState[K][number]) => void }) {
   return <div className="traffic-popover quick-filter-popover">
-    <FilterOptions title="方法" values={["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT"]} selected={state.methods} count={(value) => facetCount(facets.methods, value)} onToggle={(value) => onToggle("methods", value)} />
-    <FilterOptions title="协议" values={["http/1.1", "h2", "ws"]} labels={{ "http/1.1": "HTTP/1.1", h2: "HTTP/2", ws: "WebSocket" }} selected={state.protocols} count={(value) => facetCount(facets.protocols, value)} onToggle={(value) => onToggle("protocols", value)} />
-    <FilterOptions title="类型" values={["api", "document", "script", "image", "font", "websocket", "sse"]} labels={{ api: "Fetch/XHR", document: "文档", script: "脚本", image: "图片", font: "字体", websocket: "WebSocket", sse: "SSE" }} selected={state.types} count={(value) => value === "api" ? sumFacet(facets.types, ["fetch", "xhr"]) : facetCount(facets.types, value)} onToggle={(value) => onToggle("types", value)} />
-    <FilterOptions<QuickStatus> title="状态" values={["pending", "streaming", "2xx", "3xx", "4xx", "5xx", "failed", "tunnel"]} labels={{ pending: "进行中", streaming: "流式传输", failed: "失败", tunnel: "未解密" }} selected={state.statuses} count={() => undefined} onToggle={(value) => onToggle("statuses", value)} />
+    <FilterOptions title="方法" values={METHOD_VALUES} selected={state.methods} count={(value) => facetCount(facets.methods, value)} onToggle={(value) => onToggle("methods", value)} />
+    <FilterOptions title="协议" values={PROTOCOL_VALUES} labels={PROTOCOL_LABELS} selected={state.protocols} count={(value) => facetCount(facets.protocols, value)} onToggle={(value) => onToggle("protocols", value)} />
+    <FilterOptions title="类型" values={TYPE_VALUES} labels={TYPE_LABELS} selected={state.types} count={(value) => value === "api" ? sumFacet(facets.types, ["fetch", "xhr"]) : facetCount(facets.types, value)} onToggle={(value) => onToggle("types", value)} />
+    <FilterOptions<QuickStatus> title="状态" values={STATUS_VALUES} labels={STATUS_LABELS} selected={state.statuses} count={() => undefined} onToggle={(value) => onToggle("statuses", value)} />
     <FilterOptions<SourceType> title="来源" values={["browser", "desktop", "terminal", "script", "mobile", "iot", "reverse"]} labels={sourceLabels} selected={state.sources} count={(value) => facetCount(facets.sources, value)} onToggle={(value) => onToggle("sources", value)} />
-    <FilterOptions<QuickShownet> title="ShowNet" values={["hook", "snippets", "risk", "slow"]} labels={{ hook: "有 Hook", snippets: "有代码片段", risk: "有风险", slow: "慢请求" }} selected={state.shownet} count={() => undefined} onToggle={(value) => onToggle("shownet", value)} />
+    <FilterOptions<QuickShownet> title="标记" values={SHOWNET_VALUES} labels={SHOWNET_LABELS} selected={state.shownet} count={() => undefined} onToggle={(value) => onToggle("shownet", value)} />
   </div>;
 }
 
@@ -699,10 +874,10 @@ function FacetSidebar({ facets, state, savedViews, bookmarkCount, onToggle, onAp
     <header><div><strong>筛选统计</strong><span>基于当前查询结果</span></div><button onClick={onClose} title="收起统计侧栏"><X size={14} /></button></header>
     <FacetSection title="域名" facets={facets.hosts} selected={state.hosts} onToggle={(value) => onToggle("hosts", value)} limit={10} />
     <FacetSection title="来源" facets={facets.sources} selected={state.sources} labels={sourceLabels} onToggle={(value) => onToggle("sources", value as SourceType)} />
-    <FacetSection title="协议" facets={facets.protocols} selected={state.protocols} labels={{ "http/1.1": "HTTP/1.1", h2: "HTTP/2", ws: "WebSocket" }} onToggle={(value) => onToggle("protocols", value)} />
-    <FacetSection title="类型" facets={facets.types} selected={state.types} onToggle={(value) => onToggle("types", value)} />
+    <FacetSection title="协议" facets={facets.protocols} selected={state.protocols} labels={PROTOCOL_LABELS} onToggle={(value) => onToggle("protocols", value)} />
+    <FacetSection title="类型" facets={facets.types} selected={state.types} labels={TYPE_LABELS} onToggle={(value) => onToggle("types", value)} />
     <FacetSection title="状态" facets={facets.statuses} selected={state.exactStatuses} onToggle={(value) => onToggle("exactStatuses", value)} />
-    <FacetSection title="风险" facets={facets.risks} selected={state.risks} labels={{ none: "无风险", info: "信息", warning: "注意", critical: "严重" }} onToggle={(value) => onToggle("risks", value as RiskLevel)} />
+    <FacetSection title="风险" facets={facets.risks} selected={state.risks} labels={RISK_LABELS} onToggle={(value) => onToggle("risks", value as RiskLevel)} />
     <section className="facet-section facet-organization"><div className="facet-section__title"><strong>组织</strong><span>{savedViews.length + bookmarkCount}</span></div><div className="facet-bookmark-summary"><Bookmark size={12} /><span>已加载书签</span><small>{bookmarkCount}</small></div>{savedViews.slice(0, 5).map((view) => <button key={view.id} onClick={() => onApplyView(view)}><Save size={12} /><span>{view.name}</span></button>)}</section>
   </aside>;
 }
@@ -711,7 +886,7 @@ function FacetSection({ title, facets, selected, labels, onToggle, limit = 8 }: 
   return <section className="facet-section"><div className="facet-section__title"><strong>{title}</strong><span>{facets.length}</span></div><div>{facets.slice(0, limit).map((facet) => <button key={facet.value} className={selected.includes(facet.value) ? "is-active" : ""} onClick={() => onToggle(facet.value)} title={facet.value}><span>{selected.includes(facet.value) && <Check size={10} />}{labels?.[facet.value] ?? facet.value}</span><small>{facet.count.toLocaleString()}</small></button>)}</div>{facets.length === 0 && <small className="facet-empty">暂无数据</small>}</section>;
 }
 
-function FilterOptions<T extends string>({ title, values, labels, selected, count, onToggle }: { title: string; values: T[]; labels?: Partial<Record<T, string>>; selected: T[]; count: (value: T) => number | undefined; onToggle: (value: T) => void }) {
+function FilterOptions<T extends string>({ title, values, labels, selected, count, onToggle }: { title: string; values: readonly T[]; labels?: Partial<Record<T, string>>; selected: T[]; count: (value: T) => number | undefined; onToggle: (value: T) => void }) {
   return <section className="quick-filter-group"><strong>{title}</strong><div>{values.map((value) => <button key={value} className={selected.includes(value) ? "is-active" : ""} onClick={() => onToggle(value)}><span>{selected.includes(value) && <Check size={11} />}{labels?.[value] ?? value}</span>{count(value) != null && <small>{count(value)}</small>}</button>)}</div></section>;
 }
 
@@ -745,7 +920,7 @@ const numericFilterFields = new Set<RequestField>(["order", "startedAt", "status
 
 function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
   if (column === "order") return <><span className={`selection-mark ${request.state}`} />{request.annotation?.bookmarked && <Bookmark className="row-bookmark" size={11} fill="currentColor" />}<span className={`risk-mark risk-${request.risk}`} />{request.order}</>;
-  if (column === "state") return <span className={`request-state request-state--${request.state}`}>{request.state === "tunnel" && <LockKeyhole size={10} />}{request.state === "pending" ? "进行中" : request.state === "streaming" ? "流式" : request.state === "complete" ? "完成" : request.state === "tunnel" ? "未解密" : "失败"}</span>;
+  if (column === "state") return <span className={`request-state request-state--${request.state}`}>{request.state === "tunnel" && <LockKeyhole size={10} />}{requestStateLabel(request.state)}</span>;
   if (column === "method") return <span className={`method method-${request.method.toLowerCase()}`}>{request.method}</span>;
   if (column === "url") return <span className="grid-url"><strong>{request.host}</strong><span>{request.path}{request.query ? `?${request.query}` : ""}</span>{request.hasHook && <Braces size={11} />}</span>;
   if (column === "status") {
@@ -767,7 +942,7 @@ function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
   }
   if (column === "source") { const SourceIcon = sourceIcons[request.source]; return <span className="source-cell"><SourceIcon size={13} />{sourceLabels[request.source]}</span>; }
   if (column === "sizeBytes") return formatListBytes(request.sizeBytes);
-  if (column === "durationMs") return <span className={(request.durationMs ?? 0) > 1_000 ? "is-slow" : ""}>{request.durationMs == null ? "--" : `${request.durationMs} ms`}</span>;
+  if (column === "durationMs") return <span className={isSlowRequest(request.durationMs) ? "is-slow" : ""}>{request.durationMs == null ? "--" : `${request.durationMs} ms`}</span>;
   if (column === "startedAt") return new Date(request.startedAt).toLocaleTimeString("zh-CN", { hour12: false });
   if (column === "risk") return request.risk === "none" ? "--" : request.risk;
   if (column === "hasHook") return request.hasHook ? <Braces size={13} /> : "--";
@@ -822,7 +997,7 @@ function RequestDetailLoader({ item, layout, onAnnotationSaved, onAnalyze, onLay
   return (
     <aside className="request-detail request-detail--loading">
       <div className="request-detail__head">
-        <div className="request-detail__title"><span className={`method method-${item.method.toLowerCase()}`}>{item.method}</span><div><strong>{item.path}</strong><span>{item.host}</span></div></div>
+        <div className="request-detail__title"><span className={`method method-${item.method.toLowerCase()}`}>{item.method}</span><div><h2>{item.path}</h2><span>{item.host}</span></div></div>
         <button className="icon-button" onClick={onClose} title="关闭详情"><X size={16} /></button>
       </div>
       <div className="detail-empty">{error ? <><CircleAlert size={20} /><span>{error}</span></> : <><Clock3 size={20} /><span>正在读取请求详情</span></>}</div>
@@ -853,12 +1028,6 @@ function previewRequestDetail(item: RequestListItem) {
     cryptoSnippetCount: item.cryptoSnippetCount,
     tls: item.tlsVersion ?? (item.tlsIntercepted ? "TLS" : "明文"),
   } satisfies RequestRecord;
-}
-
-function formatListBytes(bytes: number) {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(bytes < 10 * 1_024 ? 1 : 0)} KB`;
-  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
 function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, onAnalyze, onLayoutChange, onClose }: { request: RequestRecord; annotationSummary?: RequestAnnotationSummary; layout: InspectorLayout; onAnnotationSaved: (annotation: RequestAnnotation) => void; onAnalyze: () => void; onLayoutChange: (layout: InspectorLayout) => void; onClose: () => void }) {
@@ -999,7 +1168,7 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
       <div className="request-detail__head">
         <div className="request-detail__title">
           <span className={`method method-${request.method.toLowerCase()}`}>{request.method}</span>
-          <div><strong>{request.path}</strong><span>{request.host}</span></div>
+          <div><h2>{request.path}</h2><span>{request.host}</span></div>
         </div>
         <div className="request-detail__actions">
           <button className={`icon-button ${layout === "right" ? "is-active" : ""}`} onClick={() => onLayoutChange("right")} title="详情置于右侧"><PanelRight size={15} /></button>
@@ -1185,7 +1354,7 @@ function CookieViewer({ requestHeaders, responseHeaders }: { requestHeaders: Arr
 function RuleTraceViewer({ traces, loading }: { traces: CaptureRuleRun[]; loading: boolean }) {
   if (loading) return <div className="detail-empty"><Clock3 size={20} /><span>正在读取规则轨迹</span></div>;
   if (!traces.length) return <div className="detail-empty"><SlidersHorizontal size={20} /><span>该请求没有规则命中轨迹</span></div>;
-  return <div className="rule-trace-list">{traces.map((trace, index) => <article key={trace.id} className={`rule-trace-item is-${trace.result}`}><header><span>{index + 1}</span><div><strong>{trace.ruleName}</strong><small>{trace.stage} · v{trace.revision}</small></div><em>{trace.result === "applied" ? "已执行" : trace.result === "preview" ? "预览" : trace.result === "error" ? "错误" : "未命中"}</em></header><div>{Array.isArray(trace.diffSummary.changes) && trace.diffSummary.changes.map((change) => <p key={String(change)}><Check size={11} />{String(change)}</p>)}{trace.error && <p className="is-error"><CircleAlert size={11} />{trace.error}</p>}</div><footer><span>{trace.durationMs} ms</span><time>{new Date(trace.createdAt).toLocaleTimeString("zh-CN", { hour12: false })}</time></footer></article>)}</div>;
+  return <div className="rule-trace-list">{traces.map((trace, index) => <article key={trace.id} className={`rule-trace-item is-${trace.result}`}><header><span>{index + 1}</span><div><strong>{trace.ruleName}</strong><small>{trace.stage} · v{trace.revision}</small></div><em>{ruleTraceResultLabel(trace.result)}</em></header><div>{Array.isArray(trace.diffSummary.changes) && trace.diffSummary.changes.map((change) => <p key={String(change)}><Check size={11} />{String(change)}</p>)}{trace.error && <p className="is-error"><CircleAlert size={11} />{trace.error}</p>}</div><footer><span>{trace.durationMs} ms</span><time>{new Date(trace.createdAt).toLocaleTimeString("zh-CN", { hour12: false })}</time></footer></article>)}</div>;
 }
 
 
@@ -1277,8 +1446,8 @@ function WebSocketMessages({ frames, loading, error }: { frames: WebSocketFrameE
             <header>
               <span className="websocket-message__direction">{outbound ? <ArrowUpRight size={13} /> : <ArrowDownLeft size={13} />}{outbound ? "发往服务端" : "来自服务端"}</span>
               <span className={`websocket-opcode opcode-${frame.payload.opcode}`}>{frame.payload.opcode}</span>
-              <time>{formatFrameTime(frame.timestamp)}</time>
-              <small>{formatFrameSize(frame.payload.sizeBytes)}</small>
+              <time>{formatClock(frame.timestamp, true)}</time>
+              <small>{formatBytes(frame.payload.sizeBytes)}</small>
             </header>
             <pre>{frame.payload.data || (frame.payload.opcode === "close" ? "连接已关闭" : "空消息")}</pre>
             <footer>
@@ -1351,7 +1520,7 @@ function SseInspector({ events, loading, error }: { events: SseEvent[]; loading:
         {filteredEvents.map((event) => <button key={event.sequence} className={`${selected?.sequence === event.sequence ? "is-selected" : ""} is-${event.payload.kind}`} onClick={() => setSelectedSequence(event.sequence)} role="option" aria-selected={selected?.sequence === event.sequence}>
           <span className="sse-event-index">#{event.payload.index}</span>
           <span className="sse-event-summary"><strong>{sseEventLabel(event)}</strong><small>{event.payload.data || event.payload.comments.join(" ") || event.payload.id || "无数据"}</small></span>
-          <span className="sse-event-meta"><time>{formatFrameTime(event.timestamp)}</time><small>{formatFrameSize(event.payload.sizeBytes)}</small></span>
+          <span className="sse-event-meta"><time>{formatClock(event.timestamp)}</time><small>{formatBytes(event.payload.sizeBytes)}</small></span>
         </button>)}
         {!filteredEvents.length && <div className="sse-no-results"><Search size={18} /><span>没有匹配事件</span></div>}
       </div>
@@ -1359,12 +1528,12 @@ function SseInspector({ events, loading, error }: { events: SseEvent[]; loading:
         {selected ? <>
           <header>
             <div><span>#{selected.payload.index}</span><strong>{sseEventLabel(selected)}</strong></div>
-            <time>{formatFrameTime(selected.timestamp)}</time>
+            <time>{formatClock(selected.timestamp)}</time>
           </header>
           <dl>
             <div><dt>事件</dt><dd>{selected.payload.event}</dd></div>
             <div><dt>ID</dt><dd>{selected.payload.id || "-"}</dd></div>
-            <div><dt>大小</dt><dd>{formatFrameSize(selected.payload.sizeBytes)}</dd></div>
+            <div><dt>大小</dt><dd>{formatBytes(selected.payload.sizeBytes)}</dd></div>
             <div><dt>重试</dt><dd>{selected.payload.retry === undefined ? "-" : `${selected.payload.retry} ms`}</dd></div>
           </dl>
           {(selected.payload.truncated || selected.payload.incomplete) && <div className="sse-evidence-warning"><CircleAlert size={13} /><span>{selected.payload.truncated ? "事件超过保存上限，内容已截断" : "连接结束前事件没有完整分隔符"}</span></div>}
@@ -1445,23 +1614,6 @@ function previewWebSocketFrames(request: RequestRecord): WebSocketFrameEvent[] {
     frame(3, "client_to_server", "ping", "cGluZw==", "base64", 4),
     frame(4, "server_to_client", "binary", "AQIDBAUGBwgJCgsMDQ4PEA==", "base64", 16),
   ];
-}
-
-function formatFrameTime(timestamp: number) {
-  const date = new Date(timestamp);
-  const clock = date.toLocaleTimeString("zh-CN", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  return `${clock}.${date.getMilliseconds().toString().padStart(3, "0")}`;
-}
-
-function formatFrameSize(size: number) {
-  if (size < 1_024) return `${size} B`;
-  if (size < 1_024 * 1_024) return `${(size / 1_024).toFixed(1)} KB`;
-  return `${(size / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
 function CodeTemplateDialog({ request, onClose }: { request: RequestRecord; onClose: () => void }) {

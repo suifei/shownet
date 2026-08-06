@@ -1,4 +1,5 @@
 import type { HeaderEntry } from "./types";
+import { shellQuote } from "./shellQuote.ts";
 
 export type RequestCodeTemplate = "curl" | "httpie" | "python" | "java" | "fetch" | "axios" | "go";
 
@@ -28,10 +29,6 @@ function activeHeaders(headers: HeaderEntry[]) {
 
 function quote(value: string) {
   return JSON.stringify(value);
-}
-
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `"'"'`)}'`;
 }
 
 function objectLiteral(headers: HeaderEntry[]) {

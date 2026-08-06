@@ -76,7 +76,13 @@ describe("HTTPS interception settings", () => {
     ]);
 
     assert.match(traffic, /request\.state === "tunnel" && <LockKeyhole/);
-    assert.match(traffic, /request\.state === "tunnel" \? "未解密"/);
+    // The state label moved into REQUEST_STATE_LABELS so the grid and the
+    // filter cannot name the same state differently.
+    assert.match(traffic, /requestStateLabel\(request\.state\)/);
+    assert.match(
+      await readFile(new URL("../src/requestFilters.ts", import.meta.url), "utf8"),
+      /tunnel: "未解密"/,
+    );
     assert.match(storage, /json_extract\(r\.tls_fingerprint_json, '\$\.captureMode'\) = 'mitm'/);
     assert.match(storage, /UPPER\(r\.method\) != 'CONNECT'/);
     assert.match(proxy, /tunnel_fingerprint\(inbound\)/);

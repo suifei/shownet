@@ -1,3 +1,5 @@
+import type { ObservableMethod } from "./httpMethods.ts";
+
 export type ViewId = "traffic" | "analysis" | "browser" | "lab" | "skills" | "settings" | "advanced";
 
 export type SourceType =
@@ -315,7 +317,7 @@ export interface RequestRecord {
   id: string;
   order: number;
   time: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT";
+  method: ObservableMethod;
   host: string;
   path: string;
   query?: string;

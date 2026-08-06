@@ -2,6 +2,7 @@ import { CheckCircle2, CircleAlert, Code2, Download, ShieldAlert } from "lucide-
 import { useEffect, useMemo, useState } from "react";
 import { availableBodyModes, bodyHex, bodyPreviewPolicy, detectBodyKind, headerValue, legacyBodyMetadata, parseJsonBody, prettyBody, type BodyViewMode } from "../requestInspector";
 import type { BodyCaptureMetadata, HeaderEntry } from "../types";
+import { formatBytes } from "../format";
 
 export function HttpBodyViewer({ content, headers, metadata: providedMetadata, filename, legacyMetadata: legacy = false }: { content?: string; headers: HeaderEntry[]; metadata?: BodyCaptureMetadata; filename: string; legacyMetadata?: boolean }) {
   const metadata = providedMetadata ?? legacyBodyMetadata(content);
@@ -55,5 +56,4 @@ export function HttpBodyStatus({ metadata }: { metadata: BodyCaptureMetadata }) 
 }
 
 function CodeBlock({ content }: { content: string }) { return <pre className="code-block">{content}</pre>; }
-function formatBytes(bytes: number) { return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function downloadBody(content: string, filename: string, contentType: string) { const url = URL.createObjectURL(new Blob([content], { type: contentType })); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 0); }

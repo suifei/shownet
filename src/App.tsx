@@ -9,6 +9,7 @@ import {
   CircleAlert,
   CircleDot,
   Command,
+  Compass,
   Copy,
   Download,
   FileArchive,
@@ -16,7 +17,6 @@ import {
   FileSearch,
   FlaskConical,
   FolderOpen,
-  KeyRound,
   Laptop,
   Menu,
   MoreHorizontal,
@@ -28,12 +28,12 @@ import {
   Route,
   Save,
   Search,
-  ServerCog,
   Settings,
   ShieldCheck,
   Sparkles,
   Square,
   Terminal,
+  Trash2,
   Wifi,
   X,
   Zap,
@@ -47,12 +47,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import shownetAppIcon from "./assets/shownet-app-icon.png";
 import { isShownetSessionPath } from "./browserDrag";
 import { clientAccessModeSummary } from "./clientAccess";
+import {
+  filterCommands,
+  flattenCommands,
+  groupCommands,
+  moveCommandCursor,
+  type CommandAction,
+} from "./commandRegistry";
+import { AboutDialog } from "./components/AboutDialog";
 import { AdvancedConsoleView } from "./components/AdvancedConsoleView";
 import { AnalysisView } from "./components/AnalysisView";
 import { BrowserView } from "./components/BrowserView";
 import { RequestWorkbench, type WorkbenchMode } from "./components/RequestWorkbench";
 import { SkillsView } from "./components/SkillsView";
 import { SettingsView, type SettingsTab } from "./components/SettingsView";
+import { useConfirm } from "./components/ConfirmDialog";
+import { SetupGuide } from "./components/SetupGuide";
+import { ShortcutsSheet } from "./components/ShortcutsSheet";
 import { TrafficView } from "./components/TrafficView";
 import { createPreviewRequestWindow, initialRequestListItems, initialSessions, sourceLabels } from "./data";
 import {
@@ -62,9 +73,18 @@ import {
   type LiveCaptureDisplaySnapshot,
 } from "./liveCaptureDisplay";
 import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatcher, createRequestQueryId, isRequestQueryCancelled, mergeRequestWindowItems, queryPreviewRequestList, REQUEST_LIST_WINDOW_SIZE, requiresLiveQueryRefresh } from "./requestList";
+import { formatBytes } from "./format";
 import { defaultCaptureSessionName } from "./sessionPresentation";
-import type { AnalysisStreamEvent, BreakpointQueueSnapshot, ConnectionDiagnostics, FilterExpression, ProxyTerminalLaunchResult, RequestFacets, RequestListEvent, RequestListItem, RequestListPage, RequestListWindow, RequestQueryCancellationAck, RequestQueryIdleMeasurement, RequestSort, ReverseProxySettingsInput, ReverseProxyStatus, RuntimeStatus, Session, SoakDiagnosticsStatus, SourceType, ViewId } from "./types";
+import {
+  buildSetupSteps,
+  SETUP_DISMISSED_KEY,
+  setupProgress,
+  shouldAutoOpenSetup,
+  type SetupStepId,
+} from "./setupChecklist";
+import type { AnalysisMode, AnalysisStreamEvent, BreakpointQueueSnapshot, ConnectionDiagnostics, FilterExpression, ProxyTerminalLaunchResult, RequestFacets, RequestListEvent, RequestListItem, RequestListPage, RequestListWindow, RequestQueryCancellationAck, RequestQueryIdleMeasurement, RequestSort, ReverseProxySettingsInput, ReverseProxyStatus, RuntimeStatus, Session, SoakDiagnosticsStatus, SourceType, ViewId } from "./types";
 import { useDismissibleLayer } from "./useDismissibleLayer";
+import { sourceIcons } from "./sourceIcons";
 
 const hasNativeRuntime = isTauri();
 const defaultRequestSort: RequestSort[] = [{ field: "order", direction: "asc" }];
@@ -95,6 +115,24 @@ const previewRequestListPage: RequestListPage | null = previewRequestWindowEnabl
   facets: emptyRequestFacets,
 } : null;
 const REQUEST_QUERY_IDLE_EVENT = "shownet:request-query-idle";
+
+/** True while focus is in a text field, where "?" is a character, not a shortcut. */
+function isEditableTarget(target: EventTarget | null) {
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || (target instanceof HTMLElement && target.isContentEditable);
+}
+
+/** Opens a link in the user's browser; falls back to a new tab in preview. */
+async function openExternalUrl(url: string) {
+  if (!hasNativeRuntime) {
+    globalThis.open?.(url, "_blank", "noopener");
+    return;
+  }
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
+}
 
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
@@ -145,15 +183,6 @@ const primaryNavigationGroups: Array<{ label: string; views: ViewId[] }> = [
   { label: "智能能力", views: ["analysis", "skills"] },
 ];
 
-const sourceIcons: Record<SourceType, typeof Browser> = {
-  browser: Browser,
-  desktop: Laptop,
-  terminal: Terminal,
-  script: Braces,
-  mobile: Wifi,
-  iot: Radio,
-  reverse: Route,
-};
 
 const fallbackRuntime: RuntimeStatus = {
   appVersion: "0.1.0",
@@ -234,6 +263,18 @@ interface WorkbenchLaunchContext {
   sessionId: string;
   selected: RequestListItem[];
   createFromSelection: boolean;
+}
+
+/**
+ * One or two characters that stand for a session in the collapsed rail.
+ * Latin names read better with two letters; CJK is dense enough at one.
+ */
+function sessionInitial(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  const first = [...trimmed][0];
+  if (/[a-zA-Z0-9]/.test(first)) return trimmed.slice(0, 2).toUpperCase();
+  return first;
 }
 
 function formatSessionTime(value: string) {
@@ -328,6 +369,29 @@ function App() {
   const [breakpointQueue, setBreakpointQueue] = useState<BreakpointQueueSnapshot>({ tasks: [], capacity: 32, skippedCount: 0, generatedAt: Date.now() });
   const [evidenceRequestId, setEvidenceRequestId] = useState<string>();
   const [sessionDrop, setSessionDrop] = useState<SessionDropState>({ status: "idle" });
+  // AI 分析 and Skill 编排 are two views onto the same pipeline. Holding the
+  // mode here keeps them agreeing, and stops the selection resetting every
+  // time AnalysisView unmounts on navigation.
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("auto");
+  /**
+   * Whether the user has actually picked a mode. Until they have, restoring the
+   * last report may adopt its mode; afterwards it must not, or opening 分析
+   * would silently undo a choice made over in Skill 编排.
+   */
+  const [analysisModePinned, setAnalysisModePinned] = useState(false);
+  const chooseAnalysisMode = useCallback((mode: AnalysisMode) => {
+    setAnalysisMode(mode);
+    setAnalysisModePinned(true);
+  }, []);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [setupDismissed, setSetupDismissed] = useState(
+    () => globalThis.localStorage?.getItem(SETUP_DISMISSED_KEY) === "1",
+  );
+  const [aiConfigured, setAiConfigured] = useState(false);
+  const setupAutoOpenedRef = useRef(false);
   const sessionToolsRef = useRef<HTMLDivElement>(null);
   const lastLocalEditableRef = useRef<HTMLElement | null>(null);
   const transferringRef = useRef(transferring);
@@ -354,6 +418,15 @@ function App() {
   useDismissibleLayer(sessionToolsOpen, sessionToolsRef, () => setSessionToolsOpen(false));
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? loadingSession;
+
+  const setupSteps = useMemo(() => buildSetupSteps({
+    capturing,
+    requestCount: activeSession.requestCount,
+    caInstalled: runtime.caInstalled,
+    aiConfigured,
+    sourceCount: activeSession.sources.length,
+  }), [activeSession.requestCount, activeSession.sources.length, aiConfigured, capturing, runtime.caInstalled]);
+  const setupState = useMemo(() => setupProgress(setupSteps), [setupSteps]);
 
   const cancelBackendRequestQuery = useCallback((queryId: string) => {
     if (!hasNativeRuntime) return;
@@ -771,27 +844,34 @@ function App() {
     };
   }, []);
 
+  // Preview seeding needs `sessions`; the desktop path must not depend on it.
+  // `refreshSessions()` runs on every capture://request-created (coalesced to
+  // 250 ms) and hands back a fresh array, so a shared effect re-ran ~4x/s during
+  // capture — resetting the scroll window to 0 and cancelling the in-flight
+  // query each time.
   useEffect(() => {
-    if (!hasNativeRuntime) {
-      const session = sessions.find((item) => item.id === activeSessionId);
-      if (previewRequestWindowEnabled) {
-        setRequests(previewRequestWindowItems);
-        setRequestListPage(previewRequestListPage);
-      } else {
-        const page = queryPreviewRequestList(session?.requestCount ? initialRequestListItems : [], requestFilter, requestSort);
-        setRequests(page.items);
-        setRequestListPage(page);
-      }
-      requestWindowOffsetRef.current = 0;
-      requestWindowTargetRef.current = undefined;
-      setRequestWindowTargetOffset(undefined);
-      setRequestWindowOffset(0);
-      return;
+    if (hasNativeRuntime) return;
+    const session = sessions.find((item) => item.id === activeSessionId);
+    if (previewRequestWindowEnabled) {
+      setRequests(previewRequestWindowItems);
+      setRequestListPage(previewRequestListPage);
+    } else {
+      const page = queryPreviewRequestList(session?.requestCount ? initialRequestListItems : [], requestFilter, requestSort);
+      setRequests(page.items);
+      setRequestListPage(page);
     }
+    requestWindowOffsetRef.current = 0;
+    requestWindowTargetRef.current = undefined;
+    setRequestWindowTargetOffset(undefined);
+    setRequestWindowOffset(0);
+  }, [activeSessionId, requestFilter, requestSort, sessions]);
+
+  useEffect(() => {
+    if (!hasNativeRuntime) return;
     requestWindowOffsetRef.current = 0;
     setRequestWindowOffset(0);
     refreshRequests(activeSessionId).catch((error) => setToast(`读取流量失败：${String(error)}`));
-  }, [activeSessionId, refreshRequests, requestFilter, requestSort, sessions]);
+  }, [activeSessionId, refreshRequests]);
 
   useEffect(() => {
     liveDisplaySyncBufferRef.current.clear();
@@ -900,12 +980,19 @@ function App() {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
+      if (event.key === "?" && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        setShortcutsOpen((open) => !open);
+      }
       if (event.key === "Escape") {
         setCommandOpen(false);
         setConnectOpen(false);
         setSessionToolsOpen(false);
         setRenamingSessionId("");
         setExportOpen(false);
+        setSetupOpen(false);
+        setShortcutsOpen(false);
+        setAboutOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -917,6 +1004,29 @@ function App() {
     const timeout = window.setTimeout(() => setToast(null), 2600);
     return () => window.clearTimeout(timeout);
   }, [toast]);
+
+  // The setup panel needs to know whether analysis is usable, and that lives
+  // behind the same IPC the AI settings tab reads. Re-checked whenever the user
+  // returns from Settings so a freshly saved key ticks the step immediately.
+  useEffect(() => {
+    if (!hasNativeRuntime) return;
+    let disposed = false;
+    invoke<{ provider: string; hasApiKey: boolean }>("get_ai_provider_settings")
+      .then((settings) => {
+        if (!disposed) setAiConfigured(settings.hasApiKey || settings.provider === "local");
+      })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [activeView]);
+
+  useEffect(() => {
+    if (setupAutoOpenedRef.current) return;
+    // Wait for the first runtime probe so the checklist never flashes an
+    // all-empty state that immediately corrects itself.
+    if (hasNativeRuntime && !sessions.length) return;
+    setupAutoOpenedRef.current = true;
+    if (shouldAutoOpenSetup(setupState, setupDismissed)) setSetupOpen(true);
+  }, [sessions.length, setupDismissed, setupState]);
 
   const toggleCapture = async () => {
     if (!activeSession.id) return false;
@@ -990,6 +1100,36 @@ function App() {
     setToast("新会话已创建");
   };
 
+  const deleteSession = async (session: Session) => {
+    setSessionToolsOpen(false);
+    if (capturing && session.id === activeSessionId) {
+      setToast("请先停止抓包，再删除当前会话");
+      return;
+    }
+    if (!await confirm({
+      title: `删除会话“${session.name}”？`,
+      detail: `${session.requestCount} 条请求、以及这个会话的标注与规则轨迹都会一并删除，无法撤销。`,
+      confirmLabel: "删除会话",
+      tone: "danger",
+    })) return;
+
+    if (!hasNativeRuntime) {
+      setSessions((items) => items.filter((item) => item.id !== session.id));
+      setToast(`已删除 ${session.name}`);
+      return;
+    }
+    setTransferring(true);
+    try {
+      await invoke("delete_session", { sessionId: session.id });
+      await refreshSessions();
+      setToast(`已删除 ${session.name}`);
+    } catch (error) {
+      setToast(`删除会话失败：${String(error)}`);
+    } finally {
+      setTransferring(false);
+    }
+  };
+
   const beginSessionRename = (session: Session) => {
     setActiveSessionId(session.id);
     setRenamingSessionId(session.id);
@@ -1053,7 +1193,7 @@ function App() {
         path,
       });
       setExportOpen(false);
-      setToast(`${result.format} 已导出 · ${formatFileSize(result.bytes)}`);
+      setToast(`${result.format} 已导出 · ${formatBytes(result.bytes)}`);
     } catch (error) {
       setToast(`导出失败：${String(error)}`);
     } finally {
@@ -1168,10 +1308,221 @@ function App() {
     setActiveView("lab");
   };
 
+  const openSettingsTab = (tab: SettingsTab) => {
+    setSettingsTab(tab);
+    setActiveView("settings");
+    setCommandOpen(false);
+  };
+
+  const openWorkbench = (mode: WorkbenchMode) => {
+    setWorkbenchLaunch({
+      id: Date.now(),
+      mode,
+      sessionId: activeSession.id,
+      selected: [],
+      createFromSelection: false,
+    });
+    setActiveView("lab");
+    setCommandOpen(false);
+  };
+
+  const runSetupStep = (id: SetupStepId) => {
+    setSetupOpen(false);
+    if (id === "capture") {
+      if (capturing) openSettingsTab("capture");
+      else void toggleCapture();
+      return;
+    }
+    if (id === "source") {
+      if (activeSession.requestCount > 0) setActiveView("traffic");
+      else setActiveView("browser");
+      return;
+    }
+    openSettingsTab(id === "certificate" ? "capture" : "ai");
+  };
+
+  const dismissSetupForever = () => {
+    globalThis.localStorage?.setItem(SETUP_DISMISSED_KEY, "1");
+    setSetupDismissed(true);
+    setSetupOpen(false);
+  };
+
+  /**
+   * Every action the app can perform, in one index. Views own their own
+   * controls too, but this is the path that does not require knowing which
+   * view owns what.
+   */
+  const commandActions: CommandAction[] = [
+    {
+      id: "setup-guide",
+      title: "打开新手引导",
+      subtitle: setupState.ready ? "抓包链路已就绪" : `还剩 ${setupState.total - setupState.done} 个必做步骤`,
+      group: "start",
+      keywords: ["setup", "guide", "onboarding", "getting started", "xssy", "yindao"],
+      badge: setupState.ready ? "已就绪" : `${setupState.done}/${setupState.total}`,
+      badgeTone: setupState.ready ? "ok" : "warn",
+      run: () => { setCommandOpen(false); setSetupOpen(true); },
+    },
+    {
+      id: "shortcuts",
+      title: "快捷键与鼠标操作",
+      subtitle: "多列排序、批量选择、列宽调整等隐藏交互",
+      group: "start",
+      keywords: ["shortcut", "keyboard", "keys", "hotkey", "kjj", "kuaijiejian"],
+      shortcut: "?",
+      run: () => { setCommandOpen(false); setShortcutsOpen(true); },
+    },
+    {
+      id: "about",
+      title: "关于 ShowNet",
+      subtitle: "版本、代理地址、证书状态与开源许可",
+      group: "start",
+      keywords: ["about", "version", "license", "gpl", "gy", "banben"],
+      badge: runtime.appVersion,
+      run: () => { setCommandOpen(false); setAboutOpen(true); },
+    },
+    {
+      id: "capture-toggle",
+      title: capturing ? "停止抓包" : "开始抓包",
+      subtitle: capturing ? `代理运行在 :${runtime.proxyPort}` : "启动本机代理，流量写入当前会话",
+      group: "capture",
+      keywords: ["capture", "start", "stop", "proxy", "record", "kbz", "zbb"],
+      badge: capturing ? "运行中" : "已暂停",
+      badgeTone: capturing ? "ok" : "neutral",
+      disabled: !activeSession.id,
+      disabledReason: "先创建一个会话",
+      run: () => { setCommandOpen(false); void toggleCapture(); },
+    },
+    {
+      id: "connect-sources",
+      title: "连接流量来源",
+      subtitle: "浏览器 · 桌面应用 · 终端 · 手机 · IoT · 免代理入口",
+      group: "capture",
+      keywords: ["connect", "source", "device", "mobile", "terminal", "lljr", "ly"],
+      run: () => { setCommandOpen(false); setConnectOpen(true); },
+    },
+    {
+      id: "open-browser-capture",
+      title: "打开内嵌浏览器抓包",
+      subtitle: "零配置路径，不需要先安装证书",
+      group: "capture",
+      keywords: ["browser", "chrome", "embedded", "cdp", "llq"],
+      run: () => navigate("browser"),
+    },
+    {
+      id: "proxy-terminal",
+      title: "打开代理终端",
+      subtitle: "自动配置 HTTP_PROXY 与 CA 信任，适合 curl / Node / Python",
+      group: "capture",
+      keywords: ["terminal", "shell", "curl", "cli", "dlzd"],
+      run: () => { setCommandOpen(false); setConnectOpen(true); },
+    },
+    {
+      id: "copy-proxy",
+      title: "复制代理地址",
+      subtitle: `127.0.0.1:${runtime.proxyPort}`,
+      group: "capture",
+      keywords: ["copy", "proxy", "address", "endpoint", "fzdl"],
+      run: () => {
+        setCommandOpen(false);
+        void copyConnectValue(`127.0.0.1:${runtime.proxyPort}`, "代理地址");
+      },
+    },
+    {
+      id: "session-new",
+      title: "新建会话",
+      subtitle: "把接下来的流量记进一个干净的会话",
+      group: "session",
+      keywords: ["new", "session", "create", "xjhh"],
+      run: () => { setCommandOpen(false); void createSession(); },
+    },
+    {
+      id: "session-open",
+      title: "打开会话文件",
+      subtitle: ".shownet 会话包",
+      group: "session",
+      keywords: ["open", "import", "session", "file", "dkhh"],
+      disabled: capturing,
+      disabledReason: "请先停止抓包",
+      run: () => { setCommandOpen(false); void openSessionFile(); },
+    },
+    {
+      id: "session-save",
+      title: "保存会话包",
+      subtitle: "完整流量、规则与标注",
+      group: "session",
+      keywords: ["save", "export", "shownet", "backup", "bchh"],
+      disabled: !activeSession.id || transferring,
+      disabledReason: transferring ? "正在处理文件" : "当前没有会话",
+      run: () => { setCommandOpen(false); void exportSession("shownet"); },
+    },
+    {
+      id: "session-delete",
+      title: "删除当前会话",
+      subtitle: `${activeSession.name} · ${activeSession.requestCount} 条请求`,
+      group: "session",
+      keywords: ["delete", "remove", "drop", "schh", "shanchu"],
+      disabled: !activeSession.id || capturing,
+      disabledReason: capturing ? "请先停止抓包" : "当前没有会话",
+      run: () => { setCommandOpen(false); void deleteSession(activeSession); },
+    },
+    {
+      id: "session-export",
+      title: "导出为 HAR / Postman / OpenAPI",
+      subtitle: "交给其他抓包工具或 API 平台",
+      group: "session",
+      keywords: ["export", "har", "postman", "openapi", "swagger", "dc"],
+      disabled: !activeSession.id,
+      disabledReason: "当前没有会话",
+      run: () => { setCommandOpen(false); setExportOpen(true); },
+    },
+    { id: "go-traffic", title: "实时流量", subtitle: "请求列表、筛选与详情", group: "navigate", keywords: ["traffic", "requests", "list", "ll"], run: () => navigate("traffic") },
+    { id: "go-lab", title: "请求实验室", subtitle: "构建、重放、对比与生成客户端代码", group: "navigate", keywords: ["lab", "request", "replay", "build", "sys"], run: () => navigate("lab") },
+    { id: "go-collections", title: "请求集合", subtitle: "导入 HAR / Postman / OpenAPI，整理接口", group: "navigate", keywords: ["collection", "folder", "postman", "openapi", "qqjh"], run: () => openWorkbench("collections") },
+    { id: "go-rules", title: "规则与断点", subtitle: "重写、转发、弱网与人工断点", group: "navigate", keywords: ["rules", "breakpoint", "rewrite", "map remote", "gz"], badge: breakpointQueue.tasks.length ? `${breakpointQueue.tasks.length} 待处理` : undefined, badgeTone: "warn", run: () => openWorkbench("rules") },
+    { id: "go-environment", title: "环境变量", subtitle: "多环境与加密 Secret", group: "navigate", keywords: ["environment", "variable", "secret", "env", "hjbl"], run: () => openWorkbench("environment") },
+    { id: "go-analysis", title: "AI 智能分析", subtitle: "自动逆向接口、签名与加密链路", group: "navigate", keywords: ["ai", "analysis", "reverse", "agent", "fx"], run: () => navigate("analysis") },
+    { id: "go-skills", title: "Skill 与 MCP", subtitle: "内置能力契约与 MCP 工具", group: "navigate", keywords: ["skill", "mcp", "agent", "tools", "nl"], run: () => navigate("skills") },
+    { id: "go-advanced", title: "MITM 高级控制台", subtitle: "TLS 指纹、PX 证据与出站预置", group: "navigate", keywords: ["advanced", "mitm", "tls", "ja3", "px", "gj"], run: () => navigate("advanced") },
+    {
+      id: "install-ca",
+      title: "安装 HTTPS 证书",
+      subtitle: "写入系统信任库，解密 App 与桌面程序",
+      group: "config",
+      keywords: ["ca", "cert", "certificate", "https", "trust", "root", "azzs"],
+      badge: runtime.caInstalled ? "已信任" : "未安装",
+      badgeTone: runtime.caInstalled ? "ok" : "warn",
+      run: () => openSettingsTab("capture"),
+    },
+    {
+      id: "device-access",
+      title: "手机与设备接入",
+      subtitle: "扫码装证书 · Wi-Fi 代理 · Android 一键配置",
+      group: "config",
+      keywords: ["device", "mobile", "phone", "android", "qr", "lan", "sjjr"],
+      badge: runtime.lanEnabled ? "已开启" : "未开启",
+      badgeTone: runtime.lanEnabled ? "ok" : "neutral",
+      run: () => openSettingsTab("capture"),
+    },
+    {
+      id: "ai-settings",
+      title: "配置 AI 服务",
+      subtitle: "API Key、模型与分析策略",
+      group: "config",
+      keywords: ["ai", "model", "api key", "openai", "provider", "pzai"],
+      badge: aiConfigured ? "已配置" : "未配置",
+      badgeTone: aiConfigured ? "ok" : "warn",
+      run: () => openSettingsTab("ai"),
+    },
+    { id: "mcp-settings", title: "MCP 服务与客户端接入", subtitle: "把 ShowNet 接到 Claude Code / Cursor / Codex", group: "config", keywords: ["mcp", "claude", "cursor", "codex", "client"], run: () => openSettingsTab("mcp") },
+    { id: "data-settings", title: "数据与存储", subtitle: "数据库位置、保留天数与清理", group: "config", keywords: ["data", "storage", "database", "cleanup", "sj"], run: () => openSettingsTab("data") },
+    { id: "capture-settings", title: "代理与 HTTPS 设置", subtitle: "监听、系统代理、出口代理与解密策略", group: "config", keywords: ["settings", "proxy", "port", "upstream", "decrypt", "sz"], run: () => openSettingsTab("capture") },
+  ];
+
   return (
     <div className="app-shell">
       <nav className="nav-rail" aria-label="主导航">
-        <button className="brand-mark" title="ShowNet" onClick={() => navigate("traffic")}>
+        <button className="brand-mark" title={`关于 ShowNet ${runtime.appVersion}`} onClick={() => setAboutOpen(true)}>
           <img src={shownetAppIcon} alt="" aria-hidden="true" />
         </button>
         <div className="nav-rail__items">
@@ -1243,6 +1594,8 @@ function App() {
                 <button onClick={() => void exportSession("shownet")} disabled={!activeSession.id || transferring}><Save size={14} /><span><strong>保存会话包</strong><small>完整流量 · 完整规则</small></span></button>
                 <i />
                 <button onClick={() => { setSessionToolsOpen(false); setExportOpen(true); }} disabled={!activeSession.id}><Download size={14} /><span><strong>导出为其他格式</strong><small>HAR · Postman · OpenAPI</small></span></button>
+                <i />
+                <button className="is-danger" onClick={() => void deleteSession(activeSession)} disabled={!activeSession.id || transferring}><Trash2 size={14} /><span><strong>删除会话</strong><small>{activeSession.requestCount} 条请求 · 不可撤销</small></span></button>
               </div>
             )}
           </div>
@@ -1286,6 +1639,9 @@ function App() {
                     title={`打开 ${session.name} 的抓包记录`}
                   >
                     <span className={`session-status ${session.active ? "is-live" : ""}`} />
+                    {/* Collapsed, the row is 72px wide and the body is hidden;
+                        without this the sessions are indistinguishable dots. */}
+                    <span className="session-item__initial" aria-hidden="true">{sessionInitial(session.name)}</span>
                     <span className="session-item__body">
                       <strong>{session.name}</strong>
                       <span className="session-item__meta">
@@ -1325,7 +1681,7 @@ function App() {
         <div className="proxy-mini-status">
           <div className="proxy-mini-status__top">
             <span className={`live-dot ${capturing ? "is-on" : ""}`} />
-            <strong>代理 :{runtime.proxyPort}</strong>
+            <strong><span className="proxy-mini-status__label">代理 :</span>{runtime.proxyPort}</strong>
             <span>{capturing ? "运行中" : "已暂停"}</span>
           </div>
           <div className="proxy-mini-status__meta">
@@ -1342,6 +1698,12 @@ function App() {
             <h1>{viewMeta[activeView].title}</h1>
           </div>
           <div className="topbar__actions">
+            {!setupState.ready && (
+              <button className="setup-pill" onClick={() => setSetupOpen(true)} title="打开新手引导，看看还差哪一步">
+                <Compass size={14} />
+                <span>还差 <strong>{setupState.total - setupState.done}</strong> 步就能抓到流量</span>
+              </button>
+            )}
             {breakpointQueue.tasks.length > 0 && <button className="breakpoint-alert-button" onClick={openBreakpointConsole} title="打开人工断点队列"><Pause size={13} fill="currentColor" /><span>{breakpointQueue.tasks.length} 条断点</span><strong>待处理</strong></button>}
             <button className="ai-service-entry" onClick={() => navigate("analysis")} title="ClaudeGPT.org · gpt-5.5">
               <Sparkles size={16} />
@@ -1413,6 +1775,7 @@ function App() {
           {activeView === "lab" && (
             <RequestWorkbench
               key={workbenchLaunch?.id ?? `lab-${activeSession.id}`}
+              breakpointCount={breakpointQueue.tasks.length}
               sessionId={workbenchLaunch?.sessionId === activeSession.id ? workbenchLaunch.sessionId : activeSession.id}
               selected={workbenchLaunch?.sessionId === activeSession.id ? workbenchLaunch.selected : []}
               initialMode={workbenchLaunch?.sessionId === activeSession.id ? workbenchLaunch.mode : "lab"}
@@ -1450,7 +1813,7 @@ function App() {
               onNotify={setToast}
             />
           )}
-          {activeView === "analysis" && <AnalysisView sessionId={activeSession.id} requests={requests} initialRequestIds={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.requestIds : undefined} scopeRequestId={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.id : undefined} onScopeConsumed={() => setAnalysisRequestScope(null)} onOpenEvidenceRequest={(requestId) => { setEvidenceRequestId(requestId); setActiveView("traffic"); }} onConfigureAi={() => { setSettingsTab("ai"); setActiveView("settings"); }} onNotify={setToast} autoRunId={analysisAutoRun?.sessionId === activeSession.id ? analysisAutoRun.id : undefined} onAutoRunConsumed={() => setAnalysisAutoRun(null)} />}
+          {activeView === "analysis" && <AnalysisView sessionId={activeSession.id} requests={requests} initialRequestIds={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.requestIds : undefined} scopeRequestId={analysisRequestScope?.sessionId === activeSession.id ? analysisRequestScope.id : undefined} onScopeConsumed={() => setAnalysisRequestScope(null)} onOpenEvidenceRequest={(requestId) => { setEvidenceRequestId(requestId); setActiveView("traffic"); }} onConfigureAi={() => { setSettingsTab("ai"); setActiveView("settings"); }} onNotify={setToast} autoRunId={analysisAutoRun?.sessionId === activeSession.id ? analysisAutoRun.id : undefined} onAutoRunConsumed={() => setAnalysisAutoRun(null)} mode={analysisMode} onModeChange={chooseAnalysisMode} modePinned={analysisModePinned} />}
           {/* Keep BrowserView mounted so switching nav tabs does not stop proxy Chrome / drop CDP state. */}
           <div
             className={`workspace-view-keep-alive ${activeView === "browser" ? "is-active" : "is-hidden"}`}
@@ -1464,7 +1827,7 @@ function App() {
               onAnalyzeCryptoLab={() => void analyzeCryptoLab(activeSession.id)}
             />
           </div>
-          {activeView === "skills" && <SkillsView sessionId={activeSession.id} requests={requests} />}
+          {activeView === "skills" && <SkillsView sessionId={activeSession.id} requests={requests} onOpenMcpSettings={() => openSettingsTab("mcp")} mode={analysisMode} onModeChange={chooseAnalysisMode} />}
           {activeView === "settings" && (
             <SettingsView
               runtime={runtime}
@@ -1495,7 +1858,29 @@ function App() {
           onStartCapture={() => capturing ? Promise.resolve(true) : toggleCapture()}
         />
       )}
-      {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={navigate} />}
+      {commandOpen && <CommandPalette actions={commandActions} onClose={() => setCommandOpen(false)} />}
+      {confirmDialog}
+      {shortcutsOpen && <ShortcutsSheet onClose={() => setShortcutsOpen(false)} />}
+      {aboutOpen && (
+        <AboutDialog
+          runtime={runtime}
+          native={hasNativeRuntime}
+          onClose={() => setAboutOpen(false)}
+          onCopy={(value, label) => void copyConnectValue(value, label)}
+          onOpenExternal={(url) => {
+            void openExternalUrl(url).catch((error) => setToast(`打开链接失败：${String(error)}`));
+          }}
+        />
+      )}
+      {setupOpen && (
+        <SetupGuide
+          steps={setupSteps}
+          progress={setupState}
+          onRunStep={runSetupStep}
+          onClose={() => setSetupOpen(false)}
+          onDismissForever={dismissSetupForever}
+        />
+      )}
       {exportOpen && (
         <SessionExportDialog
           session={activeSession}
@@ -1563,12 +1948,6 @@ function safeFileName(value: string) {
 
 function droppedFileName(path: string) {
   return path.split(/[\\/]/).pop() || path;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ConnectDialog({
@@ -1980,77 +2359,106 @@ function diagnosticActionLabel(action: string) {
   return labels[action] ?? "处理";
 }
 
+const commandGroupIcons: Record<string, typeof Network> = {
+  start: Compass,
+  capture: Radio,
+  session: FileArchive,
+  navigate: Network,
+  config: Settings,
+};
+
 function CommandPalette({
+  actions,
   onClose,
-  onNavigate,
 }: {
+  actions: CommandAction[];
   onClose: () => void;
-  onNavigate: (view: ViewId) => void;
 }) {
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const actions = useMemo(
-    () => [
-      { label: "查看实时流量", hint: "流量", icon: Network, view: "traffic" as ViewId },
-      { label: "打开内嵌浏览器", hint: "CDP", icon: Browser, view: "browser" as ViewId },
-      { label: "打开请求实验室", hint: "Lab", icon: FlaskConical, view: "lab" as ViewId },
-      { label: "开始 AI 分析", hint: "智能过滤", icon: Sparkles, view: "analysis" as ViewId },
-      { label: "管理 Skill 与 MCP", hint: "能力", icon: ServerCog, view: "skills" as ViewId },
-      { label: "安装 HTTPS 证书", hint: "CA", icon: KeyRound, view: "settings" as ViewId },
-    ],
-    [],
-  );
-  const filtered = useMemo(
-    () => actions.filter((action) => action.label.toLowerCase().includes(query.toLowerCase())),
+  const groups = useMemo(
+    () => groupCommands(filterCommands(actions, query), query.trim().length > 0),
     [actions, query],
   );
+  const flattened = useMemo(() => flattenCommands(groups), [groups]);
+  const listRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => setActiveIndex(0), [query]);
+  // A new query invalidates the old cursor; land it on the first runnable row.
+  useEffect(() => {
+    const firstEnabled = flattened.findIndex((action) => !action.disabled);
+    setActiveIndex(firstEnabled === -1 ? 0 : firstEnabled);
+  }, [flattened]);
+
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(".is-selected")?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        if (!filtered.length) return;
-        const offset = event.key === "ArrowDown" ? 1 : -1;
-        setActiveIndex((current) => (current + offset + filtered.length) % filtered.length);
-      } else if (event.key === "Enter" && filtered[activeIndex]) {
-        event.preventDefault();
-        onNavigate(filtered[activeIndex].view);
+        if (!flattened.length) return;
+        setActiveIndex((current) => moveCommandCursor(flattened, current, event.key === "ArrowDown" ? 1 : -1));
+        return;
       }
+      if (event.key !== "Enter") return;
+      const action = flattened[activeIndex];
+      if (!action || action.disabled) return;
+      event.preventDefault();
+      action.run();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeIndex, filtered, onNavigate]);
+  }, [activeIndex, flattened]);
 
+  let rowIndex = -1;
   return (
     <div className="modal-backdrop command-backdrop" onMouseDown={onClose}>
       <section className="command-palette" role="dialog" aria-modal="true" aria-label="快捷命令" onMouseDown={(event) => event.stopPropagation()}>
         <div className="command-search">
           <Search size={18} />
-          <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索操作" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索任何功能：抓包、证书、导出、AI、MCP…"
+            aria-label="搜索操作"
+          />
           <kbd>ESC</kbd>
         </div>
-        <div className="command-results" role="listbox" aria-label="命令结果">
-          <span className="command-group-label">快速前往</span>
-          {filtered.map((action, index) => {
-            const Icon = action.icon;
+        <div className="command-results" role="listbox" aria-label="命令结果" ref={listRef}>
+          {groups.map((group) => {
+            const GroupIcon = commandGroupIcons[group.id] ?? Network;
             return (
-              <button
-                key={action.view}
-                className={index === activeIndex ? "is-selected" : ""}
-                role="option"
-                aria-selected={index === activeIndex}
-                onPointerMove={() => setActiveIndex(index)}
-                onClick={() => onNavigate(action.view)}
-              >
-                <Icon size={17} />
-                <span>{action.label}</span>
-                <small>{action.hint}</small>
-              </button>
+              <div className="command-group" key={group.id} role="group" aria-label={group.label}>
+                <span className="command-group-label"><GroupIcon size={12} />{group.label}</span>
+                {group.actions.map((action) => {
+                  rowIndex += 1;
+                  const index = rowIndex;
+                  return (
+                    <button
+                      key={action.id}
+                      className={`command-row ${index === activeIndex ? "is-selected" : ""}`}
+                      role="option"
+                      aria-selected={index === activeIndex}
+                      disabled={action.disabled}
+                      title={action.disabled ? action.disabledReason : action.subtitle}
+                      onPointerMove={() => { if (!action.disabled) setActiveIndex(index); }}
+                      onClick={() => { if (!action.disabled) action.run(); }}
+                    >
+                      <span className="command-row__body">
+                        <strong>{action.title}</strong>
+                        <small>{action.disabled ? action.disabledReason ?? action.subtitle : action.subtitle}</small>
+                      </span>
+                      {action.badge && <em className={`command-row__badge is-${action.badgeTone ?? "neutral"}`}>{action.badge}</em>}
+                      {action.shortcut && <kbd>{action.shortcut}</kbd>}
+                    </button>
+                  );
+                })}
+              </div>
             );
           })}
-          {filtered.length === 0 && (
+          {flattened.length === 0 && (
             <div className="command-empty">
               <FileSearch size={20} />
               <span>没有匹配的操作</span>
@@ -2059,7 +2467,7 @@ function CommandPalette({
         </div>
         <div className="command-footer">
           <span><Zap size={13} /> ShowNet Command</span>
-          <span>↑↓ 选择 · ↵ 打开</span>
+          <span>↑↓ 选择 · ↵ 执行 · ESC 关闭</span>
         </div>
       </section>
     </div>

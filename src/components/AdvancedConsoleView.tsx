@@ -4,10 +4,8 @@ import {
   ArrowRight,
   Fingerprint,
   GitCompare,
-  KeyRound,
   LayoutDashboard,
   Network,
-  RefreshCw,
   Settings2,
   Shield,
   Shuffle,
@@ -42,9 +40,7 @@ const TAB_ICONS: Record<ConsoleTabId, typeof Network> = {
   hooks: Workflow,
   rules: Shuffle,
   fingerprint: Fingerprint,
-  "px-replay": RefreshCw,
-  "px-compare": GitCompare,
-  "px-tamper": KeyRound,
+  px: GitCompare,
   recaptcha: Shield,
   config: Settings2,
 };
@@ -56,12 +52,18 @@ const TAB_ORDER: ConsoleTabId[] = [
   "hooks",
   "rules",
   "fingerprint",
-  "px-replay",
-  "px-compare",
-  "px-tamper",
+  "px",
   "recaptcha",
   "config",
 ];
+
+/** What you can do with a PX evidence row. Was three separate console tabs. */
+const PX_MODES = [
+  { id: "decode" as const, label: "解码", hint: "点请求查看结构解码；解码为结构解析，非无密钥硬破。" },
+  { id: "compare" as const, label: "对比", hint: "标记 A / B 两条请求，再到流量或实验室做字段 diff。" },
+  { id: "tamper" as const, label: "改写", hint: "按证据生成可回滚的改写规则，再到规则工作台验证。" },
+];
+type PxMode = (typeof PX_MODES)[number]["id"];
 
 /** Short labels for the horizontal tab strip (full name stays in panel title). */
 const TAB_SHORT_LABEL: Record<ConsoleTabId, string> = {
@@ -70,9 +72,7 @@ const TAB_SHORT_LABEL: Record<ConsoleTabId, string> = {
   hooks: "Hook",
   rules: "规则",
   fingerprint: "指纹",
-  "px-replay": "PX 重放",
-  "px-compare": "PX 对比",
-  "px-tamper": "PX 篡改",
+  px: "PX 证据",
   recaptcha: "reCAPTCHA",
   config: "配置",
 };
@@ -86,7 +86,7 @@ interface AdvancedConsoleViewProps {
   onOpenBrowser: () => void;
   onOpenRules: () => void;
   onOpenSettings: () => void;
-  onOpenAnalysis?: () => void;
+  onOpenAnalysis: () => void;
   onNotify: (message: string) => void;
 }
 
@@ -103,6 +103,7 @@ export function AdvancedConsoleView({
   onNotify,
 }: AdvancedConsoleViewProps) {
   const [tab, setTab] = useState<ConsoleTabId>("overview");
+  const [pxMode, setPxMode] = useState<PxMode>("decode");
   const [pxSettings, setPxSettings] = useState<PxSettings>({ decryptEnabled: false, interceptEcData: false });
   const [outboundTls, setOutboundTls] = useState<OutboundTlsProfileStatus | null>(null);
   const [hooks, setHooks] = useState<BrowserHookEvent[]>([]);
@@ -239,11 +240,9 @@ export function AdvancedConsoleView({
       analysis: "overview",
       export: "overview",
     };
-    if (phase === "analysis" && onOpenAnalysis) {
-      onOpenAnalysis();
-      return;
-    }
-    if (phase === "export" && onOpenAnalysis) {
+    // Analysis and export both live in the AI view; the console has no
+    // export surface of its own.
+    if (phase === "analysis" || phase === "export") {
       onOpenAnalysis();
       return;
     }
@@ -357,7 +356,7 @@ export function AdvancedConsoleView({
                 ? activeHookCount
                 : id === "fingerprint"
                   ? fingerprints.length
-                  : id === "px-replay" || id === "px-compare" || id === "px-tamper"
+                  : id === "px"
                     ? pxEvidence.length
                     : id === "recaptcha"
                       ? recaptchaHits.length
@@ -451,11 +450,9 @@ export function AdvancedConsoleView({
               <button type="button" className="secondary-button" onClick={onOpenTraffic}>
                 打开流量
               </button>
-              {onOpenAnalysis ? (
-                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+              <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
                   进入 AI 分析
                 </button>
-              ) : null}
               <button type="button" className="secondary-button" onClick={() => setTab("config")}>
                 出站 TLS 配置
               </button>
@@ -500,11 +497,9 @@ export function AdvancedConsoleView({
               <button type="button" className="primary-button" onClick={onOpenBrowser}>
                 打开浏览器 Hook 面板
               </button>
-              {onOpenAnalysis ? (
-                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+              <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
                   用 AI 读 Hook / 加密
                 </button>
-              ) : null}
             </div>
             {hooks.length === 0 ? (
               <p className="advanced-empty">{guide.emptyHint}</p>
@@ -523,6 +518,7 @@ export function AdvancedConsoleView({
         {tab === "rules" && (
           <div className="advanced-panel-card">
             <p>通用重写 / 断点 / 镜像规则在请求实验室的规则工作台中编辑。</p>
+            <p className="advanced-empty">{guide.emptyHint}</p>
             <button type="button" className="primary-button" onClick={onOpenRules}>
               打开替换规则工作台
             </button>
@@ -588,11 +584,9 @@ export function AdvancedConsoleView({
               <button type="button" className="secondary-button" onClick={() => setTab("config")}>
                 修改出站预置
               </button>
-              {onOpenAnalysis ? (
-                <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
+              <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
                   AI 读取指纹（shownet_get_tls_fingerprints）
                 </button>
-              ) : null}
             </div>
             {fingerprints.length === 0 ? (
               <p className="advanced-empty">{guide.emptyHint}</p>
@@ -610,11 +604,29 @@ export function AdvancedConsoleView({
           </div>
         )}
 
-        {(tab === "px-replay" || tab === "px-compare" || tab === "px-tamper") && (
+        {tab === "px" && (
           <div className="advanced-panel-card">
+            {/* One evidence list, three things you can do with it. These were
+                three sibling tabs rendering the same body and the same badge,
+                differing only by which per-row action they showed. */}
+            <div className="px-mode-switch" role="tablist" aria-label="PX 操作模式">
+              {PX_MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={pxMode === mode.id}
+                  className={pxMode === mode.id ? "is-active" : ""}
+                  onClick={() => setPxMode(mode.id)}
+                  title={mode.hint}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
             <p>
               检测到 PX/HUMAN 相关请求 <strong>{pxEvidence.length}</strong> 条。
-              <span className="hint"> 解码为结构解析，非无密钥硬破。</span>
+              <span className="hint"> {PX_MODES.find((mode) => mode.id === pxMode)?.hint}</span>
             </p>
             {pxEvidence.length === 0 ? (
               <p className="advanced-empty">{guide.emptyHint}</p>
@@ -627,17 +639,17 @@ export function AdvancedConsoleView({
                       {item.path}
                     </button>
                     <small>{item.markers.join(", ")}</small>
-                    {tab === "px-compare" && (
+                    {pxMode === "compare" && (
                       <span className="row-actions">
-                        <button type="button" onClick={() => setCompareA(item.requestId)}>
+                        <button type="button" className={compareA === item.requestId ? "is-active" : ""} onClick={() => setCompareA(item.requestId)} title="标记为基线 A">
                           A
                         </button>
-                        <button type="button" onClick={() => setCompareB(item.requestId)}>
+                        <button type="button" className={compareB === item.requestId ? "is-active" : ""} onClick={() => setCompareB(item.requestId)} title="标记为对比 B">
                           B
                         </button>
                       </span>
                     )}
-                    {tab === "px-tamper" && (
+                    {pxMode === "tamper" && (
                       <button type="button" onClick={onOpenRules}>
                         生成改写规则
                       </button>
@@ -646,10 +658,12 @@ export function AdvancedConsoleView({
                 ))}
               </ul>
             )}
-            {tab === "px-compare" && (
+            {pxMode === "compare" && pxEvidence.length > 0 && (
               <p>
                 对比: A=<code>{compareA ?? "—"}</code> B=<code>{compareB ?? "—"}</code>
-                （在流量/实验室中打开两条请求做字段 diff）
+                {compareA && compareB
+                  ? "（在流量/实验室中打开两条请求做字段 diff）"
+                  : "（标记 A 和 B 两条请求后再做字段 diff）"}
               </p>
             )}
             {decode && selectedPx === decode.requestId && (
@@ -713,41 +727,9 @@ export function AdvancedConsoleView({
                         ))}
                   </select>
                 </label>
-                <div className="chip-row">
-                  {(outboundTls?.presets ?? [])
-                    .filter((p) =>
-                      ["default", "chrome150", "chrome149", "firefox136", "safari-ios18", "edge150"].includes(
-                        p.id,
-                      ),
-                    )
-                    .map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        className={outboundTls?.presetId === preset.id ? "is-active" : ""}
-                        disabled={saving}
-                        onClick={() => void setTlsProfile(preset.id)}
-                      >
-                        {preset.id}
-                      </button>
-                    ))}
-                  {(outboundTls?.presets ?? []).length === 0 &&
-                    ["default", "chrome150", "firefox136", "safari-ios18"].map((profile) => (
-                      <button
-                        key={profile}
-                        type="button"
-                        className={
-                          outboundTls?.presetId === profile || outboundTls?.profile === profile
-                            ? "is-active"
-                            : ""
-                        }
-                        disabled={saving}
-                        onClick={() => void setTlsProfile(profile)}
-                      >
-                        {profile}
-                      </button>
-                    ))}
-                </div>
+                {/* The select above is the control. There used to be a chip row
+                    here driving the same value, so the page showed one setting
+                    twice and the two could visually disagree while loading. */}
                 <label className="checkbox-row">
                   <input
                     type="checkbox"

@@ -1,3 +1,4 @@
+import { isSlowRequest } from "./format.ts";
 import type {
   AnalysisMode,
   RequestListItem,
@@ -280,7 +281,7 @@ export function buildPreviewSkillPlan(mode: AnalysisMode, requests: RequestListI
 
   const apiCount = requests.filter((request) => request.type === "xhr" || request.type === "fetch").length;
   const hasErrorOrRisk = requests.some((request) => (request.status ?? 0) >= 400 || request.risk !== "none");
-  const slowCount = requests.filter((request) => (request.durationMs ?? 0) >= 1_000).length;
+  const slowCount = requests.filter((request) => isSlowRequest(request.durationMs)).length;
   const hasHook = requests.some((request) => request.hasHook);
   const hasCryptoCode = requests.some((request) => request.cryptoSnippetCount > 0);
   const hasSignature = requests.some(hasSignatureMarker);

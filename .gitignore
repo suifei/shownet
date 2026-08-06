@@ -22,3 +22,5 @@ docs/scorecard-session-ee2a709d.json
 tools/utls-chrome-dial/utls-chrome-dial.exe
 tools/utls-chrome-dial/utls-chrome-dial
 
+test-results/
+playwright-report/
