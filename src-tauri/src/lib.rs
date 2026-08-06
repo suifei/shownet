@@ -1571,18 +1571,6 @@ async fn start_replay_batch(
     Ok(batch)
 }
 
-/// Read one replay batch back from storage.
-///
-/// No caller today: the workbench shows a batch from `start_replay_batch`'s
-/// return value and keeps it current from `replay://batch-updated`, so it never
-/// needs to re-read one. Storage keeps the history regardless; this is what a
-/// batch-history view would read, and deleting it would only mean writing it
-/// again.
-#[tauri::command]
-fn get_replay_batch(batch_id: String, state: State<'_, AppState>) -> Result<ReplayBatch, String> {
-    state.storage.get_replay_batch(&batch_id)
-}
-
 /// List a session's past replay batches.
 ///
 /// No caller today, for the same reason as `get_replay_batch`: the UI has no
@@ -2224,16 +2212,6 @@ fn set_outbound_tls_profile(profile: String, state: State<'_, AppState>) -> Resu
     Ok(tls_outbound::status_json())
 }
 
-/// Enumerate the available ClientHello presets.
-///
-/// No caller inside the app, but documented as public API in
-/// `docs/clienthello-catalog-and-mitm-console.md` — external tooling reads it to
-/// discover which presets this build ships.
-#[tauri::command]
-fn list_clienthello_presets() -> Result<Value, String> {
-    serde_json::to_value(tls_clienthello_catalog::list_presets()).map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 fn set_outbound_tls_auto_from_inbound(
     enabled: bool,
@@ -2248,42 +2226,6 @@ fn set_outbound_tls_auto_from_inbound(
         .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("autoFromInbound".into(), json!(enabled));
-    }
-    state
-        .storage
-        .save_app_setting_json("outbound_tls", &payload)?;
-    Ok(tls_outbound::status_json())
-}
-
-/// Pin the outbound ClientHello to a specific preset.
-///
-/// No caller today: the settings UI offers `set_outbound_tls_auto_from_inbound`,
-/// which derives the preset from what the client actually sent, and reads the
-/// result with `get_outbound_tls_profile`. This is the manual override for
-/// choosing a preset directly.
-#[tauri::command]
-fn set_outbound_tls_impersonate(
-    enabled: bool,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    // Honesty: without a real BoringSSL/curl-impersonate stack this cannot enable
-    // browser JA3. Persist the request for future wiring, but active_engine stays rustls.
-    let _ = enabled;
-    tls_impersonate::set_impersonate_requested(false);
-    let mut payload = state
-        .storage
-        .load_app_setting_json("outbound_tls")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("impersonate".into(), json!(false));
-        obj.insert(
-            "impersonateNote".into(),
-            json!(
-                "Real browser JA3 stack not linked; MITM uses profile-differentiated rustls only."
-            ),
-        );
     }
     state
         .storage
@@ -3624,7 +3566,6 @@ pub fn run() {
             get_request_annotation,
             save_request_annotation,
             start_replay_batch,
-            get_replay_batch,
             list_replay_batches,
             cancel_replay_batch,
             create_request_draft_from_capture,
@@ -3677,9 +3618,7 @@ pub fn run() {
             export_evaluation_package,
             get_outbound_tls_profile,
             set_outbound_tls_profile,
-            list_clienthello_presets,
             set_outbound_tls_auto_from_inbound,
-            set_outbound_tls_impersonate,
             get_px_settings,
             set_px_settings,
             list_px_evidence,

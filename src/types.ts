@@ -1293,3 +1293,14 @@ export interface StorageStats {
   databasePath: string;
   dataDirectory: string;
 }
+
+/** Result of the deterministic, AI-free analysis pipeline. */
+export interface AutonomousAnalysisResult {
+  sessionId: string;
+  mode: string;
+  skillPlan: unknown;
+  protection: unknown;
+  export?: unknown | null;
+  stages: string[];
+  notes: string[];
+}

@@ -7730,6 +7730,23 @@ kbd {
 .workbench-toggle input:checked + i::after, .rule-toggle.is-on i::after { transform: translateX(10px); }
 .replay-progress__bar { height: 5px; overflow: hidden; background: var(--surface-sunken); border-radius: 8px; }
 .replay-progress__bar i { display: block; height: 100%; background: var(--success-bg); transition: width 180ms ease; }
+
+.replay-history__toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 0; color: var(--text-secondary); font-size: 12px; background: none; border: 0; }
+.replay-history__toggle:hover { color: var(--ink); }
+.replay-history__list { display: flex; flex-direction: column; margin: 8px 0 0; padding: 0; gap: 4px; list-style: none; }
+.replay-history__list button { display: grid; grid-template-columns: auto 1fr auto; width: 100%; align-items: center; gap: 10px; padding: 7px 9px; color: var(--text-muted); font-size: 12px; text-align: left; background: var(--surface-sunken); border: 1px solid transparent; border-radius: 8px; }
+.replay-history__list button:hover { color: var(--ink); border-color: var(--border-default); }
+.replay-history__list button.is-current { color: var(--ink); border-color: var(--accent); }
+.replay-history__list b { font-weight: 600; }
+.replay-history__list code { color: var(--text-subtle); font-size: 11px; }
+
+.analysis-quick-scan { display: inline-flex; align-items: center; justify-content: center; width: 100%; margin-top: 6px; gap: 6px; padding: 7px 10px; color: var(--text-secondary); font-size: 12px; background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: 8px; }
+.analysis-quick-scan:hover:not(:disabled) { color: var(--ink); border-color: var(--accent); }
+.analysis-quick-scan:disabled { opacity: 0.5; }
+.analysis-quick-scan__result { display: flex; flex-direction: column; margin-top: 6px; padding: 8px 10px; gap: 3px; background: var(--success-bg); border: 1px solid var(--border-default); border-radius: 8px; }
+.analysis-quick-scan__result strong { color: var(--ink); font-size: 12px; }
+.analysis-quick-scan__result span { color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.analysis-quick-scan__result small { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .replay-summary { display: flex; align-items: center; gap: 14px; min-height: 42px; color: var(--text-muted); font-size: 12px; }
 .replay-summary span { display: inline-flex; align-items: center; gap: 4px; }
 .replay-summary button { margin-left: auto; }

@@ -1,33 +1,4 @@
-import {
-  Activity,
-  ArrowRight,
-  Bot,
-  Check,
-  ChevronDown,
-  Circle,
-  CircleAlert,
-  Clock3,
-  Code2,
-  Copy,
-  Download,
-  FileCode2,
-  FolderOpen,
-  Gauge,
-  GitBranch,
-  History,
-  KeyRound,
-  LoaderCircle,
-  MessageSquareText,
-  Package,
-  Play,
-  SearchCheck,
-  Send,
-  Settings2,
-  ShieldCheck,
-  Sparkles,
-  Square,
-  WandSparkles,
-} from "lucide-react";
+import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clock3, Code2, Copy, Download, FileCode2, FolderOpen, Gauge, GitBranch, History, KeyRound, LoaderCircle, MessageSquareText, Package, Play, SearchCheck, Send, Settings2, ShieldCheck, Sparkles, Square, WandSparkles, Zap } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -36,22 +7,7 @@ import { ANALYSIS_MODES } from "../analysisModes";
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
 import { pickReplayExportDirectory } from "../replayExport";
-import type {
-  AiAnalysisSettings,
-  AiProviderSettings,
-  AlgorithmReplayExportResult,
-  EvaluationExportResult,
-  AnalysisActivity,
-  AnalysisChatMessage,
-  AnalysisGraphRun,
-  AnalysisMode,
-  AnalysisReport,
-  AnalysisStatus,
-  AnalysisStreamEvent,
-  RequestListItem,
-  SkillPlan,
-  SkillRunAudit,
-} from "../types";
+import type { AiAnalysisSettings, AiProviderSettings, AlgorithmReplayExportResult, AnalysisActivity, AnalysisChatMessage, AnalysisGraphRun, AnalysisMode, AnalysisReport, AnalysisStatus, AnalysisStreamEvent, AutonomousAnalysisResult, EvaluationExportResult, RequestListItem, SkillPlan, SkillRunAudit } from "../types";
 
 const modes = ANALYSIS_MODES;
 
@@ -614,6 +570,27 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     }
   }, [content, pendingAnswer, sending, status]);
 
+  // Deterministic pass: plan skills, aggregate protection evidence, no model
+  // call. It is the only way to reach the protection analysis without an AI key
+  // configured, which is otherwise a hard requirement for anything on this page.
+  const [quickScanning, setQuickScanning] = useState(false);
+  const [quickScan, setQuickScan] = useState<AutonomousAnalysisResult | null>(null);
+  const runQuickScan = async () => {
+    if (!isTauri() || !sessionId) return;
+    setQuickScanning(true);
+    setQuickScan(null);
+    try {
+      setQuickScan(await invoke<AutonomousAnalysisResult>("run_autonomous_session_analysis", {
+        sessionId,
+        mode,
+      }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setQuickScanning(false);
+    }
+  };
+
   const startAnalysis = async (overrides?: { mode?: AnalysisMode; includeStatic?: boolean }) => {
     if (!sessionId || requests.length === 0 || running) return;
     const analysisMode = overrides?.mode ?? mode;
@@ -865,6 +842,19 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
             {running ? (cancelling ? <LoaderCircle className="spin" size={17} /> : <Square size={14} fill="currentColor" />) : <Play size={15} fill="currentColor" />}
             {requests.length === 0 ? "暂无可分析请求" : cancelling ? "正在停止" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}
           </button>
+          <button
+            className="analysis-quick-scan"
+            onClick={() => void runQuickScan()}
+            disabled={requests.length === 0 || running || quickScanning}
+            title="不调用 AI：规划技能并汇总防护证据，无需配置 API key"
+          >
+            <Zap size={13} />{quickScanning ? "正在快速分析" : "免 AI 快速分析"}
+          </button>
+          {quickScan && <div className="analysis-quick-scan__result">
+            <strong>已完成 {quickScan.stages.length} 个阶段</strong>
+            <span>{quickScan.stages.join(" → ")}</span>
+            {quickScan.notes.slice(0, 4).map((note, index) => <small key={index}>{note}</small>)}
+          </div>}
         </div>
       </aside>
 

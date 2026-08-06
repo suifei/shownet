@@ -132,16 +132,35 @@ function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string
   const [batch, setBatch] = useState<ReplayBatch>();
   const [message, setMessage] = useState("");
   const [starting, setStarting] = useState(false);
+  // Batches are persisted, but until now nothing read them back: replay fifty
+  // requests, switch away, and the results were gone while still sitting in the
+  // database. This is that history.
+  const [history, setHistory] = useState<ReplayBatch[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const total = selected.length * settings.repeatCount;
+
+  const loadHistory = useCallback(async () => {
+    if (!isTauri() || !sessionId) return;
+    try {
+      setHistory(await invoke<ReplayBatch[]>("list_replay_batches", { sessionId }));
+    } catch (reason) {
+      setMessage(String(reason));
+    }
+  }, [sessionId]);
+
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
 
   useEffect(() => {
     if (!isTauri()) return;
     let dispose: (() => void) | undefined;
     void listen<ReplayBatch>("replay://batch-updated", (event) => {
       if (!batch || event.payload.id === batch.id) setBatch(event.payload);
+      // A batch that just reached a terminal state belongs in the history the
+      // next time it is opened.
+      if (!["queued", "running"].includes(event.payload.status)) void loadHistory();
     }).then((unlisten) => { dispose = unlisten; });
     return () => dispose?.();
-  }, [batch?.id]);
+  }, [batch?.id, loadHistory]);
 
   const start = async () => {
     if (total > 20 && !await confirm({
@@ -186,6 +205,29 @@ function ReplayPanel({ sessionId, selected, onOpenRequest }: { sessionId: string
       <div className="replay-progress__bar"><i style={{ width: (batch.total ? batch.completed / batch.total * 100 : 0) + "%" }} /></div>
       <div className="replay-summary"><span><Check size={13} />成功 {batch.succeeded}</span><span><CircleAlert size={13} />失败 {batch.failed}</span><span><Clock3 size={13} />队列 {batch.total - batch.completed}</span>{["queued", "running"].includes(batch.status) && <button className="secondary-button" onClick={() => void cancel()}><Square size={12} />取消批次</button>}</div>
       <div className="replay-items">{batch.items.map((item) => <button key={item.id} disabled={!item.capturedRequestId} onClick={() => item.capturedRequestId && onOpenRequest(item.capturedRequestId)}><span className={"run-status is-" + item.status} /><code>{item.sourceRequestId.slice(-8)} · #{item.runIndex + 1}</code><strong>{item.statusCode ?? item.status}</strong><small>{item.durationMs == null ? "" : item.durationMs + "ms"}</small>{item.error && <em title={item.error}>{item.error}</em>}</button>)}</div>
+    </section>}
+    {history.length > 0 && <section className="workbench-band replay-history">
+      <button className="replay-history__toggle" onClick={() => setHistoryOpen((open) => !open)} aria-expanded={historyOpen}>
+        <span>本会话最近 {history.length} 个批次</span>
+        <span>{historyOpen ? "收起" : "展开"}</span>
+      </button>
+      {/* Loading a finished batch back is the whole point: its results were
+          already lost the moment the panel closed. */}
+      {historyOpen && <ul className="replay-history__list">
+        {history.map((entry) => (
+          <li key={entry.id}>
+            <button
+              className={entry.id === batch?.id ? "is-current" : undefined}
+              onClick={() => setBatch(entry)}
+              title={`查看批次 ${entry.id.slice(-8)} 的结果`}
+            >
+              <b>{batchLabel(entry.status)}</b>
+              <span>{entry.succeeded} 成功 · {entry.failed} 失败 · 共 {entry.total}</span>
+              <code>{entry.id.slice(-8)}</code>
+            </button>
+          </li>
+        ))}
+      </ul>}
     </section>}
   </div>;
 }

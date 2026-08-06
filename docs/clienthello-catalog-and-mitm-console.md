@@ -132,7 +132,6 @@ proxy connect_verified_tls_measured  →  origin MITM 出站握手
 | `get_outbound_tls_profile` | 出站 TLS / 预置 status |
 | `set_outbound_tls_profile` | 设置预置或粗档位（接受 `chrome150` 等 id） |
 | `set_outbound_tls_auto_from_inbound` | 入站自动选档 |
-| `list_clienthello_presets` | 仅列目录 |
 | `get_px_settings` / `set_px_settings` | PX 开关 |
 | `list_px_evidence` | 会话 PX 证据 |
 | `decode_px_payload` | 结构解码 |

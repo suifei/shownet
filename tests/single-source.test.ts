@@ -452,17 +452,7 @@ describe("release notes", () => {
 
 describe("IPC surface", () => {
   /** Commands registered with no frontend caller, each deliberate and explained. */
-  const INTENTIONALLY_UNCALLED = new Set([
-    // No batch-history view exists yet; storage keeps the data regardless.
-    "get_replay_batch",
-    "list_replay_batches",
-    // Headless entry point: capture to exported code in one call.
-    "run_autonomous_session_analysis",
-    // Manual override; the UI offers the auto-derived sibling instead.
-    "set_outbound_tls_impersonate",
-    // Documented public API for external tooling.
-    "list_clienthello_presets",
-  ]);
+  const INTENTIONALLY_UNCALLED = new Set<string>([]);
 
   it("registers no command the app cannot reach and has not justified", async () => {
     // A registered command with no caller is reachable over IPC and maintained
@@ -513,3 +503,30 @@ async function readSourceTree(root: URL): Promise<string> {
   );
   return parts.join("\n");
 }
+
+describe("replay batch history", () => {
+  it("reads back the batches storage already keeps", async () => {
+    // Batches were persisted and never read: replay fifty requests, switch away,
+    // and the results were gone while still sitting in the database.
+    const workbench = await readFile(
+      new URL("../src/components/RequestWorkbench.tsx", import.meta.url),
+      "utf8",
+    );
+    assert.ok(
+      workbench.includes('invoke<ReplayBatch[]>("list_replay_batches"'),
+      "the workbench must read the persisted batch list",
+    );
+    // Loading history once on mount would leave it stale the moment a batch
+    // finishes, which is exactly when the user wants to see it.
+    assert.ok(
+      /\["queued", "running"\]\.includes\(event\.payload\.status\)[\s\S]{0,80}loadHistory/.test(
+        workbench,
+      ),
+      "history must refresh when a batch reaches a terminal state",
+    );
+    assert.ok(
+      workbench.includes("setBatch(entry)"),
+      "picking a past batch must show its results",
+    );
+  });
+});
