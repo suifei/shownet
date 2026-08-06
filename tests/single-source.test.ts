@@ -410,6 +410,40 @@ describe("release notes", () => {
     assert.equal(formatReleaseNotes("   \n\n  "), "");
   });
 
+  it("drops the rules a text dialog cannot draw, keeps the rows", () => {
+    // The published v0.2.0 notes open with an install table; the separator row
+    // is pure noise as text, while the rows still read as columns.
+    const body = [
+      "| 平台 | 文件 |",
+      "|------|------|",
+      "| macOS | ShowNet.dmg |",
+      "",
+      "---",
+      "",
+      "## What's Changed",
+    ].join("\n");
+    const rendered = formatReleaseNotes(body);
+    assert.ok(!rendered.includes("|------|"), rendered);
+    assert.ok(!/^---$/m.test(rendered), rendered);
+    assert.ok(rendered.includes("| macOS | ShowNet.dmg |"), rendered);
+    assert.ok(rendered.includes("What's Changed"), rendered);
+  });
+
+  it("does not eat prose that merely contains dashes", () => {
+    // The guard must key on a line being *only* rule characters, or a real
+    // sentence with an em dash or a hyphenated term would vanish.
+    for (const line of [
+      "未经过商业代码签名 —— 请先核对校验和",
+      "- 支持 HTTP/2 与 gRPC-Web",
+      "见 SHA256SUMS.txt",
+    ]) {
+      assert.ok(
+        formatReleaseNotes(line).length > 0,
+        `dropped a real line: ${line}`,
+      );
+    }
+  });
+
   it("leaves prose that is not Markdown alone", () => {
     const plain = "ShowNet 0.1.0 desktop builds (macOS aarch64 + Windows x86_64).";
     assert.equal(formatReleaseNotes(plain), plain);

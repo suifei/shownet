@@ -89,6 +89,54 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
   </tr>
 </table>
 
+## 安装
+
+从 [Releases](https://github.com/suifei/shownet/releases/latest) 下载对应平台的包：
+
+| 平台 | 文件 |
+|------|------|
+| macOS (Apple Silicon) | `ShowNet_<版本>_aarch64.dmg` |
+| Windows (x64) | `ShowNetPortable_<版本>_windows_x86_64.zip` |
+
+### 首次打开会被系统拦截，这是正常的
+
+当前发布包**未经过商业代码签名**，所以 macOS Gatekeeper 和 Windows SmartScreen
+会拦一次。这不代表包有问题，只代表它没有付费证书背书 —— 但也正因如此，请先核对
+校验和再运行。
+
+**校验（两个平台都建议做）**
+
+Release 里附了 `SHA256SUMS.txt`。下载后比对：
+
+```bash
+# macOS / Linux
+shasum -a 256 ShowNet_0.2.0_aarch64.dmg
+```
+
+```powershell
+# Windows
+Get-FileHash ShowNetPortable_0.2.0_windows_x86_64.zip -Algorithm SHA256
+```
+
+**macOS：绕过 Gatekeeper**
+
+挂载 DMG、把 ShowNet 拖进「应用程序」之后，二选一：
+
+- **右键点 ShowNet.app → 打开**，在弹窗里再点一次「打开」。
+  只需做一次，之后正常双击即可。直接双击是不行的 —— 那个弹窗没有「仍要打开」按钮。
+- 或者移除隔离标记：
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/ShowNet.app
+  ```
+
+如果提示「已损坏，无法打开」，通常也是隔离标记造成的，用上面第二条命令即可。
+
+**Windows：绕过 SmartScreen**
+
+解压 ZIP，运行 `ShowNetPortable.exe`。SmartScreen 弹窗里点
+**「更多信息」→「仍要运行」**。便携版不写注册表，删除目录即完全卸载。
+
 ## 推荐上手路径（小白开箱）
 
 按顺序做即可；**第 1 步不装证书也能看到效果**。

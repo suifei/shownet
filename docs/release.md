@@ -100,10 +100,35 @@ For local macOS QA, `npm run tauri:bundle` merges `src-tauri/tauri.local.macos.c
 
 ### Windows
 
-- `WINDOWS_CERTIFICATE_BASE64`: Base64-encoded code-signing PFX.
-- `WINDOWS_CERTIFICATE_PASSWORD`: PFX import password.
+Signing goes through [SignPath](https://signpath.io), whose Foundation programme
+signs open-source projects for free — this repository qualifies (public,
+GPL-3.0). Configure all five as repository Secrets; with any of the first four
+missing the workflow builds an unsigned ZIP instead of failing:
 
-The workflow writes the PFX only into the ephemeral runner directory, imports it into the current-user certificate store, and deletes the temporary PFX. It signs the ShowNet executable, built-in Agent, and `ShowNetPortable.exe` launcher separately, verifies all three with `Get-AuthenticodeSignature`, builds the PortableApps directory, rejects mutable/build-only files, and publishes a checksum alongside the ZIP.
+- `SIGNPATH_API_TOKEN`
+- `SIGNPATH_ORGANIZATION_ID`
+- `SIGNPATH_PROJECT_SLUG`
+- `SIGNPATH_SIGNING_POLICY_SLUG`
+- `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`
+
+There is no PFX to import. Since June 2023 a publicly trusted code-signing key
+may not leave its hardware or cloud HSM, so no CA issues exportable key material
+any more; SignPath holds the key and signs binaries submitted to it.
+
+### Why signing sits where it does
+
+The three executables are signed **after they are compiled and before the
+portable package is assembled**, never afterwards. The package records a
+checksum of every file it contains and verifies them at runtime, so signing
+after packaging would leave those checksums describing bytes that no longer
+exist, and the package would fail its own integrity check on the user's machine.
+The Agent sidecar carries its own checksum file as well, which is re-stamped
+once the signed binary comes back.
+
+Order in `release-windows`: build sidecar → build app and launcher → collect the
+three into one archive → submit to SignPath → verify each returned binary is
+`Valid` and put it back → re-stamp the sidecar → package → verify every
+executable inside the package is still `Valid` → zip and checksum.
 
 ## Update Source
 

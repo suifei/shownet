@@ -65,6 +65,11 @@ export function formatReleaseNotes(notes: string | null | undefined): string {
   if (!notes) return "";
   return notes
     .split("\n")
+    // A table separator and a horizontal rule carry no text at all — they exist
+    // to draw something this dialog cannot draw, so they are noise here. The
+    // table's own rows read acceptably as pipe-separated columns and stay.
+    .filter((line) => !/^\s*\|?[\s:|-]*\|[\s:|-]*\|?\s*$/.test(line) || !line.includes("-"))
+    .filter((line) => !/^\s*([-*_])\s*(\1\s*){2,}$/.test(line))
     .map((line) => {
       const trimmed = line.trimEnd();
       // Headings become plain lines; the text is the point, the level is not.

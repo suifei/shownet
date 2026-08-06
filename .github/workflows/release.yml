@@ -182,9 +182,16 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      # SignPath reads the workflow run and its artifacts to prove the binaries
+      # it is asked to sign came from this commit on this repository.
+      id-token: write
+      actions: read
     env:
-      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+      SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+      SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+      SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ secrets.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -212,23 +219,23 @@ jobs:
         shell: pwsh
         run: |
           npm run check:release
-          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -and -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+          # Signing goes through SignPath: since June 2023 a publicly trusted
+          # code-signing key may not leave its hardware or cloud HSM, so there is
+          # no PFX to import on the runner. SignPath holds the key and signs the
+          # binaries we send it.
+          $configured = @(
+            $env:SIGNPATH_API_TOKEN,
+            $env:SIGNPATH_ORGANIZATION_ID,
+            $env:SIGNPATH_PROJECT_SLUG,
+            $env:SIGNPATH_SIGNING_POLICY_SLUG
+          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          if ($configured.Count -eq 4) {
             "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "Using Windows Authenticode signing"
+            Write-Host "Using SignPath Authenticode signing"
           } else {
             "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "WINDOWS_* cert secrets missing — building unsigned portable ZIP"
+            Write-Host "SignPath is not configured — building an unsigned portable ZIP"
           }
-      - name: Import Windows signing certificate
-        if: steps.mode.outputs.signed == 'true'
-        shell: pwsh
-        run: |
-          $pfxPath = Join-Path $env:RUNNER_TEMP "shownet-signing.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Remove-Item $pfxPath -Force
       - name: Download ripgrep for Agent sidecar offline bundle
         shell: pwsh
         run: |
@@ -247,32 +254,96 @@ jobs:
         shell: pwsh
         run: |
           npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc
-          $sidecar = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
-          if ($env:WINDOWS_CERT_THUMBPRINT) {
-            & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $sidecar
-            if ($LASTEXITCODE -ne 0) { throw "Failed to sign built-in Agent sidecar" }
-            npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
-          }
+          # Left unsigned here on purpose. Signing changes the bytes, and the
+          # sidecar's recorded checksum has to describe the shipped file, so the
+          # stamp is redone after SignPath returns.
           npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
-      - name: Build PortableApps package
+      - name: Build application and launcher
         shell: pwsh
         run: |
           npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.grok.conf.json
           $env:CARGO_TARGET_DIR = (Resolve-Path "src-tauri/target").Path
           cargo build --manifest-path packaging/windows/launcher/Cargo.toml --release --target x86_64-pc-windows-msvc
-          $application = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
-          $launcher = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
-          if ($env:WINDOWS_CERT_THUMBPRINT) {
-            foreach ($executable in @($application, $launcher)) {
-              & signtool.exe sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $executable
-              if ($LASTEXITCODE -ne 0) { throw "Failed to sign $executable" }
-            }
+
+      # Signing has to land here, between compiling the executables and building
+      # the package. The portable package records a checksum of every file it
+      # contains, so signing afterwards would leave those checksums describing
+      # bytes that no longer exist and the package would fail its own integrity
+      # check on the user's machine.
+      - name: Collect executables for signing
+        if: steps.mode.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $staging = "signing/unsigned"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          $sources = @{
+            "grok-build.exe"                 = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
+            "ShowNet.exe"                    = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
+            "shownet-portable-launcher.exe"  = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
           }
+          foreach ($name in $sources.Keys) {
+            $path = $sources[$name]
+            if (-not (Test-Path $path)) { throw "Cannot sign a missing executable: $path" }
+            Copy-Item $path (Join-Path $staging $name)
+          }
+          Compress-Archive -Path "$staging/*" -DestinationPath "signing/unsigned.zip" -Force
+      - uses: actions/upload-artifact@v4
+        if: steps.mode.outputs.signed == 'true'
+        id: unsigned
+        with:
+          name: shownet-windows-unsigned
+          path: signing/unsigned.zip
+          if-no-files-found: error
+      - name: Sign with SignPath
+        if: steps.mode.outputs.signed == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ secrets.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signing/signed
+      - name: Put the signed executables back
+        if: steps.mode.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem signing/signed -Recurse -Filter *.zip | Select-Object -First 1
+          if (-not $archive) { throw "SignPath returned no signed archive" }
+          Expand-Archive -Path $archive.FullName -DestinationPath signing/extracted -Force
+          $targets = @{
+            "grok-build.exe"                = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
+            "ShowNet.exe"                   = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
+            "shownet-portable-launcher.exe" = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
+          }
+          foreach ($name in $targets.Keys) {
+            $signed = Get-ChildItem signing/extracted -Recurse -Filter $name | Select-Object -First 1
+            if (-not $signed) { throw "SignPath did not return $name" }
+            # Refuse to ship anything the signing step did not actually sign.
+            $signature = Get-AuthenticodeSignature $signed.FullName
+            if ($signature.Status -ne "Valid") { throw "$name came back $($signature.Status)" }
+            Copy-Item $signed.FullName $targets[$name] -Force
+          }
+          # The sidecar's bytes changed, so its recorded checksum must be redone
+          # before anything reads it again.
+          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
+          npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
+      - name: Build PortableApps package
+        shell: pwsh
+        env:
+          SHOWNET_SIGNED: ${{ steps.mode.outputs.signed }}
+        run: |
           npm run package:windows:portable -- --target x86_64-pc-windows-msvc
           $portableRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable"
           $executables = Get-ChildItem $portableRoot -Recurse -File -Filter *.exe
           if ($executables.Count -ne 3) { throw "Portable package must contain exactly three executables" }
-          if ($env:WINDOWS_CERT_THUMBPRINT) {
+          # Final check on what actually ships: every executable inside the
+          # package must still carry a valid signature after packaging moved and
+          # renamed it. A signed build that silently ships one unsigned binary
+          # is worse than an unsigned build, because nobody looks again.
+          if ($env:SHOWNET_SIGNED -eq "true") {
             foreach ($executable in $executables) {
               $signature = Get-AuthenticodeSignature $executable.FullName
               if ($signature.Status -ne "Valid") { throw "$($executable.Name) signature is $($signature.Status)" }
