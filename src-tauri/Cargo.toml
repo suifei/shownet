@@ -5,6 +5,7 @@ description = "Full-scene traffic capture and AI protocol analysis"
 authors = ["ShowNet Team"]
 edition = "2021"
 license = "GPL-3.0-only"
+default-run = "shownet"
 
 [lib]
 name = "shownet_lib"
