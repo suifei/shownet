@@ -125,6 +125,12 @@
 
   --radius: 12px;
   --shadow-color: 0 0 0;
+
+  /* Without this the engine treats the page as light and draws native UI to
+     match — on macOS that means overlay scrollbars in light appearance, which
+     read as near-white bars over a dark app. Those scrollbars are drawn by the
+     system, so the `::-webkit-scrollbar` rules below never got a say. */
+  color-scheme: dark;
 }
 
 * {

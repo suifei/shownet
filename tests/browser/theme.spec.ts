@@ -112,3 +112,23 @@ test("empty states explain the feature rather than just naming it", async ({ pag
   await expect(rules).toContainText("停用");
   expect((await rules.textContent())!.length).toBeGreaterThan(60);
 });
+
+test("declares the dark color scheme so native UI matches", async ({ page }) => {
+  await page.goto("/");
+  // Scrollbars, form controls and focus rings are drawn by the engine, not by
+  // our CSS. Without this declaration it draws them light, which on a dark app
+  // reads as near-white bars — and no `::-webkit-scrollbar` rule can override
+  // it, because those elements never enter the CSS path at all.
+  const scheme = await page.evaluate(
+    () => getComputedStyle(document.documentElement).colorScheme,
+  );
+  expect(scheme).toContain("dark");
+
+  // The custom thumb must stay dim enough to read as chrome rather than content.
+  const thumb = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--scrollbar-thumb").trim(),
+  );
+  const channels = thumb.replace("#", "").match(/../g)!.map((pair) => parseInt(pair, 16));
+  const brightest = Math.max(...channels);
+  expect(brightest, `scrollbar thumb ${thumb} is too bright for a dark surface`).toBeLessThan(140);
+});
