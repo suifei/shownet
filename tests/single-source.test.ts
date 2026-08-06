@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
-import { formatBytes, formatClock, formatListBytes, isSlowRequest, SLOW_REQUEST_MS } from "../src/format.ts";
+import { formatBytes, formatReleaseNotes, formatClock, formatListBytes, isSlowRequest, SLOW_REQUEST_MS } from "../src/format.ts";
 import { RULE_TRACE_RESULT_LABELS, ruleTraceResultLabel } from "../src/ruleTrace.ts";
 import { shellQuote } from "../src/shellQuote.ts";
 
@@ -364,4 +364,54 @@ describe("closed loops", () => {
     }
   });
 
+});
+
+describe("release notes", () => {
+  it("flattens the Markdown a GitHub release body actually contains", () => {
+    // Shaped after `generate_release_notes: true`, which is what the workflow
+    // asks for: a heading over a bulleted list, ending in a bold label.
+    const body = [
+      "## What's Changed",
+      "* Fix **PROBE_ADDR** parse race by @flynn in https://github.com/suifei/shownet/pull/1",
+      "* Add `--check` gate",
+      "",
+      "",
+      "",
+      "**Full Changelog**: https://github.com/suifei/shownet/commits/v0.1.0",
+    ].join("\n");
+
+    const rendered = formatReleaseNotes(body);
+    for (const syntax of ["##", "**", "`"]) {
+      assert.ok(
+        !rendered.includes(syntax),
+        `${syntax} would show through to the user: ${rendered}`,
+      );
+    }
+    assert.ok(rendered.startsWith("What's Changed"), rendered);
+    assert.ok(rendered.includes("• Fix PROBE_ADDR parse race"), rendered);
+    // URLs are the useful part of these notes and must survive untouched.
+    assert.ok(
+      rendered.includes("https://github.com/suifei/shownet/pull/1"),
+      rendered,
+    );
+    assert.ok(!/\n{3,}/.test(rendered), "collapses Markdown spacing");
+  });
+
+  it("keeps a link's text and its target", () => {
+    assert.equal(
+      formatReleaseNotes("See [the notes](https://example.com/x)"),
+      "See the notes (https://example.com/x)",
+    );
+  });
+
+  it("survives an empty or missing body", () => {
+    assert.equal(formatReleaseNotes(null), "");
+    assert.equal(formatReleaseNotes(""), "");
+    assert.equal(formatReleaseNotes("   \n\n  "), "");
+  });
+
+  it("leaves prose that is not Markdown alone", () => {
+    const plain = "ShowNet 0.1.0 desktop builds (macOS aarch64 + Windows x86_64).";
+    assert.equal(formatReleaseNotes(plain), plain);
+  });
 });

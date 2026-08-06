@@ -49,3 +49,43 @@ export function formatClock(value: number | string | null | undefined, withMilli
   const clock = date.toLocaleTimeString("zh-CN", { hour12: false });
   return withMillis ? `${clock}.${String(date.getMilliseconds()).padStart(3, "0")}` : clock;
 }
+
+/**
+ * Flatten GitHub release notes into readable plain text.
+ *
+ * The notes now come from a release body, which is Markdown — and with
+ * `generate_release_notes` the body is a `## What's Changed` heading over a
+ * bulleted list. The update dialog renders text, not Markdown, so without this
+ * the user reads literal `##` and `**` and it looks broken.
+ *
+ * Deliberately not a Markdown renderer: it removes the syntax that would show
+ * through and leaves everything else, including URLs, exactly as written.
+ */
+export function formatReleaseNotes(notes: string | null | undefined): string {
+  if (!notes) return "";
+  return notes
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trimEnd();
+      // Headings become plain lines; the text is the point, the level is not.
+      const heading = /^\s{0,3}#{1,6}\s+(.*)$/.exec(trimmed);
+      if (heading) return heading[1].trim();
+      // List markers become a bullet, so nesting still reads as a list.
+      const item = /^(\s*)[-*+]\s+(.*)$/.exec(trimmed);
+      const body = item ? `${item[1]}• ${item[2]}` : trimmed;
+      return (
+        body
+          // Bold and italic markers, innermost first so `**a**` does not leave `*a*`.
+          .replace(/\*\*([^*]+)\*\*/g, "$1")
+          .replace(/__([^_]+)__/g, "$1")
+          .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1$2")
+          // Inline code and links: keep the text, drop the punctuation.
+          .replace(/`([^`\n]+)`/g, "$1")
+          .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
+      );
+    })
+    .join("\n")
+    // Three or more blank lines is Markdown spacing, not intent.
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
