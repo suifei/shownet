@@ -65,17 +65,16 @@ use models::{
     ConnectionDiagnostics, CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput,
     DetectedEnvProxy, EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord,
     EnvironmentVariableInput, FollowupAnalysisInput, McpClientSettings, McpClientSettingsInput,
-    McpClientTestResult, McpRecentClient, McpServerSettings, McpServerSettingsInput,
-    McpServerStatus, ProxyBrowserStatus, ReplayBatch, ReplayBatchInput, RequestAnnotation,
-    RequestAnnotationInput, RequestCollection, RequestCollectionFolder,
-    RequestCollectionFolderInput, RequestCollectionInput, RequestCollectionWorkspace,
-    RequestCookieRecord, RequestDraft, RequestDraftBatchUpdateInput, RequestDraftInput,
-    RequestDraftLocationInput, RequestListEvent, RequestListItem, RequestListPage,
-    RequestListWindow, RequestQuery, RequestRecord, RequestRun, RequestWindowQuery,
-    ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus, RulePreviewResult,
-    SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit, StartAnalysisInput,
-    StorageStats, SystemProxySettings, SystemProxySettingsInput, UpdateCheckResult,
-    UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
+    McpClientTestResult, McpRecentClient, McpServerSettingsInput, McpServerStatus,
+    ProxyBrowserStatus, ReplayBatch, ReplayBatchInput, RequestAnnotation, RequestAnnotationInput,
+    RequestCollection, RequestCollectionFolder, RequestCollectionFolderInput,
+    RequestCollectionInput, RequestCollectionWorkspace, RequestCookieRecord, RequestDraft,
+    RequestDraftBatchUpdateInput, RequestDraftInput, RequestDraftLocationInput, RequestListEvent,
+    RequestListItem, RequestListPage, RequestListWindow, RequestQuery, RequestRecord, RequestRun,
+    RequestWindowQuery, ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus,
+    RulePreviewResult, SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit,
+    StartAnalysisInput, StorageStats, SystemProxySettings, SystemProxySettingsInput,
+    UpdateCheckResult, UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
 };
 use proxy::{ProxyHandle, ReverseProxyHandle};
 use serde::{Deserialize, Serialize};
@@ -918,13 +917,6 @@ async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResu
 }
 
 #[tauri::command]
-fn get_capture_listener_settings(
-    state: State<'_, AppState>,
-) -> Result<CaptureListenerSettings, String> {
-    state.storage.get_capture_listener_settings()
-}
-
-#[tauri::command]
 fn get_tls_interception_settings(
     state: State<'_, AppState>,
 ) -> Result<TlsInterceptionSettings, String> {
@@ -1264,16 +1256,6 @@ fn delete_session(
     emit(&app, "session://deleted", &session_id)
 }
 
-#[tauri::command]
-fn list_requests(
-    session_id: String,
-    limit: Option<i64>,
-    offset: Option<i64>,
-    state: State<'_, AppState>,
-) -> Result<Vec<RequestRecord>, String> {
-    state.storage.list_requests(&session_id, limit, offset)
-}
-
 fn begin_request_query(
     app: &tauri::AppHandle,
     requested_query_id: Option<String>,
@@ -1589,11 +1571,23 @@ async fn start_replay_batch(
     Ok(batch)
 }
 
+/// Read one replay batch back from storage.
+///
+/// No caller today: the workbench shows a batch from `start_replay_batch`'s
+/// return value and keeps it current from `replay://batch-updated`, so it never
+/// needs to re-read one. Storage keeps the history regardless; this is what a
+/// batch-history view would read, and deleting it would only mean writing it
+/// again.
 #[tauri::command]
 fn get_replay_batch(batch_id: String, state: State<'_, AppState>) -> Result<ReplayBatch, String> {
     state.storage.get_replay_batch(&batch_id)
 }
 
+/// List a session's past replay batches.
+///
+/// No caller today, for the same reason as `get_replay_batch`: the UI has no
+/// batch history view. The data is already persisted, so the gap is a missing
+/// screen rather than a missing capability.
 #[tauri::command]
 fn list_replay_batches(
     session_id: String,
@@ -2129,15 +2123,6 @@ fn export_session_file(
 }
 
 #[tauri::command]
-fn build_algorithm_replay_package(
-    session_id: String,
-    language: String,
-    state: State<'_, AppState>,
-) -> Result<algorithm_replay::AlgorithmReplayPackage, String> {
-    algorithm_replay::build_algorithm_replay(&state.storage, session_id.trim(), language.trim())
-}
-
-#[tauri::command]
 fn export_algorithm_replay_package(
     session_id: String,
     language: String,
@@ -2160,36 +2145,6 @@ fn export_algorithm_replay_package(
         session_id.trim(),
         language.trim(),
         report_id,
-        directory.as_deref(),
-    )
-}
-
-#[tauri::command]
-fn build_auto_crawler_package(
-    session_id: String,
-    language: String,
-    state: State<'_, AppState>,
-) -> Result<auto_crawler::AutoCrawlerPackage, String> {
-    auto_crawler::build_auto_crawler(&state.storage, session_id.trim(), language.trim())
-}
-
-#[tauri::command]
-fn export_auto_crawler_package(
-    session_id: String,
-    language: String,
-    output_dir: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<auto_crawler::AutoCrawlerExportResult, String> {
-    let directory = match output_dir {
-        Some(path) if !path.trim().is_empty() => {
-            Some(validate_output_directory(path.trim().to_string())?)
-        }
-        _ => None,
-    };
-    auto_crawler::export_auto_crawler(
-        &state.storage,
-        session_id.trim(),
-        language.trim(),
         directory.as_deref(),
     )
 }
@@ -2269,6 +2224,11 @@ fn set_outbound_tls_profile(profile: String, state: State<'_, AppState>) -> Resu
     Ok(tls_outbound::status_json())
 }
 
+/// Enumerate the available ClientHello presets.
+///
+/// No caller inside the app, but documented as public API in
+/// `docs/clienthello-catalog-and-mitm-console.md` — external tooling reads it to
+/// discover which presets this build ships.
 #[tauri::command]
 fn list_clienthello_presets() -> Result<Value, String> {
     serde_json::to_value(tls_clienthello_catalog::list_presets()).map_err(|e| e.to_string())
@@ -2295,6 +2255,12 @@ fn set_outbound_tls_auto_from_inbound(
     Ok(tls_outbound::status_json())
 }
 
+/// Pin the outbound ClientHello to a specific preset.
+///
+/// No caller today: the settings UI offers `set_outbound_tls_auto_from_inbound`,
+/// which derives the preset from what the client actually sent, and reads the
+/// result with `get_outbound_tls_profile`. This is the manual override for
+/// choosing a preset directly.
 #[tauri::command]
 fn set_outbound_tls_impersonate(
     enabled: bool,
@@ -2370,6 +2336,11 @@ fn decode_px_payload(
     px_analysis::decode_request_payload(&state.storage, request_id.trim())
 }
 
+/// Run the whole analysis pipeline without a UI driving it.
+///
+/// No caller today: every in-app path goes through the interactive analysis
+/// views. This is the headless entry point — one call from capture to exported
+/// code — which is what an automated run or a future CLI would use.
 #[tauri::command]
 fn run_autonomous_session_analysis(
     session_id: String,
@@ -2394,25 +2365,6 @@ fn run_autonomous_session_analysis(
             .filter(|value| !value.is_empty()),
         directory.as_deref(),
     )
-}
-
-#[tauri::command]
-fn eval_analysis_scorecard(
-    session_id: Option<String>,
-    mode: Option<String>,
-    output_path: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let args = json!({
-        "sessionId": session_id,
-        "mode": mode.unwrap_or_else(|| "crypto".into()),
-        "outputPath": output_path,
-    });
-    // Reuse the same tool path Agent/MCP use (no GUI).
-    match agent_tools::execute_read_tool(&state, "shownet_eval_scorecard", &args) {
-        Some(result) => result,
-        None => Err("shownet_eval_scorecard tool not registered".into()),
-    }
 }
 
 #[tauri::command]
@@ -2531,11 +2483,6 @@ fn save_ai_analysis_settings(
 }
 
 #[tauri::command]
-fn get_mcp_server_settings(state: State<'_, AppState>) -> Result<McpServerSettings, String> {
-    state.storage.get_mcp_server_settings()
-}
-
-#[tauri::command]
 fn get_mcp_server_status(state: State<'_, AppState>) -> Result<McpServerStatus, String> {
     mcp_server_status(&state)
 }
@@ -2639,14 +2586,6 @@ async fn test_external_mcp_server(
         let _ = emit(&app, "settings://mcp-clients", &servers);
     }
     result
-}
-
-#[tauri::command]
-fn get_latest_analysis_report(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<AnalysisReport>, String> {
-    state.storage.latest_analysis_report(&session_id)
 }
 
 #[tauri::command]
@@ -2775,14 +2714,6 @@ async fn probe_upstream_proxy(
     Ok(proxy::probe_upstream_egress(&effective).await)
 }
 
-#[tauri::command]
-fn append_capture_event(
-    event: CaptureEventInput,
-    app: tauri::AppHandle,
-) -> Result<CaptureEvent, String> {
-    persist_capture_event(&app, event)
-}
-
 pub(crate) fn persist_capture_event(
     app: &tauri::AppHandle,
     event: CaptureEventInput,
@@ -2809,14 +2740,6 @@ fn list_sse_events(
     state: State<'_, AppState>,
 ) -> Result<Vec<CaptureEvent>, String> {
     state.storage.list_sse_events(&request_id, limit)
-}
-
-#[tauri::command]
-fn store_captured_request(
-    request: CapturedRequestInput,
-    app: tauri::AppHandle,
-) -> Result<RequestRecord, String> {
-    persist_captured_request(&app, request)
 }
 
 async fn start_capture_for_session(
@@ -3654,7 +3577,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
             check_for_updates,
-            get_capture_listener_settings,
             get_tls_interception_settings,
             save_tls_interception_settings,
             save_capture_listener_settings,
@@ -3688,7 +3610,6 @@ pub fn run() {
             create_session,
             rename_session,
             delete_session,
-            list_requests,
             query_request_list,
             query_request_window,
             cancel_request_query,
@@ -3752,10 +3673,7 @@ pub fn run() {
             get_tls_fingerprints,
             export_session_file,
             import_session_file,
-            build_algorithm_replay_package,
             export_algorithm_replay_package,
-            build_auto_crawler_package,
-            export_auto_crawler_package,
             export_evaluation_package,
             get_outbound_tls_profile,
             set_outbound_tls_profile,
@@ -3767,7 +3685,6 @@ pub fn run() {
             list_px_evidence,
             decode_px_payload,
             run_autonomous_session_analysis,
-            eval_analysis_scorecard,
             get_upstream_proxy_settings,
             save_upstream_proxy_settings,
             detect_env_upstream_proxy,
@@ -3780,7 +3697,6 @@ pub fn run() {
             list_ai_models,
             save_ai_provider_settings,
             save_ai_analysis_settings,
-            get_mcp_server_settings,
             get_mcp_server_status,
             list_built_in_skills,
             get_analysis_skill_plan,
@@ -3793,7 +3709,6 @@ pub fn run() {
             save_external_mcp_server,
             delete_external_mcp_server,
             test_external_mcp_server,
-            get_latest_analysis_report,
             list_analysis_reports,
             list_analysis_messages,
             list_analysis_activities,
@@ -3803,10 +3718,8 @@ pub fn run() {
             start_ai_analysis,
             cancel_ai_analysis,
             followup_ai_analysis,
-            append_capture_event,
             list_websocket_frames,
             list_sse_events,
-            store_captured_request,
             set_capture_running,
         ])
         .build(tauri::generate_context!())

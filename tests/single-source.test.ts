@@ -449,3 +449,67 @@ describe("release notes", () => {
     assert.equal(formatReleaseNotes(plain), plain);
   });
 });
+
+describe("IPC surface", () => {
+  /** Commands registered with no frontend caller, each deliberate and explained. */
+  const INTENTIONALLY_UNCALLED = new Set([
+    // No batch-history view exists yet; storage keeps the data regardless.
+    "get_replay_batch",
+    "list_replay_batches",
+    // Headless entry point: capture to exported code in one call.
+    "run_autonomous_session_analysis",
+    // Manual override; the UI offers the auto-derived sibling instead.
+    "set_outbound_tls_impersonate",
+    // Documented public API for external tooling.
+    "list_clienthello_presets",
+  ]);
+
+  it("registers no command the app cannot reach and has not justified", async () => {
+    // A registered command with no caller is reachable over IPC and maintained
+    // by nobody. Ten were removed because an agent tool or another return value
+    // already covered them; this keeps that from silently growing back.
+    const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+    const handler = /generate_handler!\[([\s\S]*?)\]/.exec(lib);
+    assert.ok(handler, "could not find the command registration");
+    const registered = handler[1]
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    assert.ok(registered.length > 100, `only found ${registered.length} commands`);
+
+    const frontend = await readSourceTree(new URL("../src/", import.meta.url));
+    const unreachable = registered.filter(
+      (command) => !frontend.includes(`"${command}"`) && !INTENTIONALLY_UNCALLED.has(command),
+    );
+    assert.deepEqual(
+      unreachable,
+      [],
+      "these commands have no caller: either wire them up, delete them, or add them to INTENTIONALLY_UNCALLED with the reason why",
+    );
+  });
+
+  it("keeps the exemption list honest", async () => {
+    // An exemption for a command that no longer exists is stale bookkeeping that
+    // makes the list stop meaning anything.
+    const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+    for (const command of INTENTIONALLY_UNCALLED) {
+      assert.ok(
+        lib.includes(`fn ${command}(`),
+        `${command} is exempted but no longer exists`,
+      );
+    }
+  });
+});
+
+async function readSourceTree(root: URL): Promise<string> {
+  const { readdir } = await import("node:fs/promises");
+  const entries = await readdir(root, { withFileTypes: true });
+  const parts = await Promise.all(
+    entries.map(async (entry) => {
+      const child = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, root);
+      if (entry.isDirectory()) return readSourceTree(child);
+      return /\.tsx?$/.test(entry.name) ? readFile(child, "utf8") : "";
+    }),
+  );
+  return parts.join("\n");
+}
