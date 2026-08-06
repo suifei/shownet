@@ -303,4 +303,36 @@ describe("closed loops", () => {
     "device copy must read both source labels",
   );
 });
+
+  it("checks for updates against GitHub, not a self-hosted manifest", async () => {
+    // The release workflow used to build a latest.json and PUT it to a private
+    // host. That was a second statement of "what the latest version is", able to
+    // drift from the release it described or go missing if the upload failed
+    // after the release was already public.
+    const updates = await readFile(
+      new URL("../src-tauri/src/updates.rs", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      updates,
+      /https:\/\/api\.github\.com\/repos\/[\w.-]+\/[\w.-]+\/releases\/latest/,
+      "the default update endpoint must be the GitHub Releases API",
+    );
+
+    const workflow = await readFile(
+      new URL("../.github/workflows/release.yml", import.meta.url),
+      "utf8",
+    );
+    for (const leftover of ["SHOWNET_UPDATE_PUBLISH", "SHOWNET_UPDATE_MANIFEST_URL"]) {
+      assert.ok(
+        !workflow.includes(leftover),
+        `release workflow must not carry ${leftover}`,
+      );
+    }
+    assert.ok(
+      !/--data-binary @release-assets\/latest\.json/.test(workflow),
+      "release workflow must not publish a manifest to a self-hosted endpoint",
+    );
+  });
+
 });
