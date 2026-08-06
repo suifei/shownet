@@ -259,7 +259,9 @@ pub fn golden_authorised_ceiling(preset_id: &str) -> AlignmentLevel {
 /// Wording for the golden ceiling (existence of a usable capture), never “已对齐”.
 pub fn golden_ceiling_claim(level: AlignmentLevel) -> &'static str {
     match level {
-        AlignmentLevel::Recipe => "无可用金标（pending-capture 或缺失），出站不可宣称工具/浏览器对齐",
+        AlignmentLevel::Recipe => {
+            "无可用金标（pending-capture 或缺失），出站不可宣称工具/浏览器对齐"
+        }
         AlignmentLevel::ToolMatched => {
             "已收录 tool-capture 金标，可供实测比对；未匹配前出站仍为 recipe，不宣称已对齐"
         }
@@ -421,7 +423,11 @@ mod tests {
                     assert!(!entry.is_usable());
                 }
                 GoldenStatus::Captured => {
-                    assert!(entry.is_usable(), "{} captured must be usable", entry.preset_id);
+                    assert!(
+                        entry.is_usable(),
+                        "{} captured must be usable",
+                        entry.preset_id
+                    );
                     let level = entry.authorised_level();
                     assert!(
                         level.is_matched(),
