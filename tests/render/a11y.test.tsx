@@ -23,6 +23,10 @@ async function audit(container: HTMLElement) {
   }));
 }
 
+/// axe over a rendered view is inherently slow; these get their own budget so
+/// the default timeout keeps guarding every other test.
+const AXE_SWEEP_TIMEOUT_MS = 30_000;
+
 describe("accessibility", () => {
   it("keeps every primary view clean", async () => {
     const { container } = render(<App />);
@@ -33,7 +37,10 @@ describe("accessibility", () => {
       await goTo(view);
       expect(await audit(container), `${view} has accessibility violations`).toEqual([]);
     }
-  });
+    // axe sweeps six full views; the default 5s budget is a CI-runner coin flip
+    // (this took 5.7s on a Windows runner while passing locally). Kept far above
+    // the real cost so it still catches a hang, not a slow machine.
+  }, AXE_SWEEP_TIMEOUT_MS);
 
   it("keeps the dialogs clean", async () => {
     const { container } = render(<App />);
@@ -48,7 +55,7 @@ describe("accessibility", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /个来源/ }));
     expect(await audit(container), "流量来源").toEqual([]);
-  });
+  }, AXE_SWEEP_TIMEOUT_MS);
 });
 
 describe("request grid semantics", () => {
