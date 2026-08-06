@@ -530,3 +530,50 @@ describe("replay batch history", () => {
     );
   });
 });
+
+describe("release publishing", () => {
+  it("keeps one source for the install guidance both workflows ship", async () => {
+    // Two workflows publish releases now. If each carried its own copy of this
+    // text they would drift, and users would get different instructions
+    // depending on which path produced their download.
+    const body = await readFile(
+      new URL("../.github/release/body.md", import.meta.url),
+      "utf8",
+    );
+    assert.match(body, /\{\{VERSION\}\}/, "the shared body must be a template");
+    assert.ok(body.includes("SHA256SUMS.txt"), "it must point at the checksums");
+
+    for (const workflow of ["release.yml", "publish-from-run.yml"]) {
+      const text = await readFile(
+        new URL(`../.github/workflows/${workflow}`, import.meta.url),
+        "utf8",
+      );
+      assert.ok(
+        text.includes(".github/release/body.md"),
+        `${workflow} must render the shared body rather than inlining its own`,
+      );
+      assert.ok(
+        !text.includes("Gatekeeper"),
+        `${workflow} still inlines install prose; it belongs in the shared file`,
+      );
+    }
+  });
+
+  it("refuses to publish artifacts from a different version", async () => {
+    // Republishing exists to skip a two-hour rebuild, which also makes it easy
+    // to point at the wrong run and hand users a download that does not match
+    // the tag they clicked.
+    const workflow = await readFile(
+      new URL("../.github/workflows/publish-from-run.yml", import.meta.url),
+      "utf8",
+    );
+    assert.ok(
+      workflow.includes("does not match package.json version"),
+      "the tag must be checked against the version at that tag",
+    );
+    assert.ok(
+      /is not version \$\{version\}/.test(workflow),
+      "asset filenames must be checked against that version",
+    );
+  });
+});
