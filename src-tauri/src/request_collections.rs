@@ -1776,6 +1776,15 @@ fn schema_example(schema: &Value) -> Value {
 }
 
 fn structured_fields_from_example(example: &Value) -> String {
+    // A spec may write the example as a string — `example: "user=ada&pass=x"`
+    // is ordinary for form content. `as_object()` returns None for it and the
+    // default below is an empty list, so the body was dropped outright rather
+    // than merely mislabelled. Parsed the same way the HAR path parses a raw
+    // form, so the two importers agree.
+    if let Some(text) = example.as_str() {
+        let fields = urlencoded_body_fields(text);
+        return serde_json::to_string(&fields).unwrap_or_else(|_| "[]".to_string());
+    }
     let fields = example
         .as_object()
         .map(|object| {
@@ -2270,6 +2279,39 @@ fn postman_body(draft: &RequestDraft) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_form_example_written_as_a_string_is_not_dropped() {
+        // structured_fields_from_example took `as_object().unwrap_or_default()`,
+        // so a spec writing `example: "a=1&b=2"` — ordinary for form content —
+        // imported as an empty field list. The label said urlencoded and the
+        // body was gone, which is worse than the wrong label the HAR path had.
+        assert_eq!(structured_fields_from_example(&json!(null)), "[]");
+
+        let fields: Value = serde_json::from_str(&structured_fields_from_example(&json!(
+            "user=ada&pass=a%20b"
+        )))
+        .unwrap();
+        let fields = fields.as_array().expect("a field array");
+        assert_eq!(fields.len(), 2, "the body must survive the import");
+        assert_eq!(fields[0]["name"], "user");
+        assert_eq!(fields[0]["value"], "ada");
+        assert_eq!(fields[1]["value"], "a b");
+
+        // An object example keeps working exactly as before.
+        let fields: Value = serde_json::from_str(&structured_fields_from_example(
+            &json!({"user":"ada","count":3}),
+        ))
+        .unwrap();
+        let fields = fields.as_array().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields
+            .iter()
+            .any(|f| f["name"] == "user" && f["value"] == "ada"));
+        assert!(fields
+            .iter()
+            .any(|f| f["name"] == "count" && f["value"] == "3"));
+    }
 
     #[test]
     fn a_har_form_imports_as_fields_whichever_way_the_browser_recorded_it() {
