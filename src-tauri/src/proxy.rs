@@ -1940,6 +1940,28 @@ fn is_benign_connection_end(error: &hyper::Error) -> bool {
     if error.is_closed() || error.is_incomplete_message() || error.is_canceled() {
         return true;
     }
+    is_benign_io_chain(error)
+}
+
+/// The same question for a request we sent to an origin.
+///
+/// `is_canceled()` here has two causes and hyper does not distinguish them. The
+/// common one is the origin's connection dying mid-request — any server closing
+/// an idle keep-alive socket — which is routine and self-healing. The other is
+/// our own doing: hyper's h1 client does not pipeline, so a second
+/// `send_request` before the previous body has been read fails the same way.
+///
+/// Reporting both would put a toast on every stale connection, so this stays
+/// silent, and the h1 sharing limit is documented above `drop(shared_guard)`
+/// instead. What it is *not* is a client walking away: an end-to-end test
+/// showed a departing client drops the whole future, so `send_request` never
+/// resolves and this is never reached by that case.
+fn is_benign_forward_end(error: &hyper::Error) -> bool {
+    is_benign_connection_end(error)
+}
+
+/// Whether hyper is wrapping an I/O failure that just means the peer went away.
+fn is_benign_io_chain(error: &hyper::Error) -> bool {
     // A reset or a broken pipe reaches us as an io::Error wrapped by hyper, and
     // answers false to every predicate hyper exposes. Walk the chain, as
     // `looks_like_origin_http2_refusal` does for the same reason.
@@ -2213,11 +2235,10 @@ async fn forward_mitm_https(
     event_sink: EventSink,
     error_sink: ErrorSink,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    // Set where the typed hyper::Error still exists, read at the sink. A flag
-    // rather than a marker inside the message: the message is user-facing text
-    // and must not carry control data a caller could forget to strip.
-    let client_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cancelled_flag = client_cancelled.clone();
+    // Set where the typed hyper::Error still exists, read at the sink — the
+    // message is user-facing text and must not carry control data.
+    let routine_end = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let routine_flag = routine_end.clone();
     let result: Result<Response<ProxyBody>, String> = async {
         let mut scheme = "https".to_string();
         let original_route = (scheme.clone(), host.clone(), port);
@@ -2594,14 +2615,10 @@ async fn forward_mitm_https(
                 format!(
                     "转发目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
                 )
-            } else if error.is_canceled() {
-                // The client abandoned the request — a cancelled image load, an
-                // abandoned prefetch, a navigation away mid-flight. Browsers do
-                // this constantly. Still a failed forward, so the 502 stands and
-                // the capture records it; it is just not news.
-                cancelled_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                format!("转发目标请求失败: {error}")
             } else {
+                if is_benign_forward_end(&error) {
+                    routine_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 format!("转发目标请求失败: {error}")
             }
         })?;
@@ -2766,7 +2783,7 @@ async fn forward_mitm_https(
     }
     .await;
     Ok(result.unwrap_or_else(|error| {
-        if !client_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        if !routine_end.load(std::sync::atomic::Ordering::Relaxed) {
             error_sink(error.clone());
         }
         error_response(StatusCode::BAD_GATEWAY, &error)
@@ -4658,7 +4675,7 @@ async fn forward_http(
                 ));
             }
             let message = format!("目标请求失败: {error}");
-            if is_benign_connection_end(&error) {
+            if is_benign_forward_end(&error) {
                 // The origin's connection went away — a stale keep-alive socket
                 // reused a moment too late, a peer that hung up. The caller is
                 // still owed the 502, but nobody needs to be interrupted; this
@@ -6606,32 +6623,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_cancellation_is_silenced_on_the_forward_path() {
-        // A cancelled request is the one forwarding failure the user is not
-        // told about, and the decision is made where the typed hyper::Error
-        // still exists. Nothing is encoded into the message itself: the sink
-        // reads a flag, so a caller cannot forget to decode one.
+    fn both_forward_paths_treat_a_routine_ending_the_same_way() {
+        // The two paths drifted once already: 0.4.4 quieted the MITM forward and
+        // left the explicit-proxy one reporting. They now share one classifier,
+        // and the count catches a third path added without it.
         let source = production_source();
         assert_eq!(
-            source.matches("cancelled_flag.store(true").count(),
-            1,
-            "exactly one forwarding failure is silenced"
+            source.matches("is_benign_forward_end(&error)").count(),
+            2,
+            "the MITM and explicit-proxy forwards must ask the same question"
         );
+        // Cancellation is routine on a forward — an origin closing an idle
+        // keep-alive socket looks exactly like this — but on the inbound
+        // listener it is a peer hanging up, so both keep it.
         let at = source
-            .find("} else if error.is_canceled() {")
-            .expect("the cancellation branch is what opts out");
+            .find("fn is_benign_connection_end(")
+            .expect("the connection classifier exists");
         assert!(
-            source[at..at + 400].contains("cancelled_flag.store(true"),
-            "the cancellation branch must be the one that opts out"
-        );
-        assert!(
-            source.contains("if !client_cancelled.load("),
-            "the sink must consult the flag before reporting"
-        );
-        // The failure text stays plain: no control characters, nothing to strip.
-        assert!(
-            !source.contains("\\u{1}"),
-            "a marker inside a user-facing message is what this replaced"
+            source[at..at + 400].contains("is_canceled()"),
+            "a cancelled connection is still a peer hanging up"
         );
     }
 
@@ -10748,6 +10758,86 @@ mod tests {
         let captured_requests = captured.lock().unwrap().clone();
         let captured_errors = errors.lock().unwrap().clone();
         (captured_requests, captured_errors)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local socket permissions"]
+    async fn local_socket_a_client_leaving_before_the_reply_reports_nothing() {
+        // A client that walks away from a slow request. This is what settled
+        // where "operation was canceled" comes from: disabling only the forward
+        // cancellation branch leaves this test green, because a departing client
+        // drops the whole service future rather than resolving it. What it does
+        // exercise is the inbound listener — disabling that classifier makes it
+        // fail with "connection closed before message completed".
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = tokio::spawn(async move {
+            loop {
+                match target.accept().await {
+                    Ok((mut stream, _)) => {
+                        tokio::spawn(async move {
+                            let mut request = vec![0_u8; 2048];
+                            let _ = stream.read(&mut request).await;
+                            // Answer far too late for a client that already left.
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            let _ = stream
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                                .await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-abandoned-request".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET http://127.0.0.1:{}/slow HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                    target_address.port(),
+                    target_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        // Let the forward get under way, then leave without reading the answer.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(client);
+
+        // Outlive the target's delayed reply so the forward really does resolve.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        target_task.abort();
+        handle.stop().await;
+
+        let seen = errors.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "a request the client gave up on is not a failure, but these were reported: {seen:?}"
+        );
     }
 
     #[tokio::test]
