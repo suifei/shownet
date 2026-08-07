@@ -9,7 +9,7 @@ use crate::models::{
     AiAnalysisSettings, AiModelDiscoveryInput, AnalysisChatMessage, AnalysisReport,
     AnalysisStreamEvent, BrowserHookEvent, CryptoCodeSnippet, EffectiveAiProviderSettings,
     EffectiveUpstreamProxy, FollowupAnalysisInput, HeaderEntry, RequestAnnotation, RequestRecord,
-    StartAnalysisInput, DEFAULT_AI_CONTEXT_TOKENS,
+    StartAnalysisInput,
 };
 use crate::skills::{self, SkillPlan};
 use crate::{emit, AnalysisExecution, AppState};
@@ -35,6 +35,11 @@ const MAX_TOOL_RESULT_BYTES: usize = 96 * 1024;
 /// Fallback only when settings are unavailable; prefer `AiAnalysisSettings.max_agent_turns`.
 const DEFAULT_AGENT_TOOL_ROUNDS: usize = 8;
 const MAX_MODELS_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// Total attempts against the AI provider, first try included.
+const MAX_AI_ATTEMPTS: u32 = 5;
+const AI_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+const AI_RETRY_MAX_DELAY: Duration = Duration::from_secs(20);
+const AI_RETRY_JITTER_MAX_MS: u64 = 250;
 
 pub async fn list_models(
     state: &AppState,
@@ -2416,25 +2421,23 @@ async fn chat_completion_with_tools_once(
     tools: &[Value],
 ) -> Result<Value, String> {
     let endpoint = chat_completions_endpoint(&settings.base_url);
-    let mut request = client.post(&endpoint).json(&json!({
-        "model": settings.model,
-        "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
-        "stream": false,
-    }));
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.bearer_auth(api_key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("连接 AI 工具调用接口失败: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(ai_http_error(status, &body));
-    }
+    let response = send_ai_request(
+        || {
+            let request = client.post(&endpoint).json(&json!({
+                "model": settings.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": false,
+            }));
+            match settings.api_key.as_deref() {
+                Some(api_key) => request.bearer_auth(api_key),
+                None => request,
+            }
+        },
+        "连接 AI 工具调用接口失败",
+    )
+    .await?;
     let value = response
         .json::<Value>()
         .await
@@ -2518,6 +2521,81 @@ where
     }
 }
 
+/// Statuses worth sending again. Everything else — a rejected key, an unknown
+/// model, a malformed request — fails identically on a retry.
+fn is_retryable_ai_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Spreads retries out so that the graph nodes running concurrently do not all
+/// come back at the same instant and rebuild the burst that got us limited.
+fn retry_jitter() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
+        .unwrap_or(0);
+    Duration::from_millis(nanos % AI_RETRY_JITTER_MAX_MS)
+}
+
+/// Obeys `Retry-After` when the provider sends one; otherwise backs off
+/// exponentially from `AI_RETRY_BASE_DELAY`.
+fn ai_retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    if let Some(delay) = retry_after {
+        return delay.min(AI_RETRY_MAX_DELAY);
+    }
+    let exponential = AI_RETRY_BASE_DELAY.saturating_mul(1u32 << attempt.min(5));
+    exponential.min(AI_RETRY_MAX_DELAY) + retry_jitter()
+}
+
+/// Sends a request to the AI provider, retrying while it says "not right now".
+///
+/// Auto mode runs a skill graph whose nodes each drive an agent loop, so a
+/// single analysis can issue dozens of completions in a burst. Treating the
+/// provider's rate limit as a hard failure threw the whole analysis away over a
+/// condition that clears in a second or two.
+///
+/// `build` is called afresh per attempt because a request cannot be sent twice.
+async fn send_ai_request<F>(build: F, connect_error: &str) -> Result<reqwest::Response, String>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut attempt = 0u32;
+    loop {
+        let response = build()
+            .send()
+            .await
+            .map_err(|error| format!("{connect_error}: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let exhausted = attempt + 1 >= MAX_AI_ATTEMPTS;
+        if exhausted || !is_retryable_ai_status(status) {
+            let retried = attempt;
+            let body = response.text().await.unwrap_or_default();
+            let message = ai_http_error(status, &body);
+            if status == StatusCode::TOO_MANY_REQUESTS && retried > 0 {
+                return Err(format!(
+                    "{message}（已自动重试 {retried} 次仍被限流；可在设置中调低「Agent 最大分析轮次」或关闭「两阶段分析」以减少并发请求）"
+                ));
+            }
+            return Err(message);
+        }
+        let delay = ai_retry_delay(attempt, parse_retry_after(&response));
+        attempt += 1;
+        tokio::time::sleep(delay).await;
+    }
+}
+
 async fn send_chat_request(
     client: &Client,
     settings: &EffectiveAiProviderSettings,
@@ -2525,22 +2603,19 @@ async fn send_chat_request(
     stream: bool,
 ) -> Result<reqwest::Response, String> {
     let endpoint = chat_completions_endpoint(&settings.base_url);
-    let mut request = client
-        .post(&endpoint)
-        .json(&chat_request_body(settings, messages, stream));
-    if let Some(api_key) = settings.api_key.as_deref() {
-        request = request.bearer_auth(api_key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("连接 AI 服务失败: {error}"))?;
-    if response.status().is_success() {
-        return Ok(response);
-    }
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    Err(ai_http_error(status, &body))
+    send_ai_request(
+        || {
+            let request = client
+                .post(&endpoint)
+                .json(&chat_request_body(settings, messages, stream));
+            match settings.api_key.as_deref() {
+                Some(api_key) => request.bearer_auth(api_key),
+                None => request,
+            }
+        },
+        "连接 AI 服务失败",
+    )
+    .await
 }
 
 fn chat_request_body(
@@ -2934,7 +3009,64 @@ fn decode_sse_event(event: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::BodyCaptureMetadata;
+    use crate::models::{BodyCaptureMetadata, DEFAULT_AI_CONTEXT_TOKENS};
+
+    #[test]
+    fn retries_only_what_a_second_attempt_could_fix() {
+        for code in [408, 425, 429, 500, 502, 503, 504] {
+            assert!(
+                is_retryable_ai_status(StatusCode::from_u16(code).unwrap()),
+                "HTTP {code} is transient and must be retried"
+            );
+        }
+        // A rejected key or an unknown model fails the same way every time;
+        // retrying just multiplies the wait before the user sees the reason.
+        for code in [400, 401, 403, 404, 413, 422] {
+            assert!(
+                !is_retryable_ai_status(StatusCode::from_u16(code).unwrap()),
+                "HTTP {code} must fail fast"
+            );
+        }
+    }
+
+    #[test]
+    fn backs_off_further_on_each_attempt_but_stays_bounded() {
+        let delay = |attempt| ai_retry_delay(attempt, None);
+        assert!(delay(0) >= AI_RETRY_BASE_DELAY);
+        assert!(delay(1) >= delay(0));
+        assert!(delay(2) >= delay(1));
+        // Jitter is additive, so the ceiling is the cap plus one jitter step.
+        let ceiling = AI_RETRY_MAX_DELAY + Duration::from_millis(AI_RETRY_JITTER_MAX_MS);
+        for attempt in 0..64 {
+            assert!(
+                ai_retry_delay(attempt, None) <= ceiling,
+                "attempt {attempt} exceeded the delay ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn prefers_the_providers_own_retry_after() {
+        // Waiting the advertised time beats guessing, but a hostile or broken
+        // value must not park the analysis for hours.
+        assert_eq!(
+            ai_retry_delay(0, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            ai_retry_delay(0, Some(Duration::from_secs(86_400))),
+            AI_RETRY_MAX_DELAY
+        );
+    }
+
+    #[test]
+    fn a_whole_retry_sequence_fits_in_a_sane_wait() {
+        let total: Duration = (0..MAX_AI_ATTEMPTS - 1).map(|a| ai_retry_delay(a, None)).sum();
+        assert!(
+            total <= Duration::from_secs(60),
+            "a user watching a stalled analysis waited {total:?}"
+        );
+    }
 
     #[test]
     fn scales_the_prompt_budget_with_the_configured_context_window() {
@@ -3243,6 +3375,122 @@ mod tests {
         assert!(index.contains("correlation=`time-window`"));
         assert!(index.contains("`fetch`"));
         assert!(index.find("`#2`").unwrap() < index.find("`#3`").unwrap());
+    }
+
+    #[cfg(test)]
+    fn mock_provider_settings(address: std::net::SocketAddr) -> EffectiveAiProviderSettings {
+        EffectiveAiProviderSettings {
+            provider: "local".to_string(),
+            base_url: format!("http://{address}/v1"),
+            model: "mock-model".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
+            api_key: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn direct_upstream() -> EffectiveUpstreamProxy {
+        EffectiveUpstreamProxy {
+            mode: "direct".to_string(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_request_is_retried_instead_of_failing_the_analysis() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            // The provider throttles twice, then serves the completion. Losing a
+            // whole analysis to a condition that clears in a second is the bug.
+            let replies = [
+                http_response(
+                    "429 Too Many Requests",
+                    r#"{"error":{"message":"Requests are too frequent."}}"#,
+                ),
+                http_response("429 Too Many Requests", r#"{"error":{"message":"slow down"}}"#),
+                http_response("200 OK", r#"{"choices":[{"message":{"content":"报告"}}]}"#),
+            ];
+            for reply in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0u8; 8192];
+                let _ = socket.read(&mut buffer).await.unwrap();
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let settings = mock_provider_settings(address);
+        let client = build_egress_client(&direct_upstream(), &settings.base_url).unwrap();
+        let answer = chat_completion_once(
+            &client,
+            &settings,
+            &[json!({ "role": "user", "content": "test" })],
+        )
+        .await
+        .expect("a throttled request must recover, not abort the analysis");
+
+        server.await.unwrap();
+        assert_eq!(answer, "报告");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_fails_on_the_first_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut buffer = vec![0u8; 8192];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let reply = http_response("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#);
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+        });
+
+        let settings = mock_provider_settings(address);
+        let client = build_egress_client(&direct_upstream(), &settings.base_url).unwrap();
+        let error = chat_completion_once(
+            &client,
+            &settings,
+            &[json!({ "role": "user", "content": "test" })],
+        )
+        .await
+        .expect_err("a rejected key must not be retried");
+
+        server.await.unwrap();
+        // Retrying a permanent error only delays the explanation the user needs.
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(error.contains("401"), "{error}");
+        assert!(error.contains("bad key"), "{error}");
     }
 
     #[tokio::test]

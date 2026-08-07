@@ -1,6 +1,5 @@
 use crate::models::{
     EffectiveAiProviderSettings, EffectiveMcpServerSettings, EffectiveUpstreamProxy,
-    DEFAULT_AI_CONTEXT_TOKENS,
 };
 use crate::skills::{self, SkillPlan};
 use serde_json::Value;
@@ -596,6 +595,7 @@ impl Drop for RunDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::DEFAULT_AI_CONTEXT_TOKENS;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 

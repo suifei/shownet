@@ -32,8 +32,7 @@ use crate::models::{
     SessionRecord, SkillRunAudit, SkillToolCallAudit, StorageStats, StoredAiProviderSettings,
     StoredCertificateAuthority, StoredMcpClientSettings, StoredMcpServerSettings,
     StoredSystemProxySettings, SystemProxySettingsInput, UpstreamProxySettings,
-    UpstreamProxySettingsInput, DEFAULT_AI_CONTEXT_TOKENS, MAX_AI_CONTEXT_TOKENS,
-    MIN_AI_CONTEXT_TOKENS,
+    UpstreamProxySettingsInput, MAX_AI_CONTEXT_TOKENS, MIN_AI_CONTEXT_TOKENS,
 };
 use crate::system_proxy::SystemProxySnapshot;
 use crate::tls_interception::{
@@ -7937,7 +7936,9 @@ fn format_bytes(bytes: i64) -> String {
 mod tests {
     use super::*;
     use crate::http2_fingerprint::{Http2Fingerprint, Http2Setting};
-    use crate::models::{BodyCaptureMetadata, CollectionImportItem, HeaderEntry};
+    use crate::models::{
+        BodyCaptureMetadata, CollectionImportItem, HeaderEntry, DEFAULT_AI_CONTEXT_TOKENS,
+    };
     use crate::tls_fingerprint::{
         mitm_fingerprint, tunnel_fingerprint, ClientTlsFingerprint, OutboundTlsFingerprint,
         TlsFingerprintRecord,
