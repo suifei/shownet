@@ -2795,7 +2795,12 @@ async fn set_capture_running(
         // 抓包中 for a capture that had already stopped — and the takeover switch
         // is gated on that same stale flag, which disabled the one control that
         // could have got the user out.
-        emit_capture_status(&app, &state)?;
+        //
+        // Only on the failing path: the success path already emits below, and
+        // pushing the same state twice re-renders the whole shell for nothing.
+        if restore_result.is_err() || session_cleared.is_err() {
+            emit_capture_status(&app, &state)?;
+        }
         restore_result?;
         session_cleared?;
     }
