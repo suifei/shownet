@@ -417,7 +417,10 @@ fn urlencoded_body_fields(body: &str) -> Vec<Value> {
                 "kind": "text",
                 "filePath": "",
                 "fileName": "",
-                "contentType": "text/plain",
+                // Unused for a text field, but matching the sibling builders
+                // keeps the two form paths byte-identical rather than merely
+                // equivalent.
+                "contentType": "application/octet-stream",
                 "enabled": true
             })
         })
