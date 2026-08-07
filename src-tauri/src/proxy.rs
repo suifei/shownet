@@ -6029,6 +6029,66 @@ mod tests {
     /// The form the h2 paths now send, and that `:authority` cannot drift from
     /// the Host header (both come from `host_header_authority`).
     #[test]
+    fn h2_stripping_removes_exactly_what_http2_forbids() {
+        // A client may reach the MITM over HTTP/1.1 while the origin negotiated
+        // h2 — our leaf offers both. Forwarding h1's connection-specific headers
+        // onto an h2 stream makes hyper reject the whole request with a bare
+        // "http2 error", which reads as the origin refusing us.
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("keep-alive, x-hop"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("x-hop", HeaderValue::from_static("dropped-by-token"));
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("upgrade", HeaderValue::from_static("h2c"));
+        headers.insert("te", HeaderValue::from_static("trailers"));
+        headers.insert("proxy-connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("cookie", HeaderValue::from_static("cf_clearance=keep"));
+        headers.insert("user-agent", HeaderValue::from_static("Mozilla/5.0"));
+
+        strip_http2_forbidden_headers(&mut headers);
+
+        for gone in [
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "upgrade",
+            "te",
+            "proxy-connection",
+        ] {
+            assert!(!headers.contains_key(gone), "{gone} is illegal over h2");
+        }
+        // Names listed in `Connection:` go too — that is what the token list means.
+        assert!(!headers.contains_key("x-hop"));
+        // Everything the request actually needs survives. Dropping the cookie
+        // here would break the very challenge flow this fix exists to unblock.
+        assert_eq!(
+            headers.get("cookie").and_then(|value| value.to_str().ok()),
+            Some("cf_clearance=keep")
+        );
+        assert_eq!(
+            headers
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("Mozilla/5.0")
+        );
+    }
+
+    #[test]
+    fn outbound_h2_requests_are_stripped_before_they_are_captured() {
+        // Order matters twice over: the strip has to run after the websocket
+        // upgrade headers are set (so it does not eat them on the h1 path) and
+        // before capture (so the recorded headers are the ones actually sent).
+        let source = include_str!("proxy.rs");
+        let strip = source
+            .find("if parts.version == Version::HTTP_2 {\n            strip_http2_forbidden_headers(&mut parts.headers);")
+            .expect("outbound h2 requests must be stripped");
+        let capture = source
+            .find("request_headers = request_headers_for_capture(")
+            .expect("request capture site");
+        assert!(strip < capture, "stripping must precede capture");
+    }
+
+    #[test]
     fn absolute_form_uri_carries_scheme_and_authority_matching_host() {
         let origin = origin_form_uri(&"https://api.test/v1/x?q=1".parse::<Uri>().unwrap()).unwrap();
         assert_eq!(origin.to_string(), "/v1/x?q=1");
