@@ -1232,12 +1232,20 @@ pub struct StoredCertificateAuthority {
     pub created_at: i64,
 }
 
+/// Token window assumed for a provider that has never been configured.
+pub const DEFAULT_AI_CONTEXT_TOKENS: u32 = 200_000;
+/// Smallest window the analysis prompt builder can still work with.
+pub const MIN_AI_CONTEXT_TOKENS: u32 = 1_024;
+/// Ceiling that keeps a mistyped value from turning into an unbounded prompt.
+pub const MAX_AI_CONTEXT_TOKENS: u32 = 2_000_000;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProviderSettings {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    pub context_tokens: u32,
     pub has_api_key: bool,
 }
 
@@ -1247,9 +1255,14 @@ impl Default for AiProviderSettings {
             provider: "claudegpt".to_string(),
             base_url: "https://claudegpt.org/v1".to_string(),
             model: "gpt-5.5".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             has_api_key: false,
         }
     }
+}
+
+fn default_context_tokens() -> u32 {
+    DEFAULT_AI_CONTEXT_TOKENS
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1285,6 +1298,8 @@ pub struct AiProviderSettingsInput {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default = "default_context_tokens")]
+    pub context_tokens: u32,
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
@@ -1295,6 +1310,7 @@ pub struct EffectiveAiProviderSettings {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    pub context_tokens: u32,
     pub api_key: Option<String>,
 }
 
@@ -1304,6 +1320,8 @@ pub struct StoredAiProviderSettings {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default = "default_context_tokens")]
+    pub context_tokens: u32,
     pub encrypted_api_key: Option<String>,
 }
 

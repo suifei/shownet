@@ -15,6 +15,7 @@ const fallbackAiSettings: AiProviderSettings = {
   provider: "claudegpt",
   baseUrl: "https://claudegpt.org/v1",
   model: "gpt-5.5",
+  contextTokens: 200_000,
   hasApiKey: false,
 };
 

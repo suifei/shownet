@@ -9,7 +9,7 @@ use crate::models::{
     AiAnalysisSettings, AiModelDiscoveryInput, AnalysisChatMessage, AnalysisReport,
     AnalysisStreamEvent, BrowserHookEvent, CryptoCodeSnippet, EffectiveAiProviderSettings,
     EffectiveUpstreamProxy, FollowupAnalysisInput, HeaderEntry, RequestAnnotation, RequestRecord,
-    StartAnalysisInput,
+    StartAnalysisInput, DEFAULT_AI_CONTEXT_TOKENS,
 };
 use crate::skills::{self, SkillPlan};
 use crate::{emit, AnalysisExecution, AppState};
@@ -21,7 +21,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 const MAX_ANALYSIS_REQUESTS: usize = 120;
-const MAX_PROMPT_BYTES: usize = 384 * 1024;
+/// The prompt budget is derived from the configured context window. Packet JSON is
+/// dense ASCII, so two bytes per token is a deliberately conservative estimate, and
+/// the request payload only gets to claim half of the window — the rest is reserved
+/// for the system prompt, the request index and the tool-call transcript.
+const PROMPT_BYTES_PER_TOKEN: usize = 2;
+const MIN_PROMPT_BYTES: usize = 32 * 1024;
+const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_ERROR_BYTES: usize = 1_200;
 const MAX_REQUEST_INDEX_BYTES: usize = 96 * 1024;
@@ -341,6 +347,7 @@ async fn run_analysis(
         &crypto_snippets_by_request,
         &annotations_by_request,
         &skill_plan,
+        settings.context_tokens,
     )?;
     let scoped_mcp_settings = if analysis_settings.allow_mcp_tools {
         state
@@ -1724,6 +1731,12 @@ fn is_mutation(method: &str) -> bool {
     matches!(method, "POST" | "PUT" | "PATCH" | "DELETE")
 }
 
+fn prompt_byte_budget(context_tokens: u32) -> usize {
+    (context_tokens as usize)
+        .saturating_mul(PROMPT_BYTES_PER_TOKEN)
+        .clamp(MIN_PROMPT_BYTES, MAX_PROMPT_BYTES)
+}
+
 fn analysis_messages(
     session_id: &str,
     mode: &str,
@@ -1733,7 +1746,9 @@ fn analysis_messages(
     crypto_snippets_by_request: &HashMap<String, Vec<CryptoCodeSnippet>>,
     annotations_by_request: &HashMap<String, RequestAnnotation>,
     plan: &SkillPlan,
+    context_tokens: u32,
 ) -> Result<Vec<Value>, String> {
+    let prompt_budget = prompt_byte_budget(context_tokens);
     let mode_focus = match mode {
         "auto" => "自动判断协议结构、关键链路、安全风险、性能问题和加密行为的优先级",
         "api" => "聚焦接口清单、参数语义、鉴权、状态变化、调用顺序和可复现方式",
@@ -1769,7 +1784,7 @@ fn analysis_messages(
             annotations_by_request.get(&request.id),
         );
         let encoded = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-        if !payload.is_empty() && used + encoded.len() > MAX_PROMPT_BYTES {
+        if !payload.is_empty() && used + encoded.len() > prompt_budget {
             break;
         }
         used += encoded.len();
@@ -2922,6 +2937,20 @@ mod tests {
     use crate::models::BodyCaptureMetadata;
 
     #[test]
+    fn scales_the_prompt_budget_with_the_configured_context_window() {
+        assert_eq!(
+            prompt_byte_budget(DEFAULT_AI_CONTEXT_TOKENS),
+            DEFAULT_AI_CONTEXT_TOKENS as usize * PROMPT_BYTES_PER_TOKEN
+        );
+        // A larger window must actually buy more payload, which is the whole
+        // point of letting the user raise it.
+        assert!(prompt_byte_budget(1_000_000) > prompt_byte_budget(DEFAULT_AI_CONTEXT_TOKENS));
+        // Both ends stay bounded so a stored extreme cannot starve or explode the prompt.
+        assert_eq!(prompt_byte_budget(0), MIN_PROMPT_BYTES);
+        assert_eq!(prompt_byte_budget(u32::MAX), MAX_PROMPT_BYTES);
+    }
+
+    #[test]
     fn extracts_only_structured_agent_tool_activity_names() {
         assert_eq!(
             activity_tool_name("tool", Some("内置 Agent 正在调用 shownet_get_request")),
@@ -3052,6 +3081,7 @@ mod tests {
             provider: "local".to_string(),
             base_url: "http://127.0.0.1:11434/v1".to_string(),
             model: "local-model".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             api_key: None,
         };
         let messages = vec![json!({ "role": "user", "content": "test" })];
@@ -3251,6 +3281,7 @@ mod tests {
             provider: "local".to_string(),
             base_url: format!("http://{address}/v1"),
             model: "mock-model".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             api_key: None,
         };
         let upstream = EffectiveUpstreamProxy {

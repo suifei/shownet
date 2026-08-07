@@ -893,6 +893,7 @@ export interface AiProviderSettings {
   provider: "claudegpt" | "compatible" | "local";
   baseUrl: string;
   model: string;
+  contextTokens: number;
   hasApiKey: boolean;
 }
 

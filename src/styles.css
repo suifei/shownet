@@ -6946,8 +6946,7 @@ kbd {
 .settings-text-field > span { color: var(--text-muted); font-size: 12px; font-weight: 500; }
 .settings-field-row input,
 .settings-text-field > input,
-.settings-text-field .secret-input,
-.select-input { width: 100%; height: 34px; padding: 0 9px; color: var(--text-body); font-size: 13px; background: var(--surface-panel); border: 1px solid var(--border-default); border-radius: 10px; outline: 0; }
+.settings-text-field .secret-input { width: 100%; height: 34px; padding: 0 9px; color: var(--text-body); font-size: 13px; background: var(--surface-panel); border: 1px solid var(--border-default); border-radius: 10px; outline: 0; }
 .settings-field-row input:focus,
 .settings-text-field > input:focus { background: var(--surface-panel); border-color: var(--border-strong); }
 .settings-field-row input:disabled,
@@ -6958,8 +6957,7 @@ kbd {
 .model-discovery-state.is-ready { color: var(--success-ink); }
 .model-discovery-state.is-loading { color: var(--warning-ink); }
 .model-discovery-control { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; }
-.model-discovery-control > input,
-.model-discovery-control .select-input { width: 100%; min-width: 0; }
+.model-discovery-control > input { width: 100%; min-width: 0; }
 .model-discovery-control > button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--text-muted); background: var(--surface-panel); border: 1px solid var(--border-default); border-radius: 10px; }
 .model-discovery-control > button:hover:not(:disabled) { color: var(--success-ink); background: var(--surface-panel); border-color: var(--border-strong); }
 .model-discovery-control > button:disabled { color: var(--text-faint); cursor: wait; }
@@ -6967,6 +6965,7 @@ kbd {
 .model-discovery-help { display: block; min-height: 12px; margin-top: 4px; color: var(--text-subtle); font-size: 11px; line-height: 12px; }
 .model-discovery-help.is-ready { color: var(--success-ink); }
 .model-discovery-help.is-fallback { color: var(--warning-ink); }
+.context-tokens-field > small { display: block; margin-top: 4px; color: var(--text-subtle); font-size: 11px; line-height: 12px; }
 
 .upstream-proxy-help {
   margin: 0 0 10px;
@@ -7278,14 +7277,9 @@ kbd {
 .android-setup-scope svg { flex: 0 0 auto; margin-top: 1px; }
 
 .secret-input,
-.select-input { display: flex; align-items: center; padding-right: 4px !important; }
 .secret-input input,
-.select-input select { flex: 1; min-width: 0; color: var(--text-body); font-size: 13px; background: transparent; border: 0; outline: 0; }
 .secret-input button { display: grid; place-items: center; width: 27px; height: 27px; padding: 0; color: var(--text-muted); background: transparent; border-radius: 9px; }
 .secret-input button:disabled { color: var(--text-faint); cursor: not-allowed; }
-.select-input { position: relative; }
-.select-input select { width: 100%; appearance: none; }
-.select-input svg { position: absolute; right: 8px; color: var(--text-subtle); pointer-events: none; }
 .save-settings-button { align-self: flex-start; margin-top: 4px; color: var(--text-primary); background: var(--dark-raised); }
 
 .storage-metrics { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 10px; }

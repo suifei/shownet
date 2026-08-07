@@ -60,7 +60,7 @@ import {
   SETTINGS_INDEX,
   SETTINGS_OPEN_SECTIONS_KEY,
 } from "../settingsIndex";
-import type { AiAnalysisSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
+import type { AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
 import {
@@ -85,6 +85,22 @@ interface McpClientDraft {
 }
 
 const DEFAULT_AI_MODEL = "gpt-5.5";
+// Mirrors DEFAULT/MIN/MAX_AI_CONTEXT_TOKENS and PROMPT_BYTES_PER_TOKEN in the Rust backend.
+const DEFAULT_AI_CONTEXT_TOKENS = 200_000;
+const MIN_AI_CONTEXT_TOKENS = 1_024;
+const MAX_AI_CONTEXT_TOKENS = 2_000_000;
+const PROMPT_BYTES_PER_TOKEN = 2;
+
+const clampContextTokens = (value: number) => {
+  if (!Number.isFinite(value)) return DEFAULT_AI_CONTEXT_TOKENS;
+  return Math.min(MAX_AI_CONTEXT_TOKENS, Math.max(MIN_AI_CONTEXT_TOKENS, Math.trunc(value)));
+};
+
+const formatContextTokens = (value: number) => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 1)}K`;
+  return String(value);
+};
 const emptyMcpClientDraft: McpClientDraft = {
   name: "",
   endpoint: "http://127.0.0.1:9000/mcp",
@@ -132,13 +148,6 @@ interface AndroidSetupResult {
   certificatePath: string;
   installerOpened: boolean;
   confirmationRequired: boolean;
-}
-
-interface AiProviderSettings {
-  provider: AiProvider;
-  baseUrl: string;
-  model: string;
-  hasApiKey: boolean;
 }
 
 const defaultUpstream: UpstreamProxySettings = {
@@ -237,6 +246,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const [endpoint, setEndpoint] = useState("https://claudegpt.org/v1");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(DEFAULT_AI_MODEL);
+  const [contextTokens, setContextTokens] = useState(DEFAULT_AI_CONTEXT_TOKENS);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelDiscoveryStatus, setModelDiscoveryStatus] = useState<ModelDiscoveryStatus>("idle");
   const [modelDiscoveryError, setModelDiscoveryError] = useState("");
@@ -324,10 +334,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       });
       if (requestId !== modelDiscoveryRequestId.current) return;
       setAvailableModels(discovered);
+      // Discovery only fills an empty field. A model the user typed is kept even when the
+      // endpoint does not advertise it — /models is frequently an incomplete catalogue.
       setModel((current) => {
         const selected = current.trim();
-        if (discovered.includes(selected)) return selected;
-        return discovered.includes(DEFAULT_AI_MODEL) ? DEFAULT_AI_MODEL : discovered[0];
+        if (selected) return selected;
+        return discovered.includes(DEFAULT_AI_MODEL) ? DEFAULT_AI_MODEL : (discovered[0] ?? "");
       });
       setModelDiscoveryStatus("ready");
       if (notifyResult) onNotify(`已读取 ${discovered.length} 个模型`);
@@ -462,7 +474,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         setProvider(settings.provider);
         setEndpoint(settings.baseUrl);
         setModel(settings.model);
-        commitBaseline("ai.provider", { provider: settings.provider, endpoint: settings.baseUrl, model: settings.model });
+        setContextTokens(clampContextTokens(settings.contextTokens));
+        commitBaseline("ai.provider", { provider: settings.provider, endpoint: settings.baseUrl, model: settings.model, contextTokens: clampContextTokens(settings.contextTokens) });
         setHasSavedApiKey(settings.hasApiKey);
         setAiSettingsLoaded(true);
       })
@@ -1047,6 +1060,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     }
     setApiKey("");
     setModel(DEFAULT_AI_MODEL);
+    setContextTokens(DEFAULT_AI_CONTEXT_TOKENS);
     setAvailableModels([]);
     setModelDiscoveryStatus("fallback");
     setModelDiscoveryError("");
@@ -1064,6 +1078,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       return;
     }
     setSavingAi(true);
+    const normalizedContextTokens = clampContextTokens(contextTokens);
+    setContextTokens(normalizedContextTokens);
     try {
       const [saved, savedAnalysisSettings] = await Promise.all([
         invoke<AiProviderSettings>("save_ai_provider_settings", {
@@ -1071,6 +1087,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
             provider,
             baseUrl: endpoint,
             model,
+            contextTokens: normalizedContextTokens,
             apiKey: apiKey || null,
             clearApiKey: false,
           },
@@ -1082,10 +1099,11 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setProvider(saved.provider);
       setEndpoint(saved.baseUrl);
       setModel(saved.model);
+      setContextTokens(saved.contextTokens);
       setHasSavedApiKey(saved.hasApiKey);
       setAiAnalysisSettings(savedAnalysisSettings);
       commitBaseline("ai.strategy", savedAnalysisSettings);
-      commitBaseline("ai.provider", { provider, endpoint, model });
+      commitBaseline("ai.provider", { provider: saved.provider, endpoint: saved.baseUrl, model: saved.model, contextTokens: saved.contextTokens });
       setApiKey("");
       onNotify("AI 配置、凭据与分析策略已保存");
       void refreshAiModels(false, { baseUrl: saved.baseUrl, apiKey: "" });
@@ -1110,6 +1128,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
           provider,
           baseUrl: endpoint,
           model,
+          contextTokens: clampContextTokens(contextTokens),
           apiKey: null,
           clearApiKey: true,
         },
@@ -1425,12 +1444,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     "capture.upstream": serializeSectionValue(upstream),
     "capture.https": serializeSectionValue(tlsInterception),
     "capture.devices": serializeSectionValue({ accessMode, rules: accessRulesDraft }),
-    "ai.provider": serializeSectionValue({ provider, endpoint, model }),
+    "ai.provider": serializeSectionValue({ provider, endpoint, model, contextTokens }),
     "ai.strategy": serializeSectionValue(aiAnalysisSettings),
     "data.database": serializeSectionValue(dataStorageSettings),
     "mcp.server": serializeSectionValue({ port: mcpStatus.port, enabled: mcpStatus.enabled, allowWrites: mcpStatus.allowWrites }),
   }), [
-    accessMode, accessRulesDraft, aiAnalysisSettings, dataStorageSettings, endpoint, model,
+    accessMode, accessRulesDraft, aiAnalysisSettings, contextTokens, dataStorageSettings, endpoint, model,
     mcpStatus.allowWrites, mcpStatus.enabled, mcpStatus.port, provider,
     systemProxy.enabled, systemProxyBypass, tlsInterception, upstream,
   ]);
@@ -1853,16 +1872,17 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 <label className="model-discovery-field">
                   <span>模型 <em className={`model-discovery-state is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined}>{modelDiscoveryStatus === "ready" ? `${availableModels.length} 个可用` : modelDiscoveryStatus === "loading" ? "读取中" : modelDiscoveryStatus === "fallback" ? "手动输入" : "待读取"}</em></span>
                   <div className="model-discovery-control">
-                    {modelDiscoveryStatus === "ready" ? (
-                      <div className="select-input"><select value={model} onChange={(event) => setModel(event.target.value)}>{availableModels.map((item) => <option key={item} value={item}>{item}</option>)}</select><ChevronDown size={14} /></div>
-                    ) : (
-                      <input value={model} onChange={(event) => setModel(event.target.value)} placeholder={DEFAULT_AI_MODEL} />
-                    )}
+                    <input list="ai-model-options" value={model} onChange={(event) => setModel(event.target.value)} placeholder={DEFAULT_AI_MODEL} autoComplete="off" spellCheck={false} />
+                    <datalist id="ai-model-options">{availableModels.map((item) => <option key={item} value={item} />)}</datalist>
                     <button type="button" onClick={() => void refreshAiModels(true)} disabled={modelDiscoveryStatus === "loading"} title="从 /models 读取模型列表" aria-label="读取模型列表"><RefreshCw className={modelDiscoveryStatus === "loading" ? "is-spinning" : ""} size={14} /></button>
                   </div>
-                  <small className={`model-discovery-help is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined} aria-live="polite">{modelDiscoveryStatus === "ready" ? "模型列表已从 /models 同步" : modelDiscoveryStatus === "loading" ? "正在读取 /models" : modelDiscoveryStatus === "fallback" ? "无法读取 /models，已切换为手动输入" : "等待自动读取 /models"}</small>
+                  <small className={`model-discovery-help is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined} aria-live="polite">{modelDiscoveryStatus === "ready" ? `已同步 ${availableModels.length} 个模型，也可直接输入端点未列出的模型名` : modelDiscoveryStatus === "loading" ? "正在读取 /models" : modelDiscoveryStatus === "fallback" ? "无法读取 /models，请手动输入模型名" : "等待自动读取 /models；可随时手动输入模型名"}</small>
                 </label>
-                <label><span>上下文上限</span><input value="128K" readOnly /></label>
+                <label className="context-tokens-field">
+                  <span>上下文上限</span>
+                  <input type="number" min={MIN_AI_CONTEXT_TOKENS} max={MAX_AI_CONTEXT_TOKENS} step="1024" value={contextTokens} onChange={(event) => setContextTokens(Math.trunc(Number(event.target.value)) || 0)} onBlur={() => setContextTokens((current) => clampContextTokens(current))} />
+                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(contextTokens * PROMPT_BYTES_PER_TOKEN)}</small>
+                </label>
               </div>
             </SettingsSection>
             <SettingsSection id="ai.strategy" title="分析策略">

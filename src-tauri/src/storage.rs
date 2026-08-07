@@ -32,7 +32,8 @@ use crate::models::{
     SessionRecord, SkillRunAudit, SkillToolCallAudit, StorageStats, StoredAiProviderSettings,
     StoredCertificateAuthority, StoredMcpClientSettings, StoredMcpServerSettings,
     StoredSystemProxySettings, SystemProxySettingsInput, UpstreamProxySettings,
-    UpstreamProxySettingsInput,
+    UpstreamProxySettingsInput, DEFAULT_AI_CONTEXT_TOKENS, MAX_AI_CONTEXT_TOKENS,
+    MIN_AI_CONTEXT_TOKENS,
 };
 use crate::system_proxy::SystemProxySnapshot;
 use crate::tls_interception::{
@@ -691,6 +692,7 @@ impl Storage {
             provider: stored.provider,
             base_url: stored.base_url,
             model: stored.model,
+            context_tokens: stored.context_tokens,
             has_api_key: stored.encrypted_api_key.is_some(),
         })
     }
@@ -751,6 +753,7 @@ impl Storage {
             provider: input.provider,
             base_url: normalized_base_url,
             model: input.model.trim().to_string(),
+            context_tokens: input.context_tokens,
             encrypted_api_key,
         };
         let value = serde_json::to_string(&stored).map_err(|error| error.to_string())?;
@@ -773,6 +776,7 @@ impl Storage {
                 provider: default.provider,
                 base_url: default.base_url,
                 model: default.model,
+                context_tokens: default.context_tokens,
                 api_key: None,
             });
         };
@@ -789,6 +793,7 @@ impl Storage {
             provider: stored.provider,
             base_url: stored.base_url,
             model: stored.model,
+            context_tokens: stored.context_tokens,
             api_key,
         })
     }
@@ -7643,6 +7648,11 @@ fn validate_ai_provider(input: &AiProviderSettingsInput) -> Result<(), String> {
     if input.model.trim().is_empty() {
         return Err("AI 模型不能为空".to_string());
     }
+    if !(MIN_AI_CONTEXT_TOKENS..=MAX_AI_CONTEXT_TOKENS).contains(&input.context_tokens) {
+        return Err(format!(
+            "上下文上限必须在 {MIN_AI_CONTEXT_TOKENS} 到 {MAX_AI_CONTEXT_TOKENS} token 之间"
+        ));
+    }
     Ok(())
 }
 
@@ -10247,6 +10257,77 @@ mod tests {
     }
 
     #[test]
+    fn persists_the_configured_context_window() {
+        let storage = storage();
+        let saved = storage
+            .save_ai_provider_settings(AiProviderSettingsInput {
+                provider: "compatible".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                model: "internal-llm-v3".to_string(),
+                context_tokens: 262_144,
+                api_key: None,
+                clear_api_key: false,
+            })
+            .unwrap();
+
+        assert_eq!(saved.context_tokens, 262_144);
+        assert_eq!(
+            storage.get_ai_provider_settings().unwrap().context_tokens,
+            262_144
+        );
+        assert_eq!(
+            storage
+                .effective_ai_provider_settings()
+                .unwrap()
+                .context_tokens,
+            262_144
+        );
+    }
+
+    #[test]
+    fn reads_a_record_written_before_the_context_window_existed() {
+        // Upgrades must not fail on rows that predate the field.
+        let storage = storage();
+        let legacy = r#"{"provider":"claudegpt","baseUrl":"https://claudegpt.org/v1","model":"gpt-5.5","encryptedApiKey":null}"#;
+        storage
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO app_settings(key, value_json, updated_at) VALUES (?1, ?2, ?3)",
+                    params![AI_PROVIDER_KEY, legacy, now_ms()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let settings = storage.get_ai_provider_settings().unwrap();
+        assert_eq!(settings.model, "gpt-5.5");
+        assert_eq!(settings.context_tokens, DEFAULT_AI_CONTEXT_TOKENS);
+    }
+
+    #[test]
+    fn rejects_a_context_window_outside_the_supported_range() {
+        let storage = storage();
+        let input = |context_tokens| AiProviderSettingsInput {
+            provider: "compatible".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "internal-llm-v3".to_string(),
+            context_tokens,
+            api_key: None,
+            clear_api_key: false,
+        };
+
+        assert!(storage
+            .save_ai_provider_settings(input(MIN_AI_CONTEXT_TOKENS - 1))
+            .is_err());
+        assert!(storage
+            .save_ai_provider_settings(input(MAX_AI_CONTEXT_TOKENS + 1))
+            .is_err());
+        assert!(storage
+            .save_ai_provider_settings(input(MIN_AI_CONTEXT_TOKENS))
+            .is_ok());
+    }
+
+    #[test]
     fn encrypts_ai_api_key_inside_sqlite() {
         let storage = storage();
         let saved = storage
@@ -10254,6 +10335,7 @@ mod tests {
                 provider: "claudegpt".to_string(),
                 base_url: "https://claudegpt.org/v1/".to_string(),
                 model: "gpt-5.6-sol".to_string(),
+                context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
                 api_key: Some("ai-key-must-not-be-plaintext".to_string()),
                 clear_api_key: false,
             })
@@ -10318,6 +10400,7 @@ mod tests {
                 provider: "claudegpt".to_string(),
                 base_url: "https://claudegpt.org/v1".to_string(),
                 model: "gpt-5.5".to_string(),
+                context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
                 api_key: Some("endpoint-bound-key".to_string()),
                 clear_api_key: false,
             })
@@ -10328,6 +10411,7 @@ mod tests {
                 provider: "claudegpt".to_string(),
                 base_url: "https://claudegpt.org/v1/".to_string(),
                 model: "gpt-5.5".to_string(),
+                context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
                 api_key: None,
                 clear_api_key: false,
             })
@@ -10339,6 +10423,7 @@ mod tests {
                 provider: "compatible".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 model: "example-model".to_string(),
+                context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
                 api_key: None,
                 clear_api_key: false,
             })

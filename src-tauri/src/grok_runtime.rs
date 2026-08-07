@@ -1,5 +1,6 @@
 use crate::models::{
     EffectiveAiProviderSettings, EffectiveMcpServerSettings, EffectiveUpstreamProxy,
+    DEFAULT_AI_CONTEXT_TOKENS,
 };
 use crate::skills::{self, SkillPlan};
 use serde_json::Value;
@@ -346,10 +347,11 @@ fn runtime_config(
     mcp: Option<&EffectiveMcpServerSettings>,
 ) -> String {
     let mut config = format!(
-        "[models]\ndefault = \"shownet\"\nweb_search = \"shownet\"\nsession_summary = \"shownet\"\nimage_description = \"shownet\"\nprompt_suggestion = \"shownet\"\n\n[model.shownet]\nmodel = {}\nbase_url = {}\nname = \"ShowNet AI\"\ndescription = \"ShowNet full-capability packet analysis model\"\napi_backend = \"chat_completions\"\nenv_key = \"{}\"\ncontext_window = 200000\n\n[compat.cursor]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\nsessions = false\n\n[compat.claude]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\nsessions = false\n\n[compat.codex]\nsessions = false\n\n[features]\ntelemetry = false\n\n[telemetry]\ntrace_upload = false\n",
+        "[models]\ndefault = \"shownet\"\nweb_search = \"shownet\"\nsession_summary = \"shownet\"\nimage_description = \"shownet\"\nprompt_suggestion = \"shownet\"\n\n[model.shownet]\nmodel = {}\nbase_url = {}\nname = \"ShowNet AI\"\ndescription = \"ShowNet full-capability packet analysis model\"\napi_backend = \"chat_completions\"\nenv_key = \"{}\"\ncontext_window = {}\n\n[compat.cursor]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\nsessions = false\n\n[compat.claude]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\nsessions = false\n\n[compat.codex]\nsessions = false\n\n[features]\ntelemetry = false\n\n[telemetry]\ntrace_upload = false\n",
         toml_string(&settings.model),
         toml_string(settings.base_url.trim_end_matches('/')),
         API_KEY_ENV,
+        settings.context_tokens,
     );
     if let Some(mcp) = mcp.filter(|mcp| mcp.enabled) {
         config.push_str(&format!(
@@ -602,6 +604,7 @@ mod tests {
             provider: "compatible".to_string(),
             base_url: "https://example.com/v1".to_string(),
             model: "gpt-test\"quoted".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             api_key: Some("never-written".to_string()),
         }
     }
@@ -853,6 +856,7 @@ mod tests {
             provider: "compatible".to_string(),
             base_url: format!("http://{address}/v1"),
             model: "gpt-sidecar-test".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             api_key: Some("integration-secret".to_string()),
         };
         let upstream = EffectiveUpstreamProxy {
@@ -1111,6 +1115,7 @@ mod tests {
             provider: "compatible".to_string(),
             base_url: format!("http://{model_address}/v1"),
             model: "gpt-sidecar-test".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
             api_key: Some("model-integration-secret".to_string()),
         };
         let mcp = EffectiveMcpServerSettings {
