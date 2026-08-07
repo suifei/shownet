@@ -10752,6 +10752,113 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires local socket permissions"]
+    async fn local_socket_an_abandoned_connect_tunnel_reports_nothing() {
+        // Browsers pre-open CONNECT tunnels they may never use, and racing
+        // connections lose and close the same way. Three classifiers sit on
+        // this path — the upgrade, the ClientHello read, and the tunnel copy —
+        // and each was reported before. Bypassed hosts were the loudest, so a
+        // host deliberately left undecrypted produced the most noise.
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        // Keep accepting: both tunnels below reach this listener, and a target
+        // that stopped listening would be a genuine failure the proxy should
+        // report — which would mask what this test is actually checking.
+        let target_task = tokio::spawn(async move {
+            loop {
+                match target.accept().await {
+                    Ok((mut stream, _)) => {
+                        tokio::spawn(async move {
+                            let mut sink = Vec::new();
+                            let _ = stream.read_to_end(&mut sink).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        // Bypass everything: this is the undecrypted-host case, which produced
+        // the most noise precisely because it is the one a user opted into.
+        let settings = crate::tls_interception::normalize_tls_interception_settings(
+            crate::tls_interception::TlsInterceptionSettings {
+                mode: crate::tls_interception::TlsInterceptionMode::BypassSelected,
+                bypass: vec!["127.0.0.1".to_string()],
+                show_bypassed_connections: true,
+            },
+        )
+        .unwrap();
+        let mut rule_engine =
+            RuleEngine::request_only(Arc::new(|_| Ok(RuntimeRuleControl::default())));
+        rule_engine.tls_interception = Arc::new(move |host, sni| Ok(settings.decision(host, sni)));
+
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-connect-hangup".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            capture_sink,
+            Some(rule_engine),
+            Arc::new(|_| {}),
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        // 1. CONNECT accepted, then the client leaves without a ClientHello.
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {target_address} HTTP/1.1\r\nHost: {target_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        drop(client);
+
+        // 2. CONNECT accepted, a partial ClientHello, then gone mid-record.
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {target_address} HTTP/1.1\r\nHost: {target_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        // A TLS record header promising far more than will ever arrive.
+        client
+            .write_all(&[0x16, 0x03, 0x01, 0x02, 0x00])
+            .await
+            .unwrap();
+        drop(client);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        target_task.abort();
+        handle.stop().await;
+
+        let seen = errors.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "an abandoned tunnel is not a failure, but these were reported: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local socket permissions"]
     async fn local_socket_tls_bypass_forwards_the_original_client_hello() {
         let (captured, errors) = run_local_tls_bypass(true, false).await;
         assert_eq!(captured.len(), 1);
