@@ -553,9 +553,16 @@ fn origin_http2_rejected(host: &str) -> bool {
 #[cfg(test)]
 fn expire_downgrade_for_test(host: &str) {
     if let Ok(mut hosts) = H2_REJECTED_HOSTS.write() {
-        if let Some(entry) = hosts.get_mut(host) {
-            entry.downgraded_at = std::time::Instant::now()
-                .checked_sub(H2_DOWNGRADE_TTL + std::time::Duration::from_secs(1));
+        // Normalised like the real key, and asserted rather than silently
+        // no-oped: `checked_sub` returns None on a machine whose uptime is under
+        // the TTL, which would leave `downgraded_at` cleared and the test
+        // passing for the wrong reason.
+        let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if let Some(entry) = hosts.get_mut(&key) {
+            let aged = std::time::Instant::now()
+                .checked_sub(H2_DOWNGRADE_TTL + std::time::Duration::from_secs(1))
+                .expect("test host uptime is below the downgrade TTL");
+            entry.downgraded_at = Some(aged);
         }
     }
 }

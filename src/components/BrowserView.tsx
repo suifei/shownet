@@ -83,18 +83,13 @@ function navigatorPlatform(): string {
 
 /** CPU architecture as UA-CH reports it; Apple Silicon is "arm". */
 function uaArchitecture(): string {
-  // `navigator.platform` is "MacIntel" on Apple Silicon too, so it cannot
-  // distinguish them — claiming "arm" for every Mac made Intel Macs report an
-  // architecture their UA and WebGL renderer contradict.
-  const cores = navigator as Navigator & { userAgentData?: { platform?: string } };
-  if (/aarch64|arm64/i.test(navigator.userAgent)) return "arm";
-  if (/Win|X11|Linux/i.test(navigator.platform)) return "x86";
-  // On macOS the only reliable in-page signal is the WebGL renderer string;
-  // absent that, report what the majority of the fleet is rather than guessing
-  // per-machine, and leave it out of the equation by keeping it consistent.
-  return cores.userAgentData?.platform === "macOS" && /Apple/i.test(navigator.vendor)
-    ? "arm"
-    : "x86";
+  // Neither `navigator.platform` ("MacIntel" on both) nor `userAgentData`
+  // (undefined in the Tauri WKWebView this runs in) can tell an Apple Silicon
+  // Mac from an Intel one, and guessing means half the fleet reports an
+  // architecture its WebGL renderer contradicts. Chrome only sends
+  // Sec-CH-UA-Arch when a site asks for the high-entropy hint, so leaving it
+  // out is both honest and unremarkable — unlike being wrong about it.
+  return "";
 }
 
 /** A weighted Accept-Language list, the shape a real browser sends. */
@@ -610,7 +605,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               ],
               platform: uaPlatform(),
               platformVersion: "",
-              architecture: uaArchitecture(),
+              ...(uaArchitecture() ? { architecture: uaArchitecture() } : {}),
               model: "",
               mobile: false,
             },

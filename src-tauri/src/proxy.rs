@@ -2482,12 +2482,21 @@ async fn forward_mitm_https(
                 format!("转发目标请求失败: {error}")
             }
         })?;
-        // Released the moment the response headers are in hand. Holding it any
-        // longer serialises the whole tunnel behind this one request — and the
-        // path below buffers whole bodies for rewrite rules and awaits the user
-        // at a response breakpoint, so a single breakpoint would have stalled
-        // every other request on this connection until someone clicked resume.
-        drop(shared_guard);
+        // h2 multiplexes, so the guard goes as soon as the headers are in hand:
+        // holding it through whole-body buffering for rewrite rules and through
+        // `run_response_breakpoints` — which waits for a person — would stall
+        // every other request in the tunnel behind this one.
+        //
+        // h1 is the opposite. hyper's h1 client does not pipeline: a second
+        // `send_request` issued before the previous response body has been read
+        // fails outright with "operation was canceled". So on an h1 shared
+        // connection the guard has to live until this response is done, and the
+        // serialisation is the protocol's, not a choice. Downgraded hosts are
+        // exactly the ones on h1, so releasing early there would have made the
+        // very sites this release repairs fail most of their subresources.
+        if outbound_is_http2 {
+            drop(shared_guard);
+        }
         let upstream_status = response.status().as_u16() as i64;
         if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
             response.headers_mut().remove("sec-websocket-extensions");
@@ -5056,7 +5065,25 @@ fn ensure_host_header(
 /// (a dropped Wi-Fi link, a VPN toggle, sleep/wake) are all excluded. What
 /// remains is a protocol-level complaint, and even then it takes more than one.
 fn looks_like_origin_http2_refusal(error: &hyper::Error) -> bool {
-    !error.is_canceled()
+    // hyper exposes no `is_io()`, and a plain I/O failure — a dropped link, a
+    // VPN toggle, sleep/wake — answers false to every predicate it does expose,
+    // so it would otherwise read as the origin's verdict. Walk the source chain
+    // for the io::Error instead.
+    let io_backed = {
+        let mut source: Option<&(dyn std::error::Error + 'static)> =
+            std::error::Error::source(error);
+        let mut found = false;
+        while let Some(cause) = source {
+            if cause.downcast_ref::<std::io::Error>().is_some() {
+                found = true;
+                break;
+            }
+            source = cause.source();
+        }
+        found
+    };
+    !io_backed
+        && !error.is_canceled()
         && !error.is_user()
         && !error.is_closed()
         && !error.is_incomplete_message()
@@ -5702,6 +5729,21 @@ fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 
 #[cfg(test)]
 mod tests {
+    /// This file with its own test module cut off.
+    ///
+    /// `include_str!` pulls the tests in too, so a `contains` check for a code
+    /// string is satisfied by the assertion's own literal — every source-pin
+    /// test below passed against gutted production code until this existed.
+    /// That mistake was made four separate times in one sitting; making the
+    /// haystack exclude the needles is the only version of it that stays fixed.
+    fn production_source() -> &'static str {
+        let source = include_str!("proxy.rs");
+        match source.find("\n#[cfg(test)]\nmod tests {") {
+            Some(at) => &source[..at],
+            None => panic!("test module marker not found; production_source would be a no-op"),
+        }
+    }
+
     use super::*;
     use brotli::CompressorWriter;
     use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
@@ -6183,7 +6225,7 @@ mod tests {
         // bare "http2 error". The second path was missed the first time round.
         // Counting occurrences would count this test's own string literal, so
         // each call site is located by the code that follows it instead.
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         let guarded = source
             .matches(
                 "strip_http2_forbidden_headers(&mut parts.headers);\n        }\n        request_headers = request_headers_for_capture(",
@@ -6207,7 +6249,7 @@ mod tests {
         // retrying h2 against an origin the other has already given up on.
         // Matched by argument, not by count: counting would include this test's
         // own string literals, which is how the first version of it failed.
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         assert!(
             source.contains("note_origin_http2_rejected(&host)"),
             "the MITM path must record refusals"
@@ -6227,7 +6269,7 @@ mod tests {
         // `extended_websocket` alone left a plain Connection: Upgrade handshake
         // to the same authority on the shared h2 sender, carrying Upgrade
         // headers h2 forbids — the exact error the dedicated path avoids.
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         assert!(
             source.contains("let use_dedicated_base = authority_changed || websocket;"),
             "any websocket must take the dedicated HTTP/1.1 route"
@@ -6245,7 +6287,7 @@ mod tests {
         assert!(tls_outbound::origin_force_http11_for_host(
             "pss.bdstatic.com"
         ));
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         assert!(
             source.contains("&& !tls_outbound::origin_force_http11_for_host(tls_identity_host),"),
             "the dedicated route must honour the forced-h1 list"
@@ -6257,7 +6299,7 @@ mod tests {
         // Routing around a dead sender without storing a live one back made
         // every later request in the tunnel open its own TCP+TLS+h2 handshake
         // for a single request.
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         // Matched against what the code actually says. The first version of this
         // assertion quoted `*sender.lock().await = replacement`, which the code
         // has never contained since the guard was hoisted — so it matched only
@@ -6333,7 +6375,7 @@ mod tests {
         // Order matters twice over: the strip has to run after the websocket
         // upgrade headers are set (so it does not eat them on the h1 path) and
         // before capture (so the recorded headers are the ones actually sent).
-        let source = include_str!("proxy.rs");
+        let source = production_source();
         let strip = source
             .find("if parts.version == Version::HTTP_2 {\n            strip_http2_forbidden_headers(&mut parts.headers);")
             .expect("outbound h2 requests must be stripped");
