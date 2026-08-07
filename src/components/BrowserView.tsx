@@ -55,6 +55,25 @@ interface BrowserViewProps {
 }
 
 const previewHookEvents: BrowserHookEvent[] = [];
+/** Chromium's UA-CH platform name, which is not navigator.platform. */
+function uaPlatform(): string {
+  const platform = navigator.platform || "";
+  if (/Mac/i.test(platform)) return "macOS";
+  if (/Win/i.test(platform)) return "Windows";
+  if (/Linux|X11/i.test(platform)) return "Linux";
+  return "Windows";
+}
+
+/** A weighted Accept-Language list, the shape a real browser sends. */
+function acceptLanguageHeader(): string {
+  const primary = navigator.language || "en-US";
+  const base = primary.split("-")[0];
+  const parts = [primary];
+  if (base && base !== primary) parts.push(`${base};q=0.9`);
+  if (base !== "en") parts.push("en;q=0.8");
+  return parts.join(",");
+}
+
 const CDP_BINDING = "__SHOWNET_CDP_BINDING__";
 const LAB_BINDING = "__SHOWNET_LAB_BINDING__";
 /** sessionStorage key for last navigated URL (P2 optional keep-alive restore). */
@@ -510,6 +529,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
       let opened = false;
       socket.addEventListener("open", () => {
         opened = true;
+        // The bridges are always installed; only the hook runtime is optional.
+        // Bundling them meant turning hooks off also removed
+        // __SHOWNET_LAB_BRIDGE__, so Crypto Lab could never report back and its
+        // status sat at "running" forever.
         const bridgeSource = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });\n${hookRuntime}`;
         const send: CdpSend = (method, params = {}, onResult) => {
           const id = ++cdpMessageId.current;
@@ -526,24 +549,44 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         send("Runtime.enable");
         send("Page.enable");
         send("Network.enable");
-        // Chrome reports itself as HeadlessChrome/<ver>, which a bot manager
-        // rejects before it looks at anything else. The version is taken from
-        // the browser we actually launched rather than hardcoded, so it cannot
-        // drift out of step with the engine behind it.
-        send("Browser.getVersion", {}, (result) => {
-          const reported = typeof result.userAgent === "string" ? result.userAgent : "";
-          const honest = reported.replace(/Headless/g, "");
-          if (honest && honest !== reported) {
-            cdpSendRef.current?.("Emulation.setUserAgentOverride", {
-              userAgent: honest,
-              acceptLanguage: navigator.language,
-              platform: navigator.platform,
-            });
-          }
-        });
+        // Resolved before the socket was opened, so this goes out ahead of the
+        // Page.navigate below — Chrome runs commands in arrival order, and doing
+        // it in a getVersion callback let the main document, the one request a
+        // bot manager actually scores, leave announcing HeadlessChrome.
+        if (status.honestUserAgent) {
+          const version = /Chrome\/(\d+)/.exec(status.honestUserAgent)?.[1] ?? "";
+          send("Emulation.setUserAgentOverride", {
+            userAgent: status.honestUserAgent,
+            // Without this the UA string says Chrome while Sec-CH-UA and
+            // navigator.userAgentData still say HeadlessChrome. Two sources
+            // disagreeing is a stronger signal than one honest headless UA, so
+            // omitting it made the disguise worse than no disguise.
+            userAgentMetadata: {
+              brands: [
+                { brand: "Not_A Brand", version: "24" },
+                { brand: "Chromium", version },
+                { brand: "Google Chrome", version },
+              ],
+              fullVersionList: [
+                { brand: "Not_A Brand", version: "24.0.0.0" },
+                { brand: "Chromium", version: `${version}.0.0.0` },
+                { brand: "Google Chrome", version: `${version}.0.0.0` },
+              ],
+              platform: uaPlatform(),
+              platformVersion: "",
+              architecture: "x86",
+              model: "",
+              mobile: false,
+            },
+            // A bare single token with no q-values is itself anomalous; real
+            // Chrome always sends a weighted list.
+            acceptLanguage: acceptLanguageHeader(),
+            platform: uaPlatform(),
+          });
+        }
         send("Runtime.addBinding", { name: CDP_BINDING });
         send("Runtime.addBinding", { name: LAB_BINDING });
-        if (hookRuntime) send("Page.addScriptToEvaluateOnNewDocument", { source: bridgeSource });
+        send("Page.addScriptToEvaluateOnNewDocument", { source: bridgeSource });
         send("Emulation.setFocusEmulationEnabled", { enabled: true });
         const surface = browserSurfaceRef.current;
         if (surface) {
@@ -1161,9 +1204,17 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               const next = !hooksEnabled;
               hooksEnabledRef.current = next;
               setHooksEnabled(next);
-              // The script is registered at document creation, so the choice
-              // only takes effect on a fresh page.
-              if (proxyBrowser?.running) void launchProxyChrome(currentUrl);
+              // addScriptToEvaluateOnNewDocument is registered at document
+              // creation, so the choice only reaches a fresh browser.
+              // launchProxyChrome is a toggle — calling it once on a running
+              // browser only stopped it and dropped the user on a dead surface.
+              if (proxyBrowser?.running) {
+                const destination = currentUrl;
+                void (async () => {
+                  await launchProxyChrome();
+                  await launchProxyChrome(destination);
+                })();
+              }
             }}
             title={hooksEnabled ? "关闭 JS Hook 注入（风控站点可先关掉验证；流量仍在代理侧抓取）" : "开启 JS Hook 注入"}
           >

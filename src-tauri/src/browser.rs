@@ -123,8 +123,10 @@ impl ProxyBrowserHandle {
                 return Err(error);
             }
         };
+        let honest_user_agent = resolve_honest_user_agent(debug_port).await;
         let status = ProxyBrowserStatus {
             running: true,
+            honest_user_agent,
             debug_port,
             target_id: target.id,
             web_socket_debugger_url: target.web_socket_debugger_url.clone(),
@@ -354,6 +356,39 @@ async fn wait_for_page_target(debug_port: u16) -> Result<ChromeTarget, String> {
         sleep(Duration::from_millis(125)).await;
     }
     Err(format!("Chrome CDP 启动超时: {last_error}"))
+}
+
+/// Chrome's advertised UA with the automation marker removed.
+///
+/// Read over the CDP HTTP endpoint before the debugger socket is opened, because
+/// applying the override afterwards races the first `Page.navigate` — Chrome
+/// executes commands in arrival order, so the main document would still go out
+/// announcing HeadlessChrome. Returns empty when nothing needed changing.
+async fn resolve_honest_user_agent(debug_port: u16) -> String {
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+    else {
+        return String::new();
+    };
+    let endpoint = format!("http://127.0.0.1:{debug_port}/json/version");
+    let Ok(response) = client.get(&endpoint).send().await else {
+        return String::new();
+    };
+    let Ok(value) = response.json::<serde_json::Value>().await else {
+        return String::new();
+    };
+    let reported = value
+        .get("User-Agent")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let honest = reported.replace("Headless", "");
+    if honest == reported {
+        String::new()
+    } else {
+        honest
+    }
 }
 
 fn reserve_loopback_port() -> Result<u16, String> {

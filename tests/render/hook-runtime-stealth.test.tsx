@@ -41,6 +41,42 @@ describe("wrapped functions do not announce themselves", () => {
     expect(Object.getOwnPropertyNames(globalThis.fetch)).not.toContain("toString");
   });
 
+  it("does not name the product in the functions it replaces", () => {
+    // `window.fetch.name === "shownetFetch"` was a one-property check that said
+    // outright what was doing the hooking, and the arity disagreed too. The
+    // wrapper has to carry whatever the function it replaced carried — here the
+    // sentinel's own name and arity, in a real browser `"fetch"` and 1.
+    expect(globalThis.fetch.name).toBe("sentinelFetch");
+    expect(globalThis.fetch.name).not.toContain("shownet");
+    expect(globalThis.fetch.length).toBe(2);
+  });
+
+  it("leaves no own symbol on wrappers or on the function it proxies", () => {
+    // The marker used to be an own Symbol.for() on every wrapper: one entry
+    // where a native function has none, and readable back through the global
+    // registry by name. A later version planted the same marker on the real
+    // Function.prototype.toString, the most-probed function in the language.
+    expect(Object.getOwnPropertySymbols(globalThis.fetch)).toHaveLength(0);
+    expect(Object.getOwnPropertySymbols(Function.prototype.toString)).toHaveLength(0);
+  });
+
+  it("does not render toString itself as an anonymous native function", () => {
+    // A callable Proxy reports "function () { [native code] }" instead of
+    // naming itself, which is a one-line tell that something replaced it.
+    expect(Function.prototype.toString.toString()).toBe(
+      "function toString() { [native code] }",
+    );
+  });
+
+  it("keeps the cookie setter looking native", () => {
+    // The loudest leak in the file: this descriptor's setter is page-authored,
+    // so its source used to dump the wrapper body, comments and all.
+    const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
+    expect(descriptor?.set).toBeTypeOf("function");
+    expect(String(descriptor?.set)).not.toContain("emit");
+    expect(String(descriptor?.set)).not.toContain("shownet");
+  });
+
   it("leaves unwrapped functions reporting themselves", () => {
     // The proxy must answer for wrappers only; rewriting every function's source
     // would be a louder tell than the one it replaces.

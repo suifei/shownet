@@ -1231,6 +1231,7 @@ export interface ProxyBrowserStatus {
   webSocketDebuggerUrl: string;
   sourceInstanceId: string;
   labUrl: string;
+  honestUserAgent: string;
 }
 
 export type UpstreamProxyMode = "direct" | "http" | "https" | "socks5";

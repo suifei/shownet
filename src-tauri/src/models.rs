@@ -78,6 +78,10 @@ pub struct ProxyBrowserStatus {
     pub web_socket_debugger_url: String,
     pub source_instance_id: String,
     pub lab_url: String,
+    /// Chrome's own UA with "Headless" removed, resolved before the first
+    /// navigation so the override is in place for the main document — the one
+    /// request a bot manager actually scores. Empty when it was already honest.
+    pub honest_user_agent: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

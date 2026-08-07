@@ -6,7 +6,6 @@
 
   const BRIDGE = "__SHOWNET_HOOK_BRIDGE__";
   const QUEUE = "__SHOWNET_HOOK_QUEUE__";
-  const WRAPPED = Symbol.for("shownet.browser-hook.wrapped");
   const MAX_STRING = 8192;
   const MAX_BINARY = 256;
   const trim = (value, maximum = MAX_STRING) => {
@@ -110,24 +109,53 @@
 
   /** Wrapper -> the function it replaced, so toString can answer for the original. */
   const nativeSources = new WeakMap();
+  /** Wrappers we installed, kept off the functions themselves. */
+  const wrappedFunctions = new WeakSet();
+
+  /**
+   * Makes `replacement` report `original`'s source, name and arity.
+   *
+   * The cookie setter is the loudest leak in this file when left alone:
+   * `Object.getOwnPropertyDescriptor(Document.prototype, "cookie").set.toString()`
+   * dumps a page-authored function body, comments and all.
+   */
+  const registerNative = (replacement, original) => {
+    try {
+      nativeSources.set(replacement, original);
+      wrappedFunctions.add(replacement);
+      Object.defineProperty(replacement, "name", {
+        configurable: true,
+        value: Reflect.get(original, "name"),
+      });
+      Object.defineProperty(replacement, "length", {
+        configurable: true,
+        value: Reflect.get(original, "length"),
+      });
+    } catch {}
+    return replacement;
+  };
 
   // Report the original source for anything we wrapped, however it is asked.
   // `Function.prototype.toString.call(fn)` is the standard probe and an own
   // toString on the wrapper does not answer it.
   try {
     const originalToString = Function.prototype.toString;
-    if (!originalToString[WRAPPED]) {
-      const proxied = new Proxy(originalToString, {
-        apply(target, thisArg, args) {
-          const source = nativeSources.get(thisArg);
-          return Reflect.apply(target, source ?? thisArg, args);
-        },
-      });
-      Object.defineProperty(proxied, WRAPPED, { value: true });
+    // A plain function, not a Proxy: V8 renders a callable Proxy as
+    // "function () { [native code] }" instead of "function toString() { … }",
+    // which is a one-line tell. And marking the replacement with our symbol
+    // would forward through a Proxy onto the real toString, planting the marker
+    // on the most-probed function in the language. This registers itself in
+    // nativeSources instead, so it reports the original's source about itself.
+    if (!nativeSources.has(originalToString)) {
+      const replacement = function toString() {
+        const source = nativeSources.get(this);
+        return Reflect.apply(originalToString, source ?? this, arguments);
+      };
+      nativeSources.set(replacement, originalToString);
       Object.defineProperty(Function.prototype, "toString", {
         configurable: true,
         writable: true,
-        value: proxied,
+        value: replacement,
       });
     }
   } catch {}
@@ -204,11 +232,25 @@
         return false;
       }
       original = owner[key];
-      if (typeof original !== "function" || original[WRAPPED]) return false;
+      if (typeof original !== "function" || wrappedFunctions.has(original)) return false;
       wrapped = factory(original);
     } catch { return false; }
     try {
-      Object.defineProperty(wrapped, WRAPPED, { value: true });
+      // `window.fetch.name === "shownetFetch"` was a one-property check that
+      // named the product doing the hooking, and `fetch.length` disagreed with
+      // the original's arity. Both are copied across.
+      Object.defineProperty(wrapped, "name", {
+        configurable: true,
+        value: Reflect.get(original, "name"),
+      });
+      Object.defineProperty(wrapped, "length", {
+        configurable: true,
+        value: Reflect.get(original, "length"),
+      });
+      // Not an own property: `Object.getOwnPropertySymbols(fetch)` returned one
+      // entry on every wrapper and none on any native function, and the key was
+      // in the global registry so a page could read it back by name.
+      wrappedFunctions.add(wrapped);
       // No own `toString` here: an own toString on a native-looking function is
       // itself a tell, and it does not survive
       // `Function.prototype.toString.call(wrapper)`, which is what probes
@@ -385,7 +427,7 @@
         configurable: cookieDescriptor.configurable,
         enumerable: cookieDescriptor.enumerable,
         get: cookieDescriptor.get,
-        set(value) {
+        set: registerNative(function set(value) {
           // The write goes first and unconditionally. Reporting the cookie used
           // to happen before it, so anything that went wrong while describing
           // the cookie meant the cookie was never stored at all — a challenge
@@ -398,7 +440,7 @@
             emit({ kind: "storage", name: "document.cookie.set", input: { name, value: text, attributes: attributes.map((item) => item.trim()) }, output: null });
           } catch {}
           return result;
-        },
+        }, cookieDescriptor.set),
       });
     } catch {}
   }
