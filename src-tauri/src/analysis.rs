@@ -2560,22 +2560,26 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 /// Spreads retries out so that the graph nodes running concurrently do not all
 /// come back at the same instant and rebuild the burst that got us limited.
 ///
-/// The clock alone is not enough of a source. macOS reports wall time to
-/// microsecond granularity, so `subsec_nanos()` is always a multiple of 1000 and
-/// taking it modulo a multiple of 250 yielded exactly zero every single time —
-/// dead jitter on the primary release target. Hashing the nanos together with
-/// the address of a stack local separates callers that share a timestamp, and
-/// the modulus is now coprime with both clock granularities.
+/// The modulus has to be coprime with the clock's granularity. macOS reports
+/// wall time in whole microseconds, so `subsec_nanos()` is always a multiple of
+/// 1000; taking that modulo 250 gave exactly zero every single time, leaving the
+/// jitter dead on the primary release target while still looking plausible.
+fn jitter_millis(nanos: u64) -> u64 {
+    // The modulus is what actually fixes this: 251 is prime, so it is coprime
+    // with every clock granularity and each remainder stays reachable. The
+    // multiply-and-shift only spreads adjacent timestamps further apart.
+    nanos
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_shr(17)
+        % AI_RETRY_JITTER_SPREAD_MS
+}
+
 fn retry_jitter() -> Duration {
-    let anchor = 0u8;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::from(elapsed.subsec_nanos()))
         .unwrap_or(0);
-    let mixed = nanos
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(std::ptr::from_ref(&anchor) as u64);
-    Duration::from_millis((mixed >> 17) % AI_RETRY_JITTER_SPREAD_MS)
+    Duration::from_millis(jitter_millis(nanos))
 }
 
 /// Obeys `Retry-After` when the provider sends one; otherwise backs off
@@ -3081,19 +3085,32 @@ mod tests {
     }
 
     #[test]
-    fn jitter_actually_varies() {
-        // The first version took the clock's nanoseconds modulo 250. macOS
-        // reports wall time in whole microseconds, so every sample was a
-        // multiple of 1000 and the remainder was always exactly 0 — concurrent
-        // graph nodes retried in lockstep, rebuilding the burst the jitter
-        // exists to break up. A single distinct value here means it is dead.
+    fn jitter_spreads_across_every_clock_granularity() {
+        // Driven with synthetic timestamps rather than the real clock, because
+        // the bug only appeared on a clock whose granularity shared a factor
+        // with the modulus. Sampling `SystemTime` here would make the test pass
+        // or fail by host: the old `nanos % 250` yields one distinct value on
+        // macOS (1us ticks), five on Windows (100ns) and 250 on Linux (1ns), so
+        // a "more than one value" check over the real clock goes green on CI
+        // while the release target stays broken.
+        for tick in [1_000u64, 100, 1] {
+            let samples: std::collections::HashSet<u64> =
+                (0..2_000).map(|step| jitter_millis(step * tick)).collect();
+            assert!(
+                samples.len() > AI_RETRY_JITTER_SPREAD_MS as usize / 2,
+                "a {tick}ns clock produced only {} distinct delays",
+                samples.len()
+            );
+            assert!(samples
+                .iter()
+                .all(|value| *value < AI_RETRY_JITTER_SPREAD_MS));
+        }
+    }
+
+    #[test]
+    fn jitter_stays_within_its_spread_on_the_real_clock() {
         let samples: std::collections::HashSet<u128> =
-            (0..500).map(|_| retry_jitter().as_millis()).collect();
-        assert!(
-            samples.len() > 1,
-            "jitter produced only {:?} across 500 samples",
-            samples
-        );
+            (0..200).map(|_| retry_jitter().as_millis()).collect();
         assert!(samples
             .iter()
             .all(|value| *value < AI_RETRY_JITTER_SPREAD_MS as u128));

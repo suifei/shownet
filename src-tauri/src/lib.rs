@@ -2783,16 +2783,21 @@ async fn set_capture_running(
         if let Some(session_id) = stopped_session_id.as_deref() {
             state.breakpoints.cancel_session(session_id, "抓包已停止");
         }
-        state.storage.set_active_session(None)?;
+        let session_cleared = state.storage.set_active_session(None);
         if let Some(proxy) = proxy {
             proxy.stop().await;
         }
         if let Some(reverse_proxy) = reverse_proxy {
             reverse_proxy.handle.stop().await;
         }
-        // Surfaced only now that the user is genuinely stopped and the retry
-        // button in 设置 can actually run.
+        // The teardown is done, so the frontend has to hear about it before any
+        // of it is reported as a failure. Returning first left the UI showing
+        // 抓包中 for a capture that had already stopped — and the takeover switch
+        // is gated on that same stale flag, which disabled the one control that
+        // could have got the user out.
+        emit_capture_status(&app, &state)?;
         restore_result?;
+        session_cleared?;
     }
 
     let status = runtime_status(&state)?;
@@ -2831,6 +2836,17 @@ pub(crate) fn persist_captured_request(
     emit(app, "capture://request-created", &list_event)?;
     emit(app, "capture://request", &list_item)?;
     Ok(request)
+}
+
+/// Pushes the current capture and reverse-proxy state to the frontend.
+///
+/// Used on the stop path so a teardown that ends in an error still leaves the UI
+/// agreeing with the backend about what is running.
+fn emit_capture_status(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let status = runtime_status(state)?;
+    emit(app, "capture://status", &status)?;
+    let reverse_status = reverse_proxy_status(state)?;
+    emit(app, "reverse-proxy://status", &reverse_status)
 }
 
 fn runtime_status(state: &AppState) -> Result<RuntimeStatus, String> {
@@ -2972,8 +2988,13 @@ fn activate_system_proxy(state: &AppState) -> Result<(), String> {
     // own settings and overwrite the only copy of what the user actually had —
     // every later "restore" would then hand them a proxy on a dead port.
     if state.storage.has_system_proxy_recovery()? {
+        // Both routes are named on purpose. If the restore fails for a reason
+        // that will not clear — a renamed network service, a registry key held
+        // by policy — 重试恢复 can never succeed, and pointing only at it sends
+        // the user round a loop. Turning the takeover off returns above, so
+        // capture still works while they sort the machine out by hand.
         return Err(
-            "上一次系统代理接管尚未恢复；请先在「设置 → 流量路由」点击「重试恢复」，再开始抓包"
+            "上一次系统代理接管尚未恢复；请在「设置 → 流量路由」点击「重试恢复」后再开始抓包。若恢复始终失败，可关闭「接管系统代理」照常抓包，并手动检查系统代理设置。"
                 .to_string(),
         );
     }

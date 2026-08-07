@@ -52,6 +52,22 @@ describe("wrapping an inherited method leaves it as writable as it was", () => {
     expect((sm4 as unknown as { encrypt: () => string }).encrypt()).toBe("replaced");
   });
 
+  it("survives a prototype chain that points at itself", () => {
+    // A Proxy can return itself from getPrototypeOf. Walking that chain with an
+    // ordinary loop never terminates, and this runs on a 500ms interval on the
+    // page's main thread — the tab would hang outright.
+    const cyclic: Record<string, unknown> = {};
+    const proxy: unknown = new Proxy(cyclic, { getPrototypeOf: () => proxy as object });
+    Object.defineProperty(globalThis, "sm2", { configurable: true, writable: true, value: proxy });
+
+    vi.useFakeTimers();
+    // eslint-disable-next-line no-new-func -- evaluating the shipped file is the point
+    new Function(RUNTIME_SOURCE)();
+
+    // If the walk were unbounded this call would never return.
+    expect(() => vi.advanceTimersByTime(600)).not.toThrow();
+  });
+
   it("leaves an inherited accessor alone rather than flattening it", () => {
     let reads = 0;
     class Lazy {

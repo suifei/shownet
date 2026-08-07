@@ -108,11 +108,21 @@
     } catch {}
   };
 
-  /** True when `key` resolves to an accessor anywhere on the prototype chain. */
+  /**
+   * True when `key` resolves to an accessor anywhere on the prototype chain.
+   *
+   * The walk is depth-bounded because a Proxy can return itself from a
+   * `getPrototypeOf` trap, and an ordinary `for` loop over such a chain never
+   * terminates. This runs on a 500ms interval on the page's main thread, so an
+   * unbounded walk would hang the tab outright — and hostile prototypes are
+   * exactly what this file exists to survive.
+   */
   const inheritedAccessor = (owner, key) => {
-    for (let node = owner; node; node = Object.getPrototypeOf(node)) {
+    let node = owner;
+    for (let depth = 0; node && depth < 100; depth += 1) {
       const descriptor = Object.getOwnPropertyDescriptor(node, key);
       if (descriptor) return typeof descriptor.get === "function" || typeof descriptor.set === "function";
+      node = Object.getPrototypeOf(node);
     }
     return false;
   };
@@ -127,7 +137,13 @@
       // An accessor is left alone. Replacing one with a data property would
       // shadow the getter for good, losing whatever per-access work it does and
       // silently disabling the matching setter.
-      if (inheritedAccessor(owner, key)) return false;
+      if (inheritedAccessor(owner, key)) {
+        // Wrapping would flatten the accessor into a data property, losing its
+        // per-access behaviour. Skipping is the safe choice, but it is a hole in
+        // what gets captured, so it is reported rather than passed over quietly.
+        emit({ kind: "runtime", name: "hook.skipped", input: { property: String(key), reason: "accessor" }, output: null });
+        return false;
+      }
       original = owner[key];
       if (typeof original !== "function" || original[WRAPPED]) return false;
       wrapped = factory(original);
