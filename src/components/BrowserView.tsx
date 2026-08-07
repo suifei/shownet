@@ -136,6 +136,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const [selectedHookId, setSelectedHookId] = useState("");
   const [busNote, setBusNote] = useState("");
   const [reloadLoopHost, setReloadLoopHost] = useState("");
+  const [hooksEnabled, setHooksEnabled] = useState(true);
+  // Read inside the CDP attach, which is not re-created when the toggle flips.
+  const hooksEnabledRef = useRef(true);
   const navigationLogRef = useRef<Array<{ url: string; at: number }>>([]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const browserSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -493,7 +496,14 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     options?: { navigate?: boolean },
   ) {
     const navigate = options?.navigate !== false;
-    const hookRuntime = await invoke<string>("get_browser_hook_script");
+    // Skipped entirely when injection is off: the runtime rewrites fetch, XHR,
+    // document.cookie and SubtleCrypto on every page, which is what makes the
+    // analysis possible and also the most legible automation tell a site can
+    // read. Turning it off costs the JS Hook feed and nothing else — traffic is
+    // still captured at the proxy.
+    const hookRuntime = hooksEnabledRef.current
+      ? await invoke<string>("get_browser_hook_script")
+      : "";
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(status.webSocketDebuggerUrl);
       cdpSocketRef.current = socket;
@@ -516,9 +526,24 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         send("Runtime.enable");
         send("Page.enable");
         send("Network.enable");
+        // Chrome reports itself as HeadlessChrome/<ver>, which a bot manager
+        // rejects before it looks at anything else. The version is taken from
+        // the browser we actually launched rather than hardcoded, so it cannot
+        // drift out of step with the engine behind it.
+        send("Browser.getVersion", {}, (result) => {
+          const reported = typeof result.userAgent === "string" ? result.userAgent : "";
+          const honest = reported.replace(/Headless/g, "");
+          if (honest && honest !== reported) {
+            cdpSendRef.current?.("Emulation.setUserAgentOverride", {
+              userAgent: honest,
+              acceptLanguage: navigator.language,
+              platform: navigator.platform,
+            });
+          }
+        });
         send("Runtime.addBinding", { name: CDP_BINDING });
         send("Runtime.addBinding", { name: LAB_BINDING });
-        send("Page.addScriptToEvaluateOnNewDocument", { source: bridgeSource });
+        if (hookRuntime) send("Page.addScriptToEvaluateOnNewDocument", { source: bridgeSource });
         send("Emulation.setFocusEmulationEnabled", { enabled: true });
         const surface = browserSurfaceRef.current;
         if (surface) {
@@ -1130,6 +1155,20 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             <span>{fixtureProbing ? "探针中" : "样本探针"}</span>
           </button>
           <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "CDP" : "Chrome"}</span></button>
+          <button
+            className={`hook-toggle ${hooksEnabled ? "is-active" : ""}`}
+            onClick={() => {
+              const next = !hooksEnabled;
+              hooksEnabledRef.current = next;
+              setHooksEnabled(next);
+              // The script is registered at document creation, so the choice
+              // only takes effect on a fresh page.
+              if (proxyBrowser?.running) void launchProxyChrome(currentUrl);
+            }}
+            title={hooksEnabled ? "关闭 JS Hook 注入（风控站点可先关掉验证；流量仍在代理侧抓取）" : "开启 JS Hook 注入"}
+          >
+            <Code2 size={16} /><span>{hooksEnabled ? "Hook 开" : "Hook 关"}</span>
+          </button>
           <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title="脚本 Hook 面板"><Braces size={16} /><span>{hookEvents.length}</span></button>
           <button className="icon-button" onClick={() => void openInSystemBrowser()} disabled={!currentUrl.trim()} title="在系统浏览器中打开" aria-label="在系统浏览器中打开"><ExternalLink size={16} /></button>
         </div>

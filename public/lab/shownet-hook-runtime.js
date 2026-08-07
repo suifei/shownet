@@ -108,6 +108,30 @@
     } catch {}
   };
 
+  /** Wrapper -> the function it replaced, so toString can answer for the original. */
+  const nativeSources = new WeakMap();
+
+  // Report the original source for anything we wrapped, however it is asked.
+  // `Function.prototype.toString.call(fn)` is the standard probe and an own
+  // toString on the wrapper does not answer it.
+  try {
+    const originalToString = Function.prototype.toString;
+    if (!originalToString[WRAPPED]) {
+      const proxied = new Proxy(originalToString, {
+        apply(target, thisArg, args) {
+          const source = nativeSources.get(thisArg);
+          return Reflect.apply(target, source ?? thisArg, args);
+        },
+      });
+      Object.defineProperty(proxied, WRAPPED, { value: true });
+      Object.defineProperty(Function.prototype, "toString", {
+        configurable: true,
+        writable: true,
+        value: proxied,
+      });
+    }
+  } catch {}
+
   const skipReports = new WeakMap();
   const primitiveSkipReports = new Set();
 
@@ -185,7 +209,11 @@
     } catch { return false; }
     try {
       Object.defineProperty(wrapped, WRAPPED, { value: true });
-      Object.defineProperty(wrapped, "toString", { value: original.toString.bind(original) });
+      // No own `toString` here: an own toString on a native-looking function is
+      // itself a tell, and it does not survive
+      // `Function.prototype.toString.call(wrapper)`, which is what probes
+      // actually use. The prototype method is proxied once instead, below.
+      nativeSources.set(wrapped, original);
       // An inherited method has no own descriptor to copy, and defineProperty's
       // defaults would install it non-writable and non-configurable, so the page
       // could never reassign or delete its own method again. Restore writability

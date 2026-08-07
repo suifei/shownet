@@ -68,6 +68,10 @@ impl ProxyBrowserHandle {
             .arg("--no-default-browser-check")
             .arg("--no-service-autorun")
             .arg("--headless=new")
+            // Without this Blink advertises `navigator.webdriver = true`, which
+            // is the single cheapest automation tell a page can read. Nothing
+            // about the capture depends on announcing it.
+            .arg("--disable-blink-features=AutomationControlled")
             .arg("--incognito")
             .arg("--window-size=1440,900")
             .arg("--gcm-checkin-url=http://127.0.0.1:9/disabled")
