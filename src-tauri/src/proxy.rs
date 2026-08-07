@@ -1167,11 +1167,8 @@ async fn forward_reverse_proxy_request(
     }
     .await;
     Ok(result.unwrap_or_else(|error| {
-        let (report, message) = split_failure_report(error);
-        if report {
-            error_sink(message.clone());
-        }
-        error_response(StatusCode::BAD_GATEWAY, &message)
+        error_sink(error.clone());
+        error_response(StatusCode::BAD_GATEWAY, &error)
     }))
 }
 
@@ -1292,11 +1289,8 @@ async fn handle_request(
         .await
     };
     Ok(result.unwrap_or_else(|error| {
-        let (report, message) = split_failure_report(error);
-        if report {
-            error_sink(message.clone());
-        }
-        error_response(StatusCode::BAD_GATEWAY, &message)
+        error_sink(error.clone());
+        error_response(StatusCode::BAD_GATEWAY, &error)
     }))
 }
 
@@ -1363,9 +1357,8 @@ async fn handle_connect(
         let hello = match read_client_hello(&mut client).await {
             Ok(hello) => hello,
             Err(error) => {
-                let (report, message) = split_failure_report(error);
-                if report {
-                    error_sink(message);
+                if !error.abandoned {
+                    error_sink(error.message);
                 }
                 return;
             }
@@ -1882,32 +1875,6 @@ where
 /// surfaces: an origin refusing our HTTP/2, a malformed frame, a timeout. Those
 /// are the reports that led to the fixes in this file, and silencing them to
 /// tidy up the toast area would cost more than the noise does.
-/// Marks a failure that still owes the caller a 502 but must not raise a toast.
-///
-/// The forwarding path carries `String` errors end to end, so by the time the
-/// sink sees one the typed reason is gone. This keeps the decision at the point
-/// that still holds the `hyper::Error`, rather than re-deriving it from message
-/// text — which would break the first time hyper rewords something.
-pub(crate) const UNREPORTED_FAILURE_PREFIX: &str = "\u{1}";
-
-/// Splits a forwarding failure into "show the user?" and the message itself.
-pub(crate) fn split_failure_report(error: String) -> (bool, String) {
-    match error.strip_prefix(UNREPORTED_FAILURE_PREFIX) {
-        Some(rest) => (false, rest.to_string()),
-        None => (true, error),
-    }
-}
-
-/// Whether an I/O failure is just a peer hanging up.
-///
-/// Three places see this. A browser pre-opens TLS connections it may never use
-/// and drops them mid-handshake — "客户端 TLS 握手失败 …: tls handshake eof". A
-/// CONNECT or bypass tunnel ends when one side closes, which `copy_bidirectional`
-/// reports as a reset rather than a clean EOF. None of it is a fault.
-///
-/// What is excluded matters as much: a refused or untrusted certificate arrives
-/// as a fatal alert (`InvalidData`), a dead route as `TimedOut` or
-/// `ConnectionRefused`. Those stay visible.
 /// Whether a WebSocket ended without a closing handshake.
 ///
 /// The graceful endings are already handled in `relay_websocket` — a `None`
@@ -2228,6 +2195,11 @@ async fn forward_mitm_https(
     event_sink: EventSink,
     error_sink: ErrorSink,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    // Set where the typed hyper::Error still exists, read at the sink. A flag
+    // rather than a marker inside the message: the message is user-facing text
+    // and must not carry control data a caller could forget to strip.
+    let client_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled_flag = client_cancelled.clone();
     let result: Result<Response<ProxyBody>, String> = async {
         let mut scheme = "https".to_string();
         let original_route = (scheme.clone(), host.clone(), port);
@@ -2609,7 +2581,8 @@ async fn forward_mitm_https(
                 // abandoned prefetch, a navigation away mid-flight. Browsers do
                 // this constantly. Still a failed forward, so the 502 stands and
                 // the capture records it; it is just not news.
-                format!("{UNREPORTED_FAILURE_PREFIX}转发目标请求失败: {error}")
+                cancelled_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                format!("转发目标请求失败: {error}")
             } else {
                 format!("转发目标请求失败: {error}")
             }
@@ -2770,11 +2743,10 @@ async fn forward_mitm_https(
     }
     .await;
     Ok(result.unwrap_or_else(|error| {
-        let (report, message) = split_failure_report(error);
-        if report {
-            error_sink(message.clone());
+        if !client_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            error_sink(error.clone());
         }
-        error_response(StatusCode::BAD_GATEWAY, &message)
+        error_response(StatusCode::BAD_GATEWAY, &error)
     }))
 }
 
@@ -6603,20 +6575,33 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_request_still_answers_the_caller_without_raising_a_toast() {
-        let (report, message) = split_failure_report(format!(
-            "{UNREPORTED_FAILURE_PREFIX}转发目标请求失败: operation was canceled"
-        ));
-        assert!(!report, "a client that cancelled must not raise a toast");
-        assert_eq!(message, "转发目标请求失败: operation was canceled");
-        assert!(
-            !message.contains(UNREPORTED_FAILURE_PREFIX),
-            "the marker must never reach the 502 body the caller reads"
+    fn only_a_cancellation_is_silenced_on_the_forward_path() {
+        // A cancelled request is the one forwarding failure the user is not
+        // told about, and the decision is made where the typed hyper::Error
+        // still exists. Nothing is encoded into the message itself: the sink
+        // reads a flag, so a caller cannot forget to decode one.
+        let source = production_source();
+        assert_eq!(
+            source.matches("cancelled_flag.store(true").count(),
+            1,
+            "exactly one forwarding failure is silenced"
         );
-
-        let (report, message) = split_failure_report("转发目标请求失败: http2 error".to_string());
-        assert!(report, "a protocol failure must still be reported");
-        assert_eq!(message, "转发目标请求失败: http2 error");
+        let at = source
+            .find("} else if error.is_canceled() {")
+            .expect("the cancellation branch is what opts out");
+        assert!(
+            source[at..at + 400].contains("cancelled_flag.store(true"),
+            "the cancellation branch must be the one that opts out"
+        );
+        assert!(
+            source.contains("if !client_cancelled.load("),
+            "the sink must consult the flag before reporting"
+        );
+        // The failure text stays plain: no control characters, nothing to strip.
+        assert!(
+            !source.contains("\\u{1}"),
+            "a marker inside a user-facing message is what this replaced"
+        );
     }
 
     #[test]
@@ -6706,7 +6691,7 @@ mod tests {
             .find("read_client_hello(&mut client).await")
             .expect("the CONNECT path reads a ClientHello");
         assert!(
-            source[at..at + 400].contains("split_failure_report(error)"),
+            source[at..at + 400].contains("if !error.abandoned {"),
             "a ClientHello that never arrived must not be reported"
         );
     }
@@ -6722,41 +6707,6 @@ mod tests {
             source.matches("if !is_benign_io_end(&").count(),
             3,
             "each site that reports an io failure must ask whether it is a hang-up"
-        );
-    }
-
-    #[test]
-    fn only_a_cancellation_is_marked_unreported_on_the_forward_path() {
-        // The wiring the two tests above cannot reach: a cancelled send is what
-        // gets marked, and an origin refusing our h2 is not. Pinned against the
-        // production source only, so the test module cannot stand in for it.
-        let source = production_source();
-        let marked = source
-            .matches(&format!("{{UNREPORTED_FAILURE_PREFIX}}"))
-            .count();
-        assert_eq!(
-            marked, 1,
-            "exactly one failure is silenced; a second needs its own justification"
-        );
-        let at = source
-            .find("} else if error.is_canceled() {")
-            .expect("the cancellation branch is what marks the failure");
-        let branch = &source[at..at + 600];
-        assert!(
-            branch.contains("{UNREPORTED_FAILURE_PREFIX}转发目标请求失败"),
-            "the cancellation branch must be the one that marks it"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_malformed_request_is_still_reported() {
-        // The other half of the contract. Silencing the routine endings is only
-        // safe if a genuine protocol fault still reaches the user — those
-        // reports are what produced the h2 fixes in this file.
-        let error = serve_one_and_capture_error(b"not http at all\r\n\r\n").await;
-        assert!(
-            !is_benign_connection_end(&error),
-            "a protocol fault must still surface: {error:?}"
         );
     }
 

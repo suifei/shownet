@@ -63,29 +63,40 @@ pub struct ClientHelloRead {
     pub fingerprint: Result<ClientTlsFingerprint, String>,
 }
 
-/// Marks a read that failed because the client simply went away.
+/// Why a ClientHello read failed, and whether anyone needs to hear about it.
 ///
-/// A browser opening a CONNECT tunnel it never uses — pre-connect, a racing
-/// connection that lost — closes before sending a ClientHello, and `read_exact`
-/// reports that as an EOF. It is not a fault, so the caller strips the marker
-/// and stays quiet. A truncated or malformed hello reports as before.
-fn mark_if_abandoned(error: &std::io::Error, message: String) -> String {
-    let abandoned = matches!(
-        error.kind(),
-        std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::NotConnected
-    );
-    if abandoned {
-        format!("{}{message}", crate::proxy::UNREPORTED_FAILURE_PREFIX)
-    } else {
-        message
+/// A browser pre-opens CONNECT tunnels it may never use — pre-connect, a racing
+/// connection that loses — and closes before sending a hello. `read_exact`
+/// reports that as an EOF. The proxy stays quiet about it; a measurement tool
+/// reports every failure. Carrying the reason as a field rather than a marker in
+/// the message means a caller that forgets cannot corrupt its own output.
+#[derive(Debug)]
+pub struct ClientHelloError {
+    pub message: String,
+    pub abandoned: bool,
+}
+
+impl std::fmt::Display for ClientHelloError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
     }
 }
 
-pub async fn read_client_hello<R>(stream: &mut R) -> Result<ClientHelloRead, String>
+fn client_hello_read_error(error: &std::io::Error, context: &str) -> ClientHelloError {
+    ClientHelloError {
+        message: format!("{context}: {error}"),
+        abandoned: matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+        ),
+    }
+}
+
+pub async fn read_client_hello<R>(stream: &mut R) -> Result<ClientHelloRead, ClientHelloError>
 where
     R: AsyncRead + Unpin,
 {
@@ -94,9 +105,10 @@ where
 
     for _ in 0..MAX_TLS_RECORDS {
         let mut header = [0_u8; 5];
-        stream.read_exact(&mut header).await.map_err(|error| {
-            mark_if_abandoned(&error, format!("读取 TLS ClientHello 失败: {error}"))
-        })?;
+        stream
+            .read_exact(&mut header)
+            .await
+            .map_err(|error| client_hello_read_error(&error, "读取 TLS ClientHello 失败"))?;
         wire_bytes.extend_from_slice(&header);
 
         let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
@@ -107,9 +119,10 @@ where
             });
         }
         let mut record = vec![0_u8; record_len];
-        stream.read_exact(&mut record).await.map_err(|error| {
-            mark_if_abandoned(&error, format!("TLS ClientHello 记录不完整: {error}"))
-        })?;
+        stream
+            .read_exact(&mut record)
+            .await
+            .map_err(|error| client_hello_read_error(&error, "TLS ClientHello 记录不完整"))?;
         wire_bytes.extend_from_slice(&record);
 
         if header[0] != 22 {
@@ -628,34 +641,10 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn no_caller_of_read_client_hello_can_leak_the_marker() {
-        // read_client_hello marks an abandoned connection so the proxy can stay
-        // quiet. Any caller that forwards that string without stripping puts a
-        // raw control character into output — which is what tls_probe.rs did
-        // when the marker was introduced.
-        for file in ["proxy.rs", "tls_probe.rs", "tls_fingerprint.rs"] {
-            let source =
-                std::fs::read_to_string(format!("src/{file}")).expect("source is readable");
-            let production = match source.find("\n#[cfg(test)]\nmod tests {") {
-                Some(at) => &source[..at],
-                None => &source[..],
-            };
-            let mut from = 0;
-            while let Some(at) = production[from..].find("read_client_hello(") {
-                let at = from + at;
-                let after = &production[at..(at + 400).min(production.len())];
-                assert!(
-                    after.contains("split_failure_report"),
-                    "{file}: a read_client_hello caller must strip the marker before reporting"
-                );
-                from = at + 1;
-            }
-        }
-    }
+    use super::*;
 
     #[test]
-    fn an_abandoned_connection_is_marked_but_a_truncated_hello_is_not() {
+    fn an_abandoned_connection_is_flagged_but_a_stalled_one_is_not() {
         use std::io::ErrorKind;
         // A browser pre-opens CONNECT tunnels it may never use, then closes
         // before sending a ClientHello. read_exact reports that as an EOF, and
@@ -667,28 +656,25 @@ mod tests {
             ErrorKind::BrokenPipe,
             ErrorKind::NotConnected,
         ] {
-            let marked = mark_if_abandoned(
-                &std::io::Error::from(kind),
-                "读取 TLS ClientHello 失败".to_string(),
-            );
-            let (report, message) = crate::proxy::split_failure_report(marked);
-            assert!(!report, "{kind:?} is a client that went away, not a fault");
-            assert_eq!(message, "读取 TLS ClientHello 失败");
+            let error =
+                client_hello_read_error(&std::io::Error::from(kind), "读取 TLS ClientHello 失败");
+            assert!(error.abandoned, "{kind:?} is a client that went away");
+            assert!(error.message.starts_with("读取 TLS ClientHello 失败: "));
         }
 
         // A stalled or broken peer is a real problem and still reports.
         for kind in [ErrorKind::TimedOut, ErrorKind::InvalidData] {
-            let marked = mark_if_abandoned(
-                &std::io::Error::from(kind),
-                "TLS ClientHello 记录不完整".to_string(),
-            );
-            let (report, message) = crate::proxy::split_failure_report(marked);
-            assert!(report, "{kind:?} must still be reported");
-            assert_eq!(message, "TLS ClientHello 记录不完整");
+            let error =
+                client_hello_read_error(&std::io::Error::from(kind), "TLS ClientHello 记录不完整");
+            assert!(!error.abandoned, "{kind:?} must still be reported");
         }
-    }
 
-    use super::*;
+        // Display is the message, so a caller that just prints it cannot leak
+        // the reason flag into output.
+        let error =
+            client_hello_read_error(&std::io::Error::from(ErrorKind::UnexpectedEof), "读取失败");
+        assert_eq!(format!("{error}"), error.message);
+    }
 
     #[test]
     fn recognizes_all_grease_codepoints() {

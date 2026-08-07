@@ -94,12 +94,12 @@ impl ClientHelloProbe {
         stream: &mut TcpStream,
         peer: SocketAddr,
     ) -> Result<CapturedClientHello, String> {
-        // The probe is a measurement tool: a connection that went away is a
-        // failed measurement and must be reported. Strip the marker the proxy
-        // uses to stay quiet about the same event, so it cannot reach output.
+        // A measurement tool reports every failure, including a peer that went
+        // away — that is a failed measurement. The proxy makes the opposite
+        // choice from the same typed error.
         let read = read_client_hello(stream)
             .await
-            .map_err(|error| crate::proxy::split_failure_report(error).1)?;
+            .map_err(|error| error.message)?;
         let fingerprint = read.fingerprint?;
         Ok(CapturedClientHello {
             fingerprint,
