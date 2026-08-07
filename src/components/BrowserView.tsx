@@ -55,13 +55,37 @@ interface BrowserViewProps {
 }
 
 const previewHookEvents: BrowserHookEvent[] = [];
-/** Chromium's UA-CH platform name, which is not navigator.platform. */
+/** Chromium's UA-CH platform name — used for userAgentMetadata.platform only. */
 function uaPlatform(): string {
   const platform = navigator.platform || "";
   if (/Mac/i.test(platform)) return "macOS";
   if (/Win/i.test(platform)) return "Windows";
   if (/Linux|X11/i.test(platform)) return "Linux";
   return "Windows";
+}
+
+/**
+ * What `navigator.platform` should report — a different vocabulary from UA-CH.
+ *
+ * Passing the UA-CH name here set `navigator.platform = "macOS"`, a value no
+ * real browser produces, and platform-vs-UA agreement is among the first things
+ * a detection suite checks. That made the override more detectable than sending
+ * no override at all.
+ */
+function navigatorPlatform(): string {
+  const reported = navigator.platform;
+  if (reported) return reported;
+  const ua = navigator.userAgent;
+  if (/Mac/i.test(ua)) return "MacIntel";
+  if (/Win/i.test(ua)) return "Win32";
+  return "Linux x86_64";
+}
+
+/** CPU architecture as UA-CH reports it; Apple Silicon is "arm". */
+function uaArchitecture(): string {
+  return /arm|aarch64/i.test(navigator.userAgent) || /Mac/i.test(navigator.platform)
+    ? "arm"
+    : "x86";
 }
 
 /** A weighted Accept-Language list, the shape a real browser sends. */
@@ -574,14 +598,14 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               ],
               platform: uaPlatform(),
               platformVersion: "",
-              architecture: "x86",
+              architecture: uaArchitecture(),
               model: "",
               mobile: false,
             },
             // A bare single token with no q-values is itself anomalous; real
             // Chrome always sends a weighted list.
             acceptLanguage: acceptLanguageHeader(),
-            platform: uaPlatform(),
+            platform: navigatorPlatform(),
           });
         }
         send("Runtime.addBinding", { name: CDP_BINDING });
@@ -722,22 +746,42 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     });
   }
 
+  /** Toolbar toggle: stop when running, start otherwise. */
   async function launchProxyChrome(destination?: string) {
     if (!desktop || browserConnecting) return;
     if (proxyBrowser?.running) {
-      cdpSendRef.current?.("Page.stopScreencast");
-      cdpSocketRef.current?.close();
-      cdpSocketRef.current = null;
-      cdpSendRef.current = null;
-      cdpPendingRef.current.clear();
-      await invoke("stop_proxy_browser");
-      setProxyBrowser(null);
-      screencastFrameRef.current = null;
-      setScreencastFrame(null);
-      setBrowserError("");
-      setBusNote("已停止内嵌浏览器");
+      await stopProxyChrome();
       return;
     }
+    await startProxyChrome(destination);
+  }
+
+  /** Tears the embedded browser down. Safe to call when it is not running. */
+  async function stopProxyChrome() {
+    cdpSendRef.current?.("Page.stopScreencast");
+    cdpSocketRef.current?.close();
+    cdpSocketRef.current = null;
+    cdpSendRef.current = null;
+    cdpPendingRef.current.clear();
+    await invoke("stop_proxy_browser");
+    setProxyBrowser(null);
+    screencastFrameRef.current = null;
+    setScreencastFrame(null);
+    setBrowserError("");
+    setBusNote("已停止内嵌浏览器");
+  }
+
+  /**
+   * Starts the browser unconditionally.
+   *
+   * Split out from the toggle because a restart cannot be expressed as two
+   * toggle calls: both close over the same render's `proxyBrowser`, so the
+   * second one saw a still-running browser and stopped it again instead of
+   * starting it — leaving the user on a dead surface, which is exactly the
+   * bug the restart was meant to avoid.
+   */
+  async function startProxyChrome(destination?: string) {
+    if (!desktop || browserConnecting) return;
     setBrowserConnecting(true);
     setBrowserError("");
     try {
@@ -1211,8 +1255,8 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               if (proxyBrowser?.running) {
                 const destination = currentUrl;
                 void (async () => {
-                  await launchProxyChrome();
-                  await launchProxyChrome(destination);
+                  await stopProxyChrome();
+                  await startProxyChrome(destination);
                 })();
               }
             }}

@@ -10,6 +10,7 @@
 use crate::tls_clienthello_catalog::{self, AlpnRecipe, ClientHelloPreset};
 use crate::tls_fingerprint::ClientTlsFingerprint;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -460,6 +461,45 @@ pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<Clien
 
 /// Hosts that frequently return HTTP 400 under rustls MITM when H2 is negotiated.
 /// Prefer product bypass (`STATIC_CDN_BYPASS_PRESET`); when still MITM'd, force HTTP/1.1 ALPN.
+/// Hosts observed rejecting our outbound HTTP/2 at runtime.
+///
+/// Some origins fingerprint the HTTP/2 connection itself — SETTINGS values and
+/// order, window sizes, priority frames — and hyper's do not match a browser's.
+/// Measured against one such origin: through the MITM over h2 the page reloaded
+/// 23 times in 20 seconds and never rendered; the identical browser over h1
+/// egress settled after one navigation. Until outbound h2 can be shaped to
+/// match a real browser, remembering which origins refuse ours and speaking
+/// HTTP/1.1 to them is what keeps those sites usable.
+static H2_REJECTED_HOSTS: std::sync::LazyLock<std::sync::RwLock<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashSet::new()));
+
+/// Records that `host` failed over HTTP/2. Returns true when newly recorded.
+pub fn note_origin_http2_rejected(host: &str) -> bool {
+    let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if key.is_empty() {
+        return false;
+    }
+    match H2_REJECTED_HOSTS.write() {
+        Ok(mut hosts) => hosts.insert(key),
+        Err(_) => false,
+    }
+}
+
+fn origin_http2_rejected(host: &str) -> bool {
+    let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    H2_REJECTED_HOSTS
+        .read()
+        .map(|hosts| hosts.contains(&key))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub fn clear_origin_http2_rejections() {
+    if let Ok(mut hosts) = H2_REJECTED_HOSTS.write() {
+        hosts.clear();
+    }
+}
+
 pub fn origin_force_http11_for_host(host: &str) -> bool {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
@@ -471,6 +511,8 @@ pub fn origin_force_http11_for_host(host: &str) -> bool {
         || SUFFIXES
             .iter()
             .any(|suffix| host.ends_with(suffix) || host == &suffix[1..])
+        // Learned at runtime, in addition to the static list.
+        || origin_http2_rejected(&host)
 }
 
 /// Build MITM origin ClientConfig from a versioned catalog preset id.
@@ -604,6 +646,38 @@ mod tests {
             signature_algorithms: vec![],
             grease,
         }
+    }
+
+    #[test]
+    fn a_host_that_refuses_our_http2_is_remembered_and_downgraded() {
+        clear_origin_http2_rejections();
+        let host = "h2-refuser.test";
+        assert!(
+            !origin_force_http11_for_host(host),
+            "unknown host starts on h2"
+        );
+
+        // Recorded once; a repeat is not a new observation.
+        assert!(note_origin_http2_rejected(host));
+        assert!(!note_origin_http2_rejected(host));
+
+        // Every later connection to it takes the HTTP/1.1 route, which is what
+        // stops a page whose h2 connection the origin refuses from reloading
+        // forever.
+        assert!(origin_force_http11_for_host(host));
+        assert!(
+            origin_force_http11_for_host("H2-Refuser.Test."),
+            "host match is normalised"
+        );
+        assert!(
+            !origin_force_http11_for_host("other.test"),
+            "only the observed host"
+        );
+
+        // The static list is unaffected either way.
+        assert!(origin_force_http11_for_host("pss.bdstatic.com"));
+        clear_origin_http2_rejections();
+        assert!(!origin_force_http11_for_host(host));
     }
 
     #[test]

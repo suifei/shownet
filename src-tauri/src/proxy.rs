@@ -233,6 +233,11 @@ struct DedicatedRequestRoute {
     port: u16,
     tls_identity_host: String,
     /// Prefer h2 when TLS ALPN allows (false forces h1 path e.g. websocket upgrade).
+    ///
+    /// This must be reflected in the ALPN offered at the TLS layer as well.
+    /// Offering h2 and then running an HTTP/1.1 handshake writes h1 bytes onto a
+    /// connection the origin believes is h2 — a protocol version error, and the
+    /// broken sender then gets cached for the rest of the tunnel.
     prefer_http2: bool,
     tls_profile: OutboundTlsProfile,
 }
@@ -1990,8 +1995,16 @@ fn dedicated_request_sender_factory(
             let _ = default_profile;
             let stream = connect_destination(&upstream, &route.connection_host, route.port).await?;
             let stream = if route.scheme == "https" {
+                // ALPN must agree with the HTTP handshake chosen below.
                 BoxedIo(Box::new(
-                    connect_verified_tls(stream, &route.tls_identity_host, profile).await?,
+                    connect_verified_tls_measured(
+                        stream,
+                        &route.tls_identity_host,
+                        profile,
+                        !route.prefer_http2,
+                    )
+                    .await?
+                    .stream,
                 ))
             } else {
                 stream
@@ -2322,12 +2335,29 @@ async fn forward_mitm_https(
         // into N sequential ones — slow, and a connection pattern no browser
         // produces, which is its own signal to whatever is scoring us.
         let mut shared_retired = false;
-        if !use_dedicated_base && sender.lock().await.is_closed() {
-            match dedicated_sender_factory(dedicated_route.clone()).await {
-                Ok(replacement) => *sender.lock().await = replacement,
-                // Could not reconnect: fall back to a one-off connection so the
-                // request still has a chance rather than failing outright.
-                Err(_) => shared_retired = true,
+        if !use_dedicated_base {
+            // The guard is held across the reconnect on purpose. Releasing it to
+            // await the handshake let every request queued behind one retired h2
+            // connection observe `is_closed()` at once: all of them dialled a new
+            // origin connection, the last write won, and dropping the losers tore
+            // down connections other requests were already streaming bodies from
+            // — a truncated response under a 200 that was already captured. The
+            // factory never touches this lock, so holding it cannot deadlock.
+            let mut slot = sender.lock().await;
+            // Retire an h2 connection to a host we have since learned refuses
+            // ours, not only a closed one. Waiting for it to close meant the
+            // whole first page-load kept reloading over the connection that was
+            // already known bad; swapping immediately lets that same load
+            // recover instead of the one after it.
+            let refuses_our_h2 = slot.is_http2()
+                && tls_outbound::origin_force_http11_for_host(tls_identity_host);
+            if slot.is_closed() || refuses_our_h2 {
+                match dedicated_sender_factory(dedicated_route.clone()).await {
+                    Ok(replacement) => *slot = replacement,
+                    // Reconnect failed; fall through to a one-off connection so
+                    // the request still has a chance rather than failing here.
+                    Err(_) => shared_retired = true,
+                }
             }
         }
         let use_dedicated = use_dedicated_base || shared_retired;
@@ -2342,9 +2372,20 @@ async fn forward_mitm_https(
         } else {
             None
         };
-        let outbound_is_http2 = match dedicated_sender.as_ref() {
-            Some(dedicated) => dedicated.is_http2(),
-            None => sender.lock().await.is_http2(),
+        // The shared guard is taken once here and held through the send. It used
+        // to be re-acquired for is_http2 and again for send_request, so another
+        // request could replace the sender in between — and the request, already
+        // shaped for the protocol that was read, went out on a connection
+        // speaking the other one. hyper rejects that as an unsupported version.
+        let mut shared_guard = if use_dedicated {
+            None
+        } else {
+            Some(sender.lock().await)
+        };
+        let outbound_is_http2 = match (dedicated_sender.as_ref(), shared_guard.as_ref()) {
+            (Some(dedicated), _) => dedicated.is_http2(),
+            (None, Some(shared)) => shared.is_http2(),
+            (None, None) => false,
         };
         parts.version = if outbound_is_http2 && !websocket && !extended_websocket {
             Version::HTTP_2
@@ -2414,11 +2455,32 @@ async fn forward_mitm_https(
         )
         .with_rate_limit(control.upload_bytes_per_second);
         let outbound_request = Request::from_parts(parts, request_body);
-        let mut response = match dedicated_sender.as_mut() {
-            Some(dedicated) => dedicated.send_request(outbound_request).await,
-            None => sender.lock().await.send_request(outbound_request).await,
+        let mut response = match (dedicated_sender.as_mut(), shared_guard.as_mut()) {
+            (Some(dedicated), _) => dedicated.send_request(outbound_request).await,
+            (None, Some(shared)) => shared.send_request(outbound_request).await,
+            (None, None) => Err(hyper::Error::from(
+                hyper::client::conn::http1::Builder::new()
+                    .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(tokio::io::empty()))
+                    .await
+                    .expect_err("unreachable: no sender selected"),
+            )),
         }
-        .map_err(|error| format!("转发目标请求失败: {error}"))?;
+        .map_err(|error| {
+            // Some origins fingerprint the HTTP/2 connection itself and refuse
+            // ours, which surfaces here as a bare protocol error. Remember the
+            // host so the next connection to it speaks HTTP/1.1: measured
+            // against such an origin, h2 egress reload-looped the page 23 times
+            // in 20 seconds while h1 settled after one navigation. The current
+            // request still fails, but the retry the page is about to make
+            // succeeds instead of looping forever.
+            if outbound_is_http2 && tls_outbound::note_origin_http2_rejected(&host) {
+                format!(
+                    "转发目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
+                )
+            } else {
+                format!("转发目标请求失败: {error}")
+            }
+        })?;
         let upstream_status = response.status().as_u16() as i64;
         if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
             response.headers_mut().remove("sec-websocket-extensions");
@@ -4976,9 +5038,19 @@ fn strip_http2_forbidden_headers(headers: &mut HeaderMap) {
         "proxy-connection",
         "transfer-encoding",
         "upgrade",
-        "te",
     ] {
         headers.remove(name);
+    }
+    // `te` is legal over h2 when its value is exactly `trailers` (RFC 9113
+    // §8.2.2), and hyper keeps it for that reason. Dropping it unconditionally
+    // broke trailer negotiation for gRPC traffic and made our requests differ
+    // from the browser we are meant to look like.
+    let te_is_trailers = headers
+        .get("te")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("trailers"));
+    if !te_is_trailers {
+        headers.remove("te");
     }
 }
 
@@ -6151,11 +6223,21 @@ mod tests {
             "keep-alive",
             "transfer-encoding",
             "upgrade",
-            "te",
             "proxy-connection",
         ] {
             assert!(!headers.contains_key(gone), "{gone} is illegal over h2");
         }
+        // `te: trailers` is explicitly legal over h2 (RFC 9113 §8.2.2) and hyper
+        // keeps it. Stripping it broke gRPC trailer negotiation and made our
+        // requests differ from the browser we are meant to resemble.
+        assert_eq!(
+            headers.get("te").and_then(|value| value.to_str().ok()),
+            Some("trailers")
+        );
+        let mut other_te = HeaderMap::new();
+        other_te.insert("te", HeaderValue::from_static("gzip"));
+        strip_http2_forbidden_headers(&mut other_te);
+        assert!(!other_te.contains_key("te"), "only `trailers` is legal");
         // Names listed in `Connection:` go too — that is what the token list means.
         assert!(!headers.contains_key("x-hop"));
         // Everything the request actually needs survives. Dropping the cookie

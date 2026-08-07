@@ -147,10 +147,16 @@
     // on the most-probed function in the language. This registers itself in
     // nativeSources instead, so it reports the original's source about itself.
     if (!nativeSources.has(originalToString)) {
-      const replacement = function toString() {
-        const source = nativeSources.get(this);
-        return Reflect.apply(originalToString, source ?? this, arguments);
-      };
+      // Method shorthand, not a function expression: a function expression is a
+      // constructor and owns `prototype`, so the replacement reported three own
+      // properties where every native function reports two — a fresh tell on the
+      // most-probed function in the language.
+      const replacement = {
+        toString() {
+          const source = nativeSources.get(this);
+          return Reflect.apply(originalToString, source ?? this, arguments);
+        },
+      }.toString;
       nativeSources.set(replacement, originalToString);
       Object.defineProperty(Function.prototype, "toString", {
         configurable: true,
@@ -427,7 +433,9 @@
         configurable: cookieDescriptor.configurable,
         enumerable: cookieDescriptor.enumerable,
         get: cookieDescriptor.get,
-        set: registerNative(function set(value) {
+        // Same reason as above: a real accessor is not constructible and has no
+        // `prototype`, so the setter is defined as a method, not an expression.
+        set: registerNative({ set(value) {
           // The write goes first and unconditionally. Reporting the cookie used
           // to happen before it, so anything that went wrong while describing
           // the cookie meant the cookie was never stored at all — a challenge
@@ -440,7 +448,7 @@
             emit({ kind: "storage", name: "document.cookie.set", input: { name, value: text, attributes: attributes.map((item) => item.trim()) }, output: null });
           } catch {}
           return result;
-        }, cookieDescriptor.set),
+        } }.set, cookieDescriptor.set),
       });
     } catch {}
   }
