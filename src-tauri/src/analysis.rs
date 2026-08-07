@@ -21,10 +21,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 const MAX_ANALYSIS_REQUESTS: usize = 120;
-/// The prompt budget is derived from the configured context window. Packet JSON is
-/// dense ASCII, so two bytes per token is a deliberately conservative estimate, and
-/// the request payload only gets to claim half of the window — the rest is reserved
-/// for the system prompt, the request index and the tool-call transcript.
+/// Bytes of request payload allowed per token of the configured context window.
+///
+/// This is a budget divisor, not a claim that a token *is* two bytes. Packet JSON
+/// is dense ASCII, where a token averages nearer four bytes, so spending two
+/// leaves roughly half the window for everything the payload does not cover: the
+/// system prompt, the request index (`MAX_REQUEST_INDEX_BYTES`) and the
+/// tool-call transcript. UTF-8 Chinese bodies pack fewer bytes per token, which
+/// only widens that margin.
 const PROMPT_BYTES_PER_TOKEN: usize = 2;
 const MIN_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;

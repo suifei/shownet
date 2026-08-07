@@ -122,7 +122,14 @@
     try {
       Object.defineProperty(wrapped, WRAPPED, { value: true });
       Object.defineProperty(wrapped, "toString", { value: original.toString.bind(original) });
-      Object.defineProperty(owner, key, { ...Object.getOwnPropertyDescriptor(owner, key), value: wrapped });
+      // When the method is inherited, there is no own descriptor to copy and the
+      // defaults would make it non-writable, non-enumerable and non-configurable
+      // — so a later `obj.method = ...` by the page would fail, and the method
+      // would drop out of for...in and object spread. Install a plain data
+      // property instead, matching how an ordinary assignment behaves.
+      const existing = Object.getOwnPropertyDescriptor(owner, key)
+        ?? { writable: true, enumerable: true, configurable: true };
+      Object.defineProperty(owner, key, { ...existing, value: wrapped });
       return true;
     } catch { return false; }
   };

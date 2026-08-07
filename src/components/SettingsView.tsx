@@ -440,11 +440,21 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 
   const runtimeAccessRulesText = effectiveRuntimeAccessRules.join("\n");
 
+  // One effect per value. Mirroring three independent settings together means a
+  // change to any one of them re-runs the other two over whatever the user was
+  // editing — the access mode and the IP list stay local until 应用, so that
+  // would discard them. Splitting keeps each adoption tied to its own source.
   useEffect(() => {
     setLanEnabled(runtime.lanEnabled);
+  }, [runtime.lanEnabled]);
+
+  useEffect(() => {
     setAccessMode(effectiveRuntimeAccessMode);
+  }, [effectiveRuntimeAccessMode]);
+
+  useEffect(() => {
     setAccessRulesDraft(runtimeAccessRulesText);
-  }, [effectiveRuntimeAccessMode, runtimeAccessRulesText, runtime.lanEnabled]);
+  }, [runtimeAccessRulesText]);
 
   useEffect(() => {
     if (!runtime.transparentModeAvailable) setRoutingMode("proxy");
