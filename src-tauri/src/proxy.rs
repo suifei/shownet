@@ -1353,7 +1353,9 @@ async fn handle_connect(
         let upgraded = match on_upgrade.await {
             Ok(upgraded) => upgraded,
             Err(error) => {
-                error_sink(format!("CONNECT 升级失败: {error}"));
+                if !is_benign_connection_end(&error) {
+                    error_sink(format!("CONNECT 升级失败: {error}"));
+                }
                 return;
             }
         };
@@ -1361,7 +1363,10 @@ async fn handle_connect(
         let hello = match read_client_hello(&mut client).await {
             Ok(hello) => hello,
             Err(error) => {
-                error_sink(error);
+                let (report, message) = split_failure_report(error);
+                if report {
+                    error_sink(message);
+                }
                 return;
             }
         };
@@ -1883,10 +1888,10 @@ where
 /// sink sees one the typed reason is gone. This keeps the decision at the point
 /// that still holds the `hyper::Error`, rather than re-deriving it from message
 /// text — which would break the first time hyper rewords something.
-const UNREPORTED_FAILURE_PREFIX: &str = "\u{1}";
+pub(crate) const UNREPORTED_FAILURE_PREFIX: &str = "\u{1}";
 
 /// Splits a forwarding failure into "show the user?" and the message itself.
-fn split_failure_report(error: String) -> (bool, String) {
+pub(crate) fn split_failure_report(error: String) -> (bool, String) {
     match error.strip_prefix(UNREPORTED_FAILURE_PREFIX) {
         Some(rest) => (false, rest.to_string()),
         None => (true, error),
@@ -6684,6 +6689,25 @@ mod tests {
         assert!(
             !source.contains("WebSocket 消息失败: {error}"),
             "a bare map_err on a WebSocket step reports an ordinary disconnect"
+        );
+    }
+
+    #[test]
+    fn the_connect_setup_path_also_asks_before_reporting() {
+        // Two more producers on the way into a tunnel: the upgrade itself, and
+        // the ClientHello read. Both fail when a browser abandons a connection
+        // it pre-opened, which is routine.
+        let source = production_source();
+        assert!(
+            source.contains("if !is_benign_connection_end(&error) {\n                    error_sink(format!(\"CONNECT 升级失败"),
+            "an abandoned CONNECT upgrade must not be reported"
+        );
+        let at = source
+            .find("read_client_hello(&mut client).await")
+            .expect("the CONNECT path reads a ClientHello");
+        assert!(
+            source[at..at + 400].contains("split_failure_report(error)"),
+            "a ClientHello that never arrived must not be reported"
         );
     }
 
