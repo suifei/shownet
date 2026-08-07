@@ -2290,12 +2290,12 @@ async fn forward_mitm_https(
             .map(RuntimeMirrorRoute::identity_target)
             .map(|(host, _)| host)
             .unwrap_or(&host);
-        // WebSocket / extended CONNECT stay on dedicated HTTP/1.1; normal traffic may use shared h2.
-        let use_dedicated_base = authority_changed || extended_websocket;
-        // A shared connection the origin has retired cannot carry anything more,
-        // so those requests go out on a fresh dedicated one instead of failing.
-        let shared_retired = !use_dedicated_base && sender.lock().await.is_closed();
-        let use_dedicated = use_dedicated_base || shared_retired;
+        // WebSocket / extended CONNECT stay on dedicated HTTP/1.1; normal traffic
+        // may use shared h2. `websocket` and not just `extended_websocket`: a
+        // plain Connection: Upgrade handshake to the same authority went out on
+        // the shared h2 sender carrying Upgrade headers, which is the very
+        // "http2 error" this path exists to avoid.
+        let use_dedicated_base = authority_changed || websocket;
         let outbound_profile =
             tls_outbound::OutboundTlsProfile::parse(tls_fingerprint.outbound.profile.as_str());
         let dedicated_route = DedicatedRequestRoute {
@@ -2306,6 +2306,24 @@ async fn forward_mitm_https(
             prefer_http2: !extended_websocket && !websocket,
             tls_profile: outbound_profile,
         };
+        // A shared connection the origin has retired cannot carry anything more.
+        // Replacing it in place matters as much as routing around it: without
+        // the write-back every later request in the tunnel re-detected the same
+        // dead sender and opened its own TCP+TLS+h2 handshake for one request.
+        // On a page with dozens of subresources behind an origin that retires h2
+        // after a bounded stream count, that turns one multiplexed connection
+        // into N sequential ones — slow, and a connection pattern no browser
+        // produces, which is its own signal to whatever is scoring us.
+        let mut shared_retired = false;
+        if !use_dedicated_base && sender.lock().await.is_closed() {
+            match dedicated_sender_factory(dedicated_route.clone()).await {
+                Ok(replacement) => *sender.lock().await = replacement,
+                // Could not reconnect: fall back to a one-off connection so the
+                // request still has a chance rather than failing outright.
+                Err(_) => shared_retired = true,
+            }
+        }
+        let use_dedicated = use_dedicated_base || shared_retired;
         // The sender is chosen before the request is shaped, because how it must
         // be shaped — absolute vs origin-form URI, and whether h1's
         // connection-specific headers are legal — depends on the protocol of the
@@ -4360,6 +4378,12 @@ async fn forward_http(
     if websocket {
         parts.headers.remove("sec-websocket-extensions");
     }
+    // Same hazard as the MITM path: an explicit-proxy client on HTTP/1.1 sending
+    // to an h2 origin carries connection-specific headers hyper will not accept
+    // over h2, and rejects the whole request as a bare "http2 error".
+    if parts.version == Version::HTTP_2 {
+        strip_http2_forbidden_headers(&mut parts.headers);
+    }
     request_headers = request_headers_for_capture(
         &parts.headers,
         active_mirror_route,
@@ -6028,6 +6052,56 @@ mod tests {
 
     /// The form the h2 paths now send, and that `:authority` cannot drift from
     /// the Host header (both come from `host_header_authority`).
+    #[test]
+    fn every_h2_forward_path_strips_before_capture() {
+        // Two independent forwarding paths reach an h2 origin: the MITM tunnel
+        // and the explicit-proxy forward. Both can be handed an HTTP/1.1 request
+        // carrying connection-specific headers, and hyper rejects either as a
+        // bare "http2 error". The second path was missed the first time round.
+        // Counting occurrences would count this test's own string literal, so
+        // each call site is located by the code that follows it instead.
+        let source = include_str!("proxy.rs");
+        let guarded = source
+            .matches(
+                "strip_http2_forbidden_headers(&mut parts.headers);\n        }\n        request_headers = request_headers_for_capture(",
+            )
+            .count();
+        let guarded_outer = source
+            .matches(
+                "strip_http2_forbidden_headers(&mut parts.headers);\n    }\n    request_headers = request_headers_for_capture(",
+            )
+            .count();
+        assert_eq!(
+            guarded + guarded_outer,
+            2,
+            "both the MITM and explicit-proxy forward paths must strip before capture"
+        );
+    }
+
+    #[test]
+    fn a_plain_websocket_never_rides_the_shared_h2_connection() {
+        // `extended_websocket` alone left a plain Connection: Upgrade handshake
+        // to the same authority on the shared h2 sender, carrying Upgrade
+        // headers h2 forbids — the exact error the dedicated path avoids.
+        let source = include_str!("proxy.rs");
+        assert!(
+            source.contains("let use_dedicated_base = authority_changed || websocket;"),
+            "any websocket must take the dedicated HTTP/1.1 route"
+        );
+    }
+
+    #[test]
+    fn a_retired_shared_connection_is_replaced_not_merely_bypassed() {
+        // Routing around a dead sender without storing a live one back made
+        // every later request in the tunnel open its own TCP+TLS+h2 handshake
+        // for a single request.
+        let source = include_str!("proxy.rs");
+        assert!(
+            source.contains("Ok(replacement) => *sender.lock().await = replacement,"),
+            "the reconnected sender must be written back into the shared slot"
+        );
+    }
+
     #[test]
     fn h2_stripping_removes_exactly_what_http2_forbids() {
         // A client may reach the MITM over HTTP/1.1 while the origin negotiated
