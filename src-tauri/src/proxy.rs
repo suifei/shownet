@@ -2303,7 +2303,14 @@ async fn forward_mitm_https(
             connection_host: connection_host.to_string(),
             port: connection_port,
             tls_identity_host: tls_identity_host.to_string(),
-            prefer_http2: !extended_websocket && !websocket,
+            // The forced-h1 list has to survive here too. The shared connection
+            // consults it at handshake time, but a dedicated one replacing a
+            // retired shared connection would go back to preferring h2 and
+            // silently undo the CDN workaround for the rest of the tunnel —
+            // which is how those hosts' images broke in the first place.
+            prefer_http2: !extended_websocket
+                && !websocket
+                && !tls_outbound::origin_force_http11_for_host(tls_identity_host),
             tls_profile: outbound_profile,
         };
         // A shared connection the origin has retired cannot carry anything more.
@@ -6087,6 +6094,24 @@ mod tests {
         assert!(
             source.contains("let use_dedicated_base = authority_changed || websocket;"),
             "any websocket must take the dedicated HTTP/1.1 route"
+        );
+    }
+
+    #[test]
+    fn the_forced_http11_list_survives_a_reconnect() {
+        // The shared connection consults this list at handshake time. Once a
+        // retired connection is replaced by a dedicated one, the replacement has
+        // to consult it too — otherwise it goes back to preferring h2 and
+        // silently undoes the workaround these hosts were added for, which is
+        // exactly the breakage (images failing behind Baidu's static CDN) that
+        // put them on the list.
+        assert!(tls_outbound::origin_force_http11_for_host(
+            "pss.bdstatic.com"
+        ));
+        let source = include_str!("proxy.rs");
+        assert!(
+            source.contains("&& !tls_outbound::origin_force_http11_for_host(tls_identity_host),"),
+            "the dedicated route must honour the forced-h1 list"
         );
     }
 
