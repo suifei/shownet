@@ -17,6 +17,7 @@ import {
   FileSearch,
   FlaskConical,
   FolderOpen,
+  Info,
   Laptop,
   Menu,
   MoreHorizontal,
@@ -74,6 +75,7 @@ import {
 } from "./liveCaptureDisplay";
 import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatcher, createRequestQueryId, isRequestQueryCancelled, mergeRequestWindowItems, queryPreviewRequestList, REQUEST_LIST_WINDOW_SIZE, requiresLiveQueryRefresh } from "./requestList";
 import { formatBytes } from "./format";
+import { toastTone } from "./toastTone";
 import { defaultCaptureSessionName } from "./sessionPresentation";
 import {
   buildSetupSteps,
@@ -1909,12 +1911,18 @@ function App() {
           onExport={(format) => void exportSession(format)}
         />
       )}
-      {toast && (
-        <div className="toast" role="status">
-          <Check size={16} />
-          {toast}
-        </div>
-      )}
+      {toast && (() => {
+        // The tick used to be unconditional, so every failure in the app —
+        // "转发目标请求失败", "无法连接" — arrived wearing a success mark and the
+        // user had to read the sentence to discover otherwise.
+        const tone = toastTone(toast);
+        return (
+          <div className={`toast is-${tone}`} role={tone === "error" ? "alert" : "status"}>
+            {tone === "error" ? <CircleAlert size={16} /> : tone === "success" ? <Check size={16} /> : <Info size={16} />}
+            {toast}
+          </div>
+        );
+      })()}
       {sessionDrop.status !== "idle" && (
         <div className={`session-drop-overlay is-${sessionDrop.status}`} role="status" aria-live="polite">
           <span><FileArchive size={26} /></span>

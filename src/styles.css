@@ -4901,6 +4901,10 @@ kbd {
 }
 
 .toast svg { color: var(--success-ink); }
+/* The tick used to be unconditional, so failures arrived looking like wins. */
+.toast.is-error svg { color: var(--danger-ink); }
+.toast.is-error { border-color: var(--danger-border); }
+.toast.is-neutral svg { color: var(--text-muted); }
 
 .session-drop-overlay {
   position: fixed;
