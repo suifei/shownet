@@ -36,8 +36,26 @@ describe("embedded browser keep-alive (P2)", () => {
 
   it("user stop still calls stop_proxy_browser while keep-alive remains mounted", async () => {
     const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
-    // Toggle CDP button path when already running.
-    assert.match(browser, /if \(proxyBrowser\?\.running\) \{[\s\S]*?await invoke\("stop_proxy_browser"\)/);
+
+    // These two live in different functions: the toggle guard calls
+    // stopProxyChrome(), which is where the invoke happens. A single
+    // `if (proxyBrowser?.running) {[\s\S]*?await invoke(...)` span appears to
+    // tie them together but does not — it starts at the *first* of ~24
+    // `proxyBrowser?.running` occurrences and runs ~385 lines to the only
+    // `await invoke`, crossing several functions. Deleting the toggle guard
+    // entirely left that assertion green. Pin each function separately.
+    const body = (name: string) => {
+      const at = browser.indexOf(`async function ${name}(`);
+      assert.notEqual(at, -1, `${name} is gone`);
+      const end = browser.indexOf("\n  }", at);
+      assert.notEqual(end, -1, `${name} has no closing brace at function indent`);
+      return browser.slice(at, end);
+    };
+
+    // Toggle CDP button path when already running: stop, and do not fall
+    // through to a relaunch.
+    assert.match(body("launchProxyChrome"), /if \(proxyBrowser\?\.running\) \{\s*await stopProxyChrome\(\);\s*return;\s*\}/);
+    assert.match(body("stopProxyChrome"), /await invoke\("stop_proxy_browser"\)/);
     // Capture-stop path.
     assert.match(browser, /void invoke\("stop_proxy_browser"\)\.catch\(\(error\) => setBrowserError/);
   });
