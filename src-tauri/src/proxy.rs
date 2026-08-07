@@ -4474,10 +4474,23 @@ async fn forward_http(
         },
     )
     .with_rate_limit(control.upload_bytes_per_second);
+    let outbound_is_http2 = parts.version == Version::HTTP_2;
     let mut response = sender
         .send_request(Request::from_parts(parts, body))
         .await
-        .map_err(|error| format!("目标请求失败: {error}"))?;
+        .map_err(|error| {
+            // The explicit-proxy path consults the learned list when it picks a
+            // protocol, but never contributed to it — so a client reaching an
+            // h2-refusing origin this way kept retrying h2 forever while the
+            // MITM path had already learned better. Both paths teach it now.
+            if outbound_is_http2 && tls_outbound::note_origin_http2_rejected(tls_identity_host) {
+                format!(
+                    "目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
+                )
+            } else {
+                format!("目标请求失败: {error}")
+            }
+        })?;
     if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
         response.headers_mut().remove("sec-websocket-extensions");
         let response_headers = headers_to_entries(response.headers());
@@ -6154,6 +6167,27 @@ mod tests {
             guarded + guarded_outer,
             2,
             "both the MITM and explicit-proxy forward paths must strip before capture"
+        );
+    }
+
+    #[test]
+    fn both_forward_paths_teach_the_h2_rejection_list() {
+        // Consulting the list without contributing to it means one path keeps
+        // retrying h2 against an origin the other has already given up on.
+        // Matched by argument, not by count: counting would include this test's
+        // own string literals, which is how the first version of it failed.
+        let source = include_str!("proxy.rs");
+        assert!(
+            source.contains("note_origin_http2_rejected(&host)"),
+            "the MITM path must record refusals"
+        );
+        assert!(
+            source.contains("note_origin_http2_rejected(tls_identity_host)"),
+            "the explicit-proxy path must record refusals"
+        );
+        assert!(
+            source.contains("origin_force_http11_for_host(tls_identity_host)"),
+            "and both must consult the list when choosing a protocol"
         );
     }
 
