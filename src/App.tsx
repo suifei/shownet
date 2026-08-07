@@ -76,6 +76,7 @@ import {
 import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatcher, createRequestQueryId, isRequestQueryCancelled, mergeRequestWindowItems, queryPreviewRequestList, REQUEST_LIST_WINDOW_SIZE, requiresLiveQueryRefresh } from "./requestList";
 import { formatBytes } from "./format";
 import { toastTone } from "./toastTone";
+import { createProxyErrorQueue, type ProxyErrorQueue } from "./proxyErrorQueue";
 import { defaultCaptureSessionName } from "./sessionPresentation";
 import {
   buildSetupSteps,
@@ -415,7 +416,7 @@ function App() {
   const liveDisplayPausedRef = useRef(false);
   const liveDisplaySyncingRef = useRef(false);
   const liveDisplaySyncBufferRef = useRef(new Map<string, { item: RequestListItem; created: boolean }>());
-  const lastProxyErrorToastAt = useRef(0);
+  const proxyErrorQueueRef = useRef<ProxyErrorQueue | null>(null);
 
   useDismissibleLayer(sessionToolsOpen, sessionToolsRef, () => setSessionToolsOpen(false));
 
@@ -900,6 +901,14 @@ function App() {
       .then((snapshot) => { if (!disposed) setBreakpointQueue(snapshot); })
       .catch((error) => { if (!disposed) setToast(`读取人工断点失败：${String(error)}`); });
 
+    const proxyErrors = createProxyErrorQueue({
+      show: (message) => setToast(message),
+      now: () => Date.now(),
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancel: (handle) => window.clearTimeout(handle),
+    });
+    proxyErrorQueueRef.current = proxyErrors;
+
     const subscribe = async () => {
       void refreshBreakpointQueue();
       const listeners = await Promise.all([
@@ -969,13 +978,11 @@ function App() {
         }),
         listen("capture://breakpoints-changed", () => void refreshBreakpointQueue()),
         listen<string>("capture://proxy-error", (event) => {
-          const message = String(event.payload ?? "").trim();
-          if (!message || disposed) return;
-          // Surface full egress / connect failures (e.g. 连接 host:port 超时) without flooding.
-          const now = Date.now();
-          if (now - lastProxyErrorToastAt.current < 2500) return;
-          lastProxyErrorToastAt.current = now;
-          setToast(message.length > 220 ? `${message.slice(0, 220)}…` : message);
+          if (disposed) return;
+          // Surface full egress / connect failures (e.g. 连接 host:port 超时)
+          // without flooding — and without dropping one failure because a
+          // different one happened to arrive moments earlier.
+          proxyErrors.push(String(event.payload ?? ""));
         }),
       ]);
       if (disposed) listeners.forEach((unlisten) => unlisten());
@@ -985,6 +992,9 @@ function App() {
     subscribe().catch((error) => setToast(`事件订阅失败：${String(error)}`));
     return () => {
       disposed = true;
+      // A held failure must not fire into a view that is gone.
+      proxyErrors.dispose();
+      if (proxyErrorQueueRef.current === proxyErrors) proxyErrorQueueRef.current = null;
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [activeSessionId, bufferLiveDisplaySyncEntry, liveDisplayController, refreshRequests, refreshSessions, requestListBatcher, scheduleSessionRefresh]);
