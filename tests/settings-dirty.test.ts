@@ -102,7 +102,18 @@ describe("settings surfaces its unsaved state", () => {
 
   it("treats a backend push as saved state, not a local edit", () => {
     assert.match(settings, /\/\/ A push from the backend is the saved state, not a local edit\./);
-    assert.match(settings, /\/\/ Runtime is authoritative for this flag, so mirroring it is not an edit\./);
+    assert.match(settings, /mirroring it\s+\/\/ is not an edit\./);
+  });
+
+  it("does not let a status refresh revert a pending takeover toggle", () => {
+    // `active` and `recoveryPending` are runtime readings and may be adopted on
+    // any refresh; `enabled` is a saved preference the user may be editing, so
+    // its effect must depend on that preference alone.
+    assert.match(
+      settings,
+      /setSystemProxy\(\(current\) => \(\{ \.\.\.current, enabled: runtime\.systemProxyEnabled \}\)\);[\s\S]*?\}, \[commitBaseline, runtime\.systemProxyEnabled\]\);/,
+      "the enabled mirror must not re-run on unrelated runtime changes",
+    );
   });
 });
 

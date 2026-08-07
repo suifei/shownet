@@ -2940,7 +2940,10 @@ fn system_proxy_status(state: &AppState) -> Result<SystemProxySettings, String> 
     Ok(SystemProxySettings {
         enabled: preferences.enabled,
         active: runtime.active,
-        recovery_pending: state.storage.has_system_proxy_recovery()?,
+        recovery_pending: system_proxy::recovery_is_pending(
+            runtime.active,
+            state.storage.has_system_proxy_recovery()?,
+        ),
         bypass: preferences.bypass,
         last_error: runtime.last_error.clone(),
     })

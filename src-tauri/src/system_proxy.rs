@@ -44,6 +44,16 @@ pub struct WindowsProxySnapshot {
     pub auto_config_url: Option<String>,
 }
 
+/// Whether a stored snapshot represents a restore somebody still owes.
+///
+/// A snapshot exists for the whole time the takeover is active — that is how
+/// the user's original settings get put back on stop or exit. Reporting the
+/// mere presence of one as a pending recovery raised an alarm on every healthy
+/// capture, next to a button that would have undone the live takeover.
+pub fn recovery_is_pending(active: bool, has_recovery_record: bool) -> bool {
+    !active && has_recovery_record
+}
+
 pub fn capture_snapshot() -> Result<SystemProxySnapshot, String> {
     #[cfg(target_os = "macos")]
     {
@@ -397,7 +407,10 @@ fn set_registry_value(name: &str, kind: &str, value: &str) -> Result<(), String>
 
 #[cfg(target_os = "windows")]
 fn delete_registry_value(name: &str) {
-    let _ = Command::new("reg.exe")
+    // Deleting a value that was never set is a normal outcome here, so the exit
+    // status is discarded; `apply_windows` re-reads the key and fails loudly if
+    // a value it needed gone is still there.
+    let _ = configured_command("reg.exe")
         .args(["delete", INTERNET_SETTINGS_KEY, "/v", name, "/f"])
         .output();
 }
@@ -411,16 +424,36 @@ fn notify_windows_proxy_change() -> Result<(), String> {
 
     let changed =
         unsafe { InternetSetOptionW(null(), INTERNET_OPTION_SETTINGS_CHANGED, null(), 0) };
-    let refreshed = unsafe { InternetSetOptionW(null(), INTERNET_OPTION_REFRESH, null(), 0) };
-    if changed == 0 || refreshed == 0 {
-        Err("Windows 已写入代理设置，但系统刷新通知失败".to_string())
-    } else {
-        Ok(())
+    // INTERNET_OPTION_REFRESH re-reads the settings we just broadcast. It is a
+    // best-effort nudge — on a process holding no WinINET handle it can report
+    // failure while the broadcast itself landed, and treating that as fatal
+    // used to roll the registry back and abort the whole capture start.
+    let _ = unsafe { InternetSetOptionW(null(), INTERNET_OPTION_REFRESH, null(), 0) };
+    if changed == 0 {
+        return Err("Windows 已写入代理设置，但系统刷新通知失败".to_string());
     }
+    Ok(())
+}
+
+/// Applying the proxy shells out to `reg.exe` four to six times. The app is a
+/// GUI subsystem binary, so without this flag every one of those spawns pops a
+/// console window on screen.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configured_command(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn command_output(program: &str, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = configured_command(program)
         .args(arguments)
         .output()
         .map_err(|error| format!("无法运行 {program}: {error}"))?;
@@ -533,6 +566,16 @@ fn windows_registry_value(output: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holding_the_proxy_is_not_an_outstanding_recovery() {
+        // The snapshot we are standing on is the takeover working as designed.
+        assert!(!recovery_is_pending(true, true));
+        // Only a leftover from a run that never restored is owed.
+        assert!(recovery_is_pending(false, true));
+        assert!(!recovery_is_pending(false, false));
+        assert!(!recovery_is_pending(true, false));
+    }
 
     #[test]
     fn parses_macos_proxy_state_without_touching_system_settings() {

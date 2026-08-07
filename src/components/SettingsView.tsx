@@ -402,18 +402,32 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   }, [onNotify]);
 
   useEffect(() => {
+    // `active` and `recoveryPending` are pure runtime readings, so they are
+    // always adopted. `enabled` is a saved preference the user can also be
+    // editing right now — overwriting it here used to throw away a pending
+    // toggle without a word, which is how a takeover the user had switched on
+    // ended up never happening.
     setSystemProxy((current) => ({
       ...current,
-      enabled: runtime.systemProxyEnabled,
       active: runtime.systemProxyActive,
       recoveryPending: runtime.systemProxyRecoveryPending,
     }));
-    // Runtime is authoritative for this flag, so mirroring it is not an edit.
+  }, [runtime.systemProxyActive, runtime.systemProxyRecoveryPending]);
+
+  useEffect(() => {
+    // A change in the saved preference is a push from the backend, so mirroring it
+    // is not an edit. It fires only when that saved value actually changes, which
+    // is what keeps a status refresh from silently reverting a pending toggle.
+    setSystemProxy((current) => ({ ...current, enabled: runtime.systemProxyEnabled }));
     setSystemProxyBypass((bypass) => {
       commitBaseline("capture.routing", { enabled: runtime.systemProxyEnabled, bypass });
       return bypass;
     });
-  }, [commitBaseline, runtime.systemProxyActive, runtime.systemProxyEnabled, runtime.systemProxyRecoveryPending]);
+  }, [commitBaseline, runtime.systemProxyEnabled]);
+
+  // The preference only reaches the backend through 保存路由设置; until it does,
+  // starting a capture reads the old value and quietly takes nothing over.
+  const systemProxyTakeoverUnsaved = systemProxy.enabled !== runtime.systemProxyEnabled;
 
   const runtimeAccessRulesText = effectiveRuntimeAccessRules.join("\n");
 
@@ -1607,8 +1621,10 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 {runtime.transparentModeAvailable && <button className={routingMode === "transparent" ? "is-active" : ""} onClick={() => setRoutingMode("transparent")} title="透明导流"><span><Network size={19} /></span><div><strong>透明模式</strong><small>TUN 自动导流到本机代理</small></div>{routingMode === "transparent" && <Check size={15} />}</button>}
               </div>
               {routingMode === "transparent" && <div className="settings-notice"><CircleAlert size={15} /><span>TUN 负责透明导流，HTTPS 内容仍由本地 CA 与 MITM 解密。</span></div>}
-              <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxy((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
-              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError || "检测到尚未完成的系统代理恢复记录"}</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
+              <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : systemProxyTakeoverUnsaved ? "尚未保存 · 保存路由设置后，下次启动抓包才会接管" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxy((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
+              {systemProxyTakeoverUnsaved && <div className="settings-notice"><CircleAlert size={15} /><span>接管开关改动尚未保存，点击下方「保存路由设置」后才会在启动抓包时生效。</span></div>}
+              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>检测到尚未完成的系统代理恢复记录</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
+              {!systemProxy.recoveryPending && systemProxy.lastError && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError}</span></div>}
               {/* These were `readOnly` inputs, which read as "editable but
                   broken" — there is no command anywhere that changes the
                   listener address or port. Present them as the facts they are. */}
