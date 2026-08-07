@@ -1903,6 +1903,38 @@ fn split_failure_report(error: String) -> (bool, String) {
 /// What is excluded matters as much: a refused or untrusted certificate arrives
 /// as a fatal alert (`InvalidData`), a dead route as `TimedOut` or
 /// `ConnectionRefused`. Those stay visible.
+/// Whether a WebSocket ended without a closing handshake.
+///
+/// The graceful endings are already handled in `relay_websocket` — a `None`
+/// from the stream and a `Close` frame both return `Ok`. What lands here is the
+/// abrupt one: a tab closed or reloaded while a socket was live, which is the
+/// ordinary way a page's WebSocket dies. tungstenite reports it as
+/// `ResetWithoutClosingHandshake` or as a reset underneath.
+///
+/// A protocol violation or a too-large frame is a real fault and still reports.
+fn is_benign_websocket_end(error: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::error::ProtocolError;
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::ConnectionClosed | Error::AlreadyClosed => true,
+        Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        Error::Io(io) => is_benign_io_end(io),
+        _ => false,
+    }
+}
+
+/// One step of a WebSocket relay: `Ok(None)` means the peer simply went away.
+fn websocket_step<T>(
+    result: Result<T, tokio_tungstenite::tungstenite::Error>,
+    context: &str,
+) -> Result<Option<T>, String> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if is_benign_websocket_end(&error) => Ok(None),
+        Err(error) => Err(format!("{context}: {error}")),
+    }
+}
+
 fn is_benign_io_end(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -4258,14 +4290,20 @@ where
                     let _ = upstream_write.close().await;
                     return Ok(());
                 };
-                let message = message.map_err(|error| format!("读取客户端 WebSocket 消息失败: {error}"))?;
+                let Some(message) = websocket_step(message, "读取客户端 WebSocket 消息失败")? else {
+                    return Ok(());
+                };
                 capture.record("client_to_server", &message);
                 match message {
                     Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
-                        upstream_write.send(message).await.map_err(|error| format!("转发客户端 WebSocket 消息失败: {error}"))?;
+                        if websocket_step(upstream_write.send(message).await, "转发客户端 WebSocket 消息失败")?.is_none() {
+                            return Ok(());
+                        }
                     }
                     Message::Ping(_) => {
-                        client_write.flush().await.map_err(|error| format!("回复客户端 WebSocket Ping 失败: {error}"))?;
+                        if websocket_step(client_write.flush().await, "回复客户端 WebSocket Ping 失败")?.is_none() {
+                            return Ok(());
+                        }
                     }
                     Message::Pong(_) => {}
                     Message::Close(frame) => {
@@ -4281,14 +4319,20 @@ where
                     let _ = client_write.close().await;
                     return Ok(());
                 };
-                let message = message.map_err(|error| format!("读取上游 WebSocket 消息失败: {error}"))?;
+                let Some(message) = websocket_step(message, "读取上游 WebSocket 消息失败")? else {
+                    return Ok(());
+                };
                 capture.record("server_to_client", &message);
                 match message {
                     Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
-                        client_write.send(message).await.map_err(|error| format!("转发上游 WebSocket 消息失败: {error}"))?;
+                        if websocket_step(client_write.send(message).await, "转发上游 WebSocket 消息失败")?.is_none() {
+                            return Ok(());
+                        }
                     }
                     Message::Ping(_) => {
-                        upstream_write.flush().await.map_err(|error| format!("回复上游 WebSocket Ping 失败: {error}"))?;
+                        if websocket_step(upstream_write.flush().await, "回复上游 WebSocket Ping 失败")?.is_none() {
+                            return Ok(());
+                        }
                     }
                     Message::Pong(_) => {}
                     Message::Close(frame) => {
@@ -6568,6 +6612,79 @@ mod tests {
         let (report, message) = split_failure_report("转发目标请求失败: http2 error".to_string());
         assert!(report, "a protocol failure must still be reported");
         assert_eq!(message, "转发目标请求失败: http2 error");
+    }
+
+    #[test]
+    fn a_tab_closed_on_a_live_websocket_is_not_a_relay_failure() {
+        use tokio_tungstenite::tungstenite::error::ProtocolError;
+        use tokio_tungstenite::tungstenite::Error;
+
+        // Closing or reloading a page with an open socket produces exactly
+        // these. relay_websocket already returns Ok for the graceful endings —
+        // a None from the stream and a Close frame — so what reached the user
+        // was only ever the ordinary abrupt one.
+        for error in [
+            Error::ConnectionClosed,
+            Error::AlreadyClosed,
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(
+                is_benign_websocket_end(&error),
+                "a socket dying with the page is not a failure: {error:?}"
+            );
+        }
+
+        // A peer that violates the protocol is a real fault worth reporting.
+        for error in [
+            Error::Protocol(ProtocolError::WrongHttpMethod),
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+        ] {
+            assert!(
+                !is_benign_websocket_end(&error),
+                "a protocol violation must still report: {error:?}"
+            );
+        }
+
+        // The step helper turns that distinction into control flow: None ends
+        // the relay quietly, Err carries the message the user should see.
+        assert_eq!(
+            websocket_step(Ok::<u8, Error>(7), "读取客户端 WebSocket 消息失败").unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            websocket_step(
+                Err::<u8, Error>(Error::ConnectionClosed),
+                "读取客户端 WebSocket 消息失败"
+            )
+            .unwrap(),
+            None
+        );
+        let reported = websocket_step(
+            Err::<u8, Error>(Error::Protocol(ProtocolError::WrongHttpMethod)),
+            "读取客户端 WebSocket 消息失败",
+        )
+        .unwrap_err();
+        assert!(
+            reported.starts_with("读取客户端 WebSocket 消息失败: "),
+            "{reported}"
+        );
+    }
+
+    #[test]
+    fn every_websocket_step_goes_through_the_classifier() {
+        // Six places move a frame or a flush: two reads, two sends, two pings.
+        // One left on a bare map_err puts the noise back for that direction.
+        let source = production_source();
+        assert_eq!(
+            source.matches("websocket_step(").count(),
+            6,
+            "every WebSocket step must ask whether the peer simply went away"
+        );
+        assert!(
+            !source.contains("WebSocket 消息失败: {error}"),
+            "a bare map_err on a WebSocket step reports an ordinary disconnect"
+        );
     }
 
     #[test]
