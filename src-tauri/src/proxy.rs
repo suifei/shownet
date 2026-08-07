@@ -10847,6 +10847,11 @@ mod tests {
             seen.is_empty(),
             "a request the client gave up on is not a failure, but these were reported: {seen:?}"
         );
+        // This request *did* reach the origin, and nothing records it: the
+        // client's disconnect drops the whole service future before the capture
+        // runs. Also pre-existing, and not something the silencing changed — but
+        // worth knowing that a cancelled request a browser would still show in
+        // its network panel leaves no row here.
     }
 
     #[tokio::test]
@@ -10954,6 +10959,12 @@ mod tests {
             seen.is_empty(),
             "an abandoned tunnel is not a failure, but these were reported: {seen:?}"
         );
+        // Nothing is recorded for a tunnel that carried no bytes: the hello is
+        // read before the first capture_connect_record, so this never reached
+        // one. That predates the silencing — but it does mean an abandoned
+        // tunnel now leaves no trace at all, where before it left a toast.
+        // Correct for a pre-opened socket that was never used; see the note on
+        // the request case below for where it is less obviously right.
     }
 
     #[tokio::test]
