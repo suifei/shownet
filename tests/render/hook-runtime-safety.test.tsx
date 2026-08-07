@@ -59,10 +59,21 @@ beforeEach(() => {
 describe("reporting never escapes into the page", () => {
   it("keeps a storage write working when the value cannot be described", () => {
     installRuntime();
+    const seen: string[] = [];
+    Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", {
+      configurable: true,
+      value: (payload: string) => seen.push(payload),
+    });
 
     // The regression: describing the value threw, and the throw travelled out
     // of the hook into the site's own setItem call.
     expect(() => localStorage.setItem("token", unwalkable() as unknown as string)).not.toThrow();
+    expect(localStorage.getItem("token")).not.toBeNull();
+
+    // Proof the hook was actually in the path. Without this the test passes with
+    // no runtime installed at all — a native setItem does not throw either.
+    const names = seen.map((entry) => JSON.parse(entry)).map((event) => event.name);
+    expect(names).toContain("Storage.prototype.setItem");
   });
 
   it("keeps a storage write working when the transport fails", () => {
@@ -71,6 +82,14 @@ describe("reporting never escapes into the page", () => {
 
     expect(() => localStorage.setItem("token", "kept")).not.toThrow();
     expect(localStorage.getItem("token")).toBe("kept");
+
+    // When the bridge throws, emit falls through to the in-page queue. Finding
+    // the event there proves the hook ran rather than never having been
+    // installed — which is otherwise indistinguishable from a native write.
+    const queued = (globalThis as Record<string, unknown>).__SHOWNET_HOOK_QUEUE__ as
+      | Array<{ name?: string }>
+      | undefined;
+    expect(queued?.map((event) => event.name)).toContain("Storage.prototype.setItem");
   });
 
   it("swallows both failures at once rather than surfacing either", () => {
