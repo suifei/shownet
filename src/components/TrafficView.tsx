@@ -8,7 +8,6 @@ import {
   Braces,
   Globe2 as Browser,
   Check,
-  CheckCircle2,
   ChevronDown,
   CircleAlert,
   CircleDot,
@@ -22,7 +21,6 @@ import {
   FolderTree,
   GitCompareArrows,
   GripVertical,
-  Laptop,
   ListFilter,
   ListRestart,
   LoaderCircle,
@@ -37,7 +35,6 @@ import {
   Play,
   Plus,
   Radio,
-  Route,
   RotateCcw,
   Save,
   Search,
@@ -47,9 +44,7 @@ import {
   Strikethrough,
   StickyNote,
   Tag,
-  Terminal,
   Trash2,
-  Wifi,
   X,
 } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -84,7 +79,7 @@ import {
 import { headerValue, INSPECTOR_PREFERENCES_KEY, legacyBodyMetadata, parseCookies, parseInspectorPreferences, parseQueryEntries, timingEvidence, type InspectorLayout } from "../requestInspector";
 import { initialRequestSelection, requestSelectionReducer } from "../requestSelection";
 import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
-import { nextRequestListWindowOffset, REQUEST_LIST_WINDOW_SIZE, shouldChangeRequestListWindow } from "../requestList";
+import { nextRequestListWindowOffset, shouldChangeRequestListWindow } from "../requestList";
 import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
 import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
 import { classifyTrafficStatus, looksLikeProxyErrorBody } from "../trafficStatus";
@@ -1688,17 +1683,6 @@ function TlsFingerprintDetail({ fingerprint }: { fingerprint: NonNullable<Reques
       )}
       <details className="fingerprint-raw"><summary>查看原始指纹串</summary><code>{inbound.ja3Raw}</code><code>{inbound.ja4Raw}</code>{http2 && <code>{http2.canonical}</code>}</details>
     </div>
-  );
-}
-
-function HeaderSection({ title, headers }: { title: string; headers: Array<{ name: string; value: string }> }) {
-  return (
-    <section className="header-section">
-      <h3>{title}<span>{headers.length}</span></h3>
-      <dl>
-        {headers.map((header) => <div key={`${title}-${header.name}`}><dt>{header.name}</dt><dd>{header.value}</dd></div>)}
-      </dl>
-    </section>
   );
 }
 

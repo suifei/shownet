@@ -15,7 +15,6 @@ import {
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
   CAPABILITY_CATALOG,
-  CONSOLE_TAB_GUIDES,
   WORKFLOW_STAGES,
   honestyBanner,
   suggestWorkflowStage,

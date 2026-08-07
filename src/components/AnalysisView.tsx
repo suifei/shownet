@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clock3, Code2, Copy, Download, FileCode2, FolderOpen, Gauge, GitBranch, History, KeyRound, LoaderCircle, MessageSquareText, Package, Play, SearchCheck, Send, Settings2, ShieldCheck, Sparkles, Square, WandSparkles, Zap } from "lucide-react";
+import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clock3, Copy, FolderOpen, GitBranch, History, KeyRound, LoaderCircle, MessageSquareText, Package, Play, SearchCheck, Send, Settings2, ShieldCheck, Sparkles, Square, Zap } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";

@@ -1,6 +1,5 @@
 import {
   Activity,
-  Bot,
   Braces,
   Globe2 as Browser,
   Check,
@@ -18,7 +17,6 @@ import {
   FlaskConical,
   FolderOpen,
   Info,
-  Laptop,
   Menu,
   MoreHorizontal,
   Network,

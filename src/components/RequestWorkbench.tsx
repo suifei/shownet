@@ -117,7 +117,7 @@ export function RequestWorkbench({ sessionId, selected, breakpointCount, initial
             {mode === "replay" && <ReplayPanel sessionId={sessionId} selected={selected} onOpenRequest={onOpenRequest} />}
             {mode === "diff" && <DiffPanel details={details} />}
             {mode === "lab" && <LabPanel sessionId={sessionId} selected={selected} details={details} autoCreateFromSelection={autoCreateFromSelection} initialDraftId={requestedDraftId} onSelectCapture={onBack} />}
-            {mode === "collections" && <CollectionPanel sessionId={sessionId} selected={selected} onOpenDraft={(draftId) => { setRequestedDraftId(draftId); setMode("lab"); }} />}
+            {mode === "collections" && <CollectionPanel selected={selected} onOpenDraft={(draftId) => { setRequestedDraftId(draftId); setMode("lab"); }} />}
             {mode === "environment" && <EnvironmentPanel />}
             {mode === "rules" && <RulesPanel selected={selected} details={details} />}
           </>}
@@ -592,7 +592,7 @@ interface CollectionDefaultsDraft {
   defaultEnvironmentId?: string;
 }
 
-function CollectionPanel({ sessionId, selected, onOpenDraft }: { sessionId: string; selected: RequestListItem[]; onOpenDraft: (draftId: string) => void }) {
+function CollectionPanel({ selected, onOpenDraft }: { selected: RequestListItem[]; onOpenDraft: (draftId: string) => void }) {
   const { confirm, dialog } = useConfirm();
   const [workspace, setWorkspace] = useState<RequestCollectionWorkspace>(emptyCollectionWorkspace());
   const [selectedCollectionId, setSelectedCollectionId] = useState<string>();
@@ -1717,10 +1717,11 @@ function bodyFromRunSnapshot(body: unknown, bodyType: unknown): Pick<RequestDraf
   return { body: typeof body === "string" ? body : JSON.stringify(body ?? ""), bodyType: type };
 }
 
+// Confirmation for the destructive action lives with the handler: the parent's
+// clearCookies asks before emptying the jar. A second useConfirm here rendered a
+// dialog that nothing ever opened, which reads as if this component confirms.
 function CookieJarManager({ cookies, onDelete, onClear }: { cookies: RequestCookieRecord[]; onDelete: (cookie: RequestCookieRecord) => void; onClear: () => void }) {
-  const { confirm, dialog } = useConfirm();
   return <section className="lab-cookie-jar">
-    {dialog}
     <header><div><Cookie size={14} /><strong>Cookie Jar</strong><span>{cookies.length}</span></div><button onClick={onClear} disabled={!cookies.length} title="清空 Cookie Jar"><Trash2 size={13} /></button></header>
     <div className="lab-cookie-list">{cookies.map((cookie) => <div key={`${cookie.domain}\n${cookie.path}\n${cookie.name}`}>
       <span><strong>{cookie.name}</strong><small>{cookie.domain}{cookie.path}</small></span>

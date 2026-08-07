@@ -95,8 +95,17 @@ describe("diff mode explains itself", () => {
 describe("confirmations live in the app", () => {
   it("replaces every native confirm", () => {
     assert.doesNotMatch(workbench, /window\.confirm/);
-    assert.equal((workbench.match(/useConfirm\(\)/g) ?? []).length, 6, "each panel owns a controller");
-    assert.equal((workbench.match(/\{dialog\}/g) ?? []).length, 6, "and renders it");
+    const controllers = (workbench.match(/useConfirm\(\)/g) ?? []).length;
+    assert.equal(controllers, 5, "each panel that asks owns a controller");
+    assert.equal((workbench.match(/\{dialog\}/g) ?? []).length, controllers, "and renders it");
+    // The count alone let a controller exist that nothing ever opened: the
+    // Cookie Jar panel held one and rendered its dialog while both its buttons
+    // called their callbacks directly, so the code read as if it confirmed.
+    // Confirmation for the destructive action lives with the handler instead.
+    assert.ok(
+      (workbench.match(/await confirm\(/g) ?? []).length >= controllers,
+      "a controller nobody opens is a dialog that never appears",
+    );
   });
 
   it("resolves to false on cancel, Escape and backdrop", () => {
