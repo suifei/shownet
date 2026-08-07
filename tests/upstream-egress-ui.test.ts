@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 describe("upstream egress probe and env import (P1)", () => {
@@ -49,19 +49,46 @@ describe("egress ignores the ambient environment", () => {
     // so each builder has to say otherwise. It bit hardest here: ShowNet points
     // the system proxy at itself, so an inherited env proxy can route the app's
     // own requests back through its capture proxy.
-    for (const file of ["external_mcp.rs", "analysis.rs", "request_replay.rs"]) {
-      const source = await readFile(
-        new URL(`../src-tauri/src/${file}`, import.meta.url),
-        "utf8",
-      );
+    // Checking only that *a* builder in each file says `.no_proxy()` would let a
+    // second, unguarded client sit beside a guarded one — browser.rs has two. So
+    // every builder outside `mod tests` is checked, across every .rs in the
+    // crate rather than a hand-listed few: an egress client added in a new
+    // module is exactly what a fixed list would miss.
+    const dir = new URL("../src-tauri/src/", import.meta.url);
+    const files = (await readdir(dir)).filter((name) => name.endsWith(".rs")).sort();
+    assert.ok(files.length > 5, "expected to find the crate's sources");
+
+    let checked = 0;
+    for (const file of files) {
+      const source = await readFile(new URL(file, dir), "utf8");
       const testModuleAt = source.indexOf("\n#[cfg(test)]\nmod tests {");
-      const production = testModuleAt > 0 ? source.slice(0, testModuleAt) : source;
-      assert.match(
-        production,
-        /Client::builder\(\)\s*(?:\/\/[^\n]*\n\s*)*\.no_proxy\(\)/,
-        `${file} must clear env proxies before configuring egress`,
+      // If a file has tests but the marker no longer matches, the slice below
+      // would silently become the whole file and a builder inside `mod tests`
+      // could stand in for a production one. Fail loudly instead.
+      assert.ok(
+        testModuleAt > 0 || !source.includes("#[cfg(test)]"),
+        `${file}: has tests but the module marker did not match; the slice would be a no-op`,
       );
+      // Blank out line comments but keep their newlines, so reported line
+      // numbers stay true. Each `.no_proxy()` carries a long rationale comment
+      // above it, which any fixed lookahead window would have to guess at.
+      const production = (testModuleAt > 0 ? source.slice(0, testModuleAt) : source).replace(
+        /^([ \t]*)\/\/[^\n]*$/gm,
+        "$1",
+      );
+
+      const builder = /(?:reqwest::)?Client::builder\(\)/g;
+      for (let hit = builder.exec(production); hit; hit = builder.exec(production)) {
+        const line = production.slice(0, hit.index).split("\n").length;
+        assert.match(
+          production.slice(hit.index + hit[0].length),
+          /^\s*\.no_proxy\(\)/,
+          `${file}:${line} must clear env proxies before configuring egress`,
+        );
+        checked += 1;
+      }
     }
+    assert.equal(checked, 5, "expected 5 production egress clients; a new one must be guarded too");
   });
 });
 
