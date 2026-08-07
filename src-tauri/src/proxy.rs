@@ -6315,6 +6315,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_goaway_carrying_an_error_code_still_counts_as_a_refusal() {
+        // The property the whole downgrade rests on. It has been wrong in both
+        // directions: once too broad, so a cancelled request downgraded a
+        // healthy host; then the io::Error walk added to fix that risked being
+        // too narrow, which would leave the downgrade never firing and the
+        // reported site looping again with nothing to explain why.
+        //
+        // hyper's own `graceful_shutdown` sends GOAWAY(NO_ERROR) — routine
+        // retirement, which the predicate is *supposed* to ignore — so it cannot
+        // express this case. h2 is pulled in for tests purely to send a GOAWAY
+        // that actually carries a refusal.
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            // Refuse everything on this connection, the way an origin that has
+            // decided against our client does.
+            connection.abrupt_shutdown(h2::Reason::ENHANCE_YOUR_CALM);
+            while connection.accept().await.is_some() {}
+        });
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
+                .await
+                .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let mut refusal = None;
+        for _ in 0..40 {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("https://refuser.test/")
+                .body(TapBody::new(empty_body(), 0, |_| {}))
+                .unwrap();
+            match sender.send_request(request).await {
+                Ok(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        server.abort();
+
+        let error = refusal.expect("the origin never refused; this test would prove nothing");
+        assert!(
+            looks_like_origin_http2_refusal(&error),
+            "a GOAWAY carrying ENHANCE_YOUR_CALM must count as a refusal: {error:?}"
+        );
+    }
+
     #[test]
     fn h2_stripping_removes_exactly_what_http2_forbids() {
         // A client may reach the MITM over HTTP/1.1 while the origin negotiated
