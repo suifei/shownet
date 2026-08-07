@@ -403,6 +403,27 @@ fn collection_import_metadata(
     }
 }
 
+/// Splits a raw `a=1&b=2` body into the field shape an imported form uses.
+///
+/// Mirrors the objects the HAR `params` path builds, so a form arrives the same
+/// way whichever variant the browser recorded.
+fn urlencoded_body_fields(body: &str) -> Vec<Value> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .map(|(name, value)| {
+            json!({
+                "id": format!("import-field-{}", uuid::Uuid::new_v4()),
+                "name": name.as_ref(),
+                "value": value.as_ref(),
+                "kind": "text",
+                "filePath": "",
+                "fileName": "",
+                "contentType": "text/plain",
+                "enabled": true
+            })
+        })
+        .collect()
+}
+
 fn canonical_import_body(body: &str, body_type: &str) -> Value {
     if matches!(body_type, "json" | "urlencoded" | "form-data") {
         if let Ok(mut value) = serde_json::from_str::<Value>(body) {
@@ -1842,10 +1863,21 @@ fn parse_har(value: &Value, fallback_name: String) -> Result<CollectionImportPre
         } else if mime.contains("xml") {
             "xml"
         } else if mime.contains("x-www-form-urlencoded") {
-            "raw"
+            "urlencoded"
         } else {
             "raw"
         };
+        // A HAR may record a form either way: as parsed `params`, handled below,
+        // or as raw `text`. Chrome writes the text. Both describe the same
+        // request, so both have to arrive as fields — "urlencoded" means a JSON
+        // field array to canonical_import_body, and handing it `a=1&b=2` left
+        // the workbench with a string where it expects fields. Importing the
+        // same form two different ways depending on which browser wrote the HAR
+        // is the actual defect here.
+        if body_type == "urlencoded" && !body.is_empty() {
+            body = serde_json::to_string(&urlencoded_body_fields(&body))
+                .unwrap_or_else(|_| "[]".to_string());
+        }
         if body.is_empty() {
             let fields = post_data
                 .and_then(|data| data.get("params"))
@@ -2238,6 +2270,65 @@ fn postman_body(draft: &RequestDraft) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_har_form_imports_as_fields_whichever_way_the_browser_recorded_it() {
+        // Chrome writes postData.text for a urlencoded form; others write
+        // postData.params. Both describe the same request, and both must reach
+        // the workbench as editable fields — the text variant used to arrive as
+        // body_type "raw", losing the field editor for exactly the forms most
+        // likely to be captured from a browser.
+        let as_text = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/login",
+                "headers":[],
+                "postData":{"mimeType":"application/x-www-form-urlencoded","text":"user=ada&pass=a%20b%26c"}
+            }}]}
+        });
+        let preview = parse_har(&as_text, "fallback".to_string()).unwrap();
+        assert_eq!(preview.items.len(), 1);
+        assert_eq!(preview.items[0].body_type, "urlencoded");
+        let fields: Value = serde_json::from_str(&preview.items[0].body).unwrap();
+        let fields = fields
+            .as_array()
+            .expect("a urlencoded body is a field array");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0]["name"], "user");
+        assert_eq!(fields[0]["value"], "ada");
+        assert_eq!(fields[0]["kind"], "text");
+        assert!(fields[0]["enabled"].as_bool().unwrap());
+        // Percent-encoding is decoded, so the editor shows what was sent.
+        assert_eq!(fields[1]["name"], "pass");
+        assert_eq!(fields[1]["value"], "a b&c");
+
+        // The params variant already worked; it must keep working and agree.
+        let as_params = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/login",
+                "headers":[],
+                "postData":{"mimeType":"application/x-www-form-urlencoded",
+                    "params":[{"name":"user","value":"ada"},{"name":"pass","value":"a b&c"}]}
+            }}]}
+        });
+        let preview = parse_har(&as_params, "fallback".to_string()).unwrap();
+        assert_eq!(preview.items[0].body_type, "urlencoded");
+        let params_fields: Value = serde_json::from_str(&preview.items[0].body).unwrap();
+        let params_fields = params_fields.as_array().unwrap();
+        assert_eq!(params_fields.len(), 2);
+        assert_eq!(params_fields[1]["value"], "a b&c");
+
+        // A body that is not a form is untouched.
+        let raw = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/raw",
+                "headers":[],
+                "postData":{"mimeType":"text/plain","text":"hello"}
+            }}]}
+        });
+        let preview = parse_har(&raw, "fallback".to_string()).unwrap();
+        assert_eq!(preview.items[0].body_type, "raw");
+        assert_eq!(preview.items[0].body, "hello");
+    }
 
     #[test]
     fn parses_postman_tree_and_preserves_credentials() {
