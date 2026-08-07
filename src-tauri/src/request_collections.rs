@@ -2283,6 +2283,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn re_importing_the_same_form_does_not_look_like_a_new_request() {
+        // The parsed field objects carry a fresh uuid each time, and the
+        // fingerprint drives duplicate detection. If those ids reached it,
+        // importing the same HAR twice would create a second copy every time —
+        // a duplicate storm caused by the import fix rather than by the file.
+        let har = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/login",
+                "headers":[],
+                "postData":{"mimeType":"application/x-www-form-urlencoded","text":"user=ada&pass=x"}
+            }}]}
+        });
+        let first = parse_har(&har, "fallback".to_string()).unwrap();
+        let second = parse_har(&har, "fallback".to_string()).unwrap();
+        assert_ne!(
+            first.items[0].body, second.items[0].body,
+            "the ids really do differ, so the fingerprint has to strip them"
+        );
+        assert_eq!(
+            import_item_fingerprint(&first.items[0]),
+            import_item_fingerprint(&second.items[0]),
+            "the same file must fingerprint the same way twice"
+        );
+
+        // And a genuinely different form still fingerprints differently.
+        let other = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/login",
+                "headers":[],
+                "postData":{"mimeType":"application/x-www-form-urlencoded","text":"user=bob&pass=x"}
+            }}]}
+        });
+        let other = parse_har(&other, "fallback".to_string()).unwrap();
+        assert_ne!(
+            import_item_fingerprint(&first.items[0]),
+            import_item_fingerprint(&other.items[0])
+        );
+    }
+
+    #[test]
     fn a_har_form_survives_the_round_trip_to_postman() {
         // The import fix is only worth anything if the shape it produces is the
         // one export expects. Before it, a Chrome HAR form imported as "raw",
