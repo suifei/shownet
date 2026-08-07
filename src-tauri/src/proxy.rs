@@ -2489,11 +2489,19 @@ async fn forward_mitm_https(
         //
         // h1 is the opposite. hyper's h1 client does not pipeline: a second
         // `send_request` issued before the previous response body has been read
-        // fails outright with "operation was canceled". So on an h1 shared
-        // connection the guard has to live until this response is done, and the
-        // serialisation is the protocol's, not a choice. Downgraded hosts are
-        // exactly the ones on h1, so releasing early there would have made the
-        // very sites this release repairs fail most of their subresources.
+        // fails outright with "operation was canceled". Downgraded hosts are
+        // exactly the ones on h1, so releasing at the headers there would have
+        // made the very sites this release repairs fail most of their
+        // subresources.
+        //
+        // Two honest limits. The guard lives to the end of this block, which
+        // covers whole-body buffering when a rewrite rule needs it but not the
+        // lazy streaming that follows when none does — so an h1 connection can
+        // still overlap a request with an unread body. And when a response
+        // breakpoint is set on an h1 tunnel, other requests on it wait for the
+        // operator, bounded by the breakpoint timeout. Both are the shape of
+        // sharing one non-pipelining connection; the real answer is a small
+        // pool of them, which is a larger change than this release.
         if outbound_is_http2 {
             drop(shared_guard);
         }

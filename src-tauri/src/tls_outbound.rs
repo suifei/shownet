@@ -474,7 +474,15 @@ pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<Clien
 /// an origin under load, a network that misbehaved for a minute — would cost a
 /// host its multiplexing until the app restarted, and nothing would ever
 /// re-check whether the condition still held.
+#[cfg(not(test))]
 const H2_DOWNGRADE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Short under test so expiry can be exercised by waiting rather than by
+/// back-dating an `Instant`. `Instant` is monotonic-since-boot on every target,
+/// so subtracting half an hour from `now` yields `None` on a freshly booted
+/// machine — which is exactly what CI runners are, and the test would have
+/// panicked there while passing on any long-lived workstation.
+#[cfg(test)]
+const H2_DOWNGRADE_TTL: std::time::Duration = std::time::Duration::from_millis(60);
 
 #[derive(Clone, Copy)]
 struct H2Rejections {
@@ -547,24 +555,6 @@ fn origin_http2_rejected(host: &str) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-/// Ages a host's downgrade past the TTL, for tests that must not sleep for it.
-#[cfg(test)]
-fn expire_downgrade_for_test(host: &str) {
-    if let Ok(mut hosts) = H2_REJECTED_HOSTS.write() {
-        // Normalised like the real key, and asserted rather than silently
-        // no-oped: `checked_sub` returns None on a machine whose uptime is under
-        // the TTL, which would leave `downgraded_at` cleared and the test
-        // passing for the wrong reason.
-        let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
-        if let Some(entry) = hosts.get_mut(&key) {
-            let aged = std::time::Instant::now()
-                .checked_sub(H2_DOWNGRADE_TTL + std::time::Duration::from_secs(1))
-                .expect("test host uptime is below the downgrade TTL");
-            entry.downgraded_at = Some(aged);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -789,7 +779,9 @@ mod tests {
         assert!(!note_origin_http2_rejected(host));
         assert!(note_origin_http2_rejected(host));
         assert!(origin_force_http11_for_host(host));
-        expire_downgrade_for_test(host);
+        // Waits out the (test-length) TTL rather than back-dating an Instant,
+        // which cannot be done on a machine that has not been up that long.
+        std::thread::sleep(H2_DOWNGRADE_TTL + std::time::Duration::from_millis(20));
         assert!(!origin_force_http11_for_host(host), "downgrade expires");
         assert!(!note_origin_http2_rejected(host), "and starts over");
         assert!(

@@ -83,12 +83,18 @@ function navigatorPlatform(): string {
 
 /** CPU architecture as UA-CH reports it; Apple Silicon is "arm". */
 function uaArchitecture(): string {
+  // Required by CDP: omitting it makes Chrome reject the whole
+  // setUserAgentOverride command, which silently loses the UA, the client hints
+  // and the accept-language with it — the browser then announces HeadlessChrome
+  // on the main document, which is the thing this override exists to prevent.
+  //
   // Neither `navigator.platform` ("MacIntel" on both) nor `userAgentData`
-  // (undefined in the Tauri WKWebView this runs in) can tell an Apple Silicon
-  // Mac from an Intel one, and guessing means half the fleet reports an
-  // architecture its WebGL renderer contradicts. Chrome only sends
-  // Sec-CH-UA-Arch when a site asks for the high-entropy hint, so leaving it
-  // out is both honest and unremarkable — unlike being wrong about it.
+  // (undefined in this webview) can tell Apple Silicon from Intel, and two
+  // previous attempts each guessed wrong for one half of the fleet. An empty
+  // string is accepted, and reports empty when a site asks for the high-entropy
+  // hint — a mild tell, against a rejected command which is a total one.
+  if (/aarch64|arm64/i.test(navigator.userAgent)) return "arm";
+  if (/Win|X11|Linux/i.test(navigator.platform)) return "x86";
   return "";
 }
 
@@ -605,7 +611,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               ],
               platform: uaPlatform(),
               platformVersion: "",
-              ...(uaArchitecture() ? { architecture: uaArchitecture() } : {}),
+              architecture: uaArchitecture(),
               model: "",
               mobile: false,
             },
@@ -653,9 +659,17 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         resolve();
       });
       socket.addEventListener("message", (message) => {
-        let packet: { id?: number; method?: string; result?: Record<string, unknown>; params?: Record<string, unknown> };
+        let packet: { id?: number; method?: string; result?: Record<string, unknown>; params?: Record<string, unknown>; error?: { message?: string } };
         try { packet = JSON.parse(String(message.data)); } catch { return; }
         if (packet.id != null) {
+          // A rejected command used to be indistinguishable from a successful
+          // one returning nothing, so `Emulation.setUserAgentOverride` being
+          // refused for a malformed payload left the browser announcing itself
+          // as headless with nothing anywhere saying why.
+          if (packet.error) {
+            const detail = packet.error.message ?? "未知错误";
+            setBusNote(`CDP 命令被拒绝：${detail}`);
+          }
           const pending = cdpPendingRef.current.get(packet.id);
           if (pending) {
             cdpPendingRef.current.delete(packet.id);
