@@ -1113,7 +1113,16 @@ async fn serve_reverse_proxy_client(
         .serve_connection(TokioIo::new(stream), service)
         .with_upgrades()
         .await
-        .map_err(|error| error.to_string())
+        .map_or_else(
+            |error| {
+                if is_benign_connection_end(&error) {
+                    Ok(())
+                } else {
+                    Err(error.to_string())
+                }
+            },
+            Ok,
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1242,7 +1251,16 @@ async fn serve_client(
         .serve_connection(TokioIo::new(stream), service)
         .with_upgrades()
         .await
-        .map_err(|error| error.to_string())
+        .map_or_else(
+            |error| {
+                if is_benign_connection_end(&error) {
+                    Ok(())
+                } else {
+                    Err(error.to_string())
+                }
+            },
+            Ok,
+        )
 }
 
 async fn handle_request(
@@ -4623,10 +4641,10 @@ async fn forward_http(
     )
     .with_rate_limit(control.upload_bytes_per_second);
     let outbound_is_http2 = parts.version == Version::HTTP_2;
-    let mut response = sender
-        .send_request(Request::from_parts(parts, body))
-        .await
-        .map_err(|error| {
+    let response = sender.send_request(Request::from_parts(parts, body)).await;
+    let mut response = match response {
+        Ok(response) => response,
+        Err(error) => {
             // The explicit-proxy path consults the learned list when it picks a
             // protocol, but never contributed to it — so a client reaching an
             // h2-refusing origin this way kept retrying h2 forever while the
@@ -4635,13 +4653,21 @@ async fn forward_http(
                 && looks_like_origin_http2_refusal(&error)
                 && tls_outbound::note_origin_http2_rejected(tls_identity_host)
             {
-                format!(
+                return Err(format!(
                     "目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
-                )
-            } else {
-                format!("目标请求失败: {error}")
+                ));
             }
-        })?;
+            let message = format!("目标请求失败: {error}");
+            if is_benign_connection_end(&error) {
+                // The origin's connection went away — a stale keep-alive socket
+                // reused a moment too late, a peer that hung up. The caller is
+                // still owed the 502, but nobody needs to be interrupted; this
+                // is the same call the MITM path makes.
+                return Ok(error_response(StatusCode::BAD_GATEWAY, &message));
+            }
+            return Err(message);
+        }
+    };
     if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
         response.headers_mut().remove("sec-websocket-extensions");
         let response_headers = headers_to_entries(response.headers());
@@ -8894,6 +8920,117 @@ mod tests {
         assert_eq!(captured[0].status, 200);
         assert_eq!(captured[0].source, "script");
         assert!(errors.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local socket permissions"]
+    async fn local_socket_a_client_hanging_up_reports_nothing_but_a_dead_target_does() {
+        // End to end over a real listener, because the unit tests for this only
+        // pin the classifiers. Browsers abandon connections constantly — a
+        // pre-opened socket never used, a tab closed mid-response — and every
+        // one of those used to arrive as a red toast during normal browsing.
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        // Accept and then vanish, the way a peer that goes away does.
+        let target_task = tokio::spawn(async move {
+            let (stream, _) = target.accept().await.unwrap();
+            drop(stream);
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-hangup".to_string(),
+            EffectiveUpstreamProxy {
+                mode: "direct".to_string(),
+                host: String::new(),
+                port: 0,
+                username: String::new(),
+                password: None,
+                bypass: vec![],
+            },
+            test_certificate_authority(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        // 1. Connect and leave without sending anything.
+        drop(TcpStream::connect(handle.local_addr()).await.unwrap());
+
+        // 2. Send half a request line, then vanish.
+        let mut partial = TcpStream::connect(handle.local_addr()).await.unwrap();
+        partial
+            .write_all(b"GET http://127.0.0.1/ HTTP")
+            .await
+            .unwrap();
+        drop(partial);
+
+        // 3. A complete request whose target accepts and immediately closes.
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET http://127.0.0.1:{}/gone HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                    target_address.port(),
+                    target_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = vec![0_u8; 512];
+        let _ = timeout(Duration::from_secs(5), client.read(&mut response)).await;
+        drop(client);
+        target_task.await.unwrap();
+
+        // Give the spawned connection tasks a moment to finish reporting.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let seen = errors.lock().unwrap();
+            assert!(
+                seen.is_empty(),
+                "a client hanging up is not a failure, but these were reported: {seen:?}"
+            );
+        }
+
+        // The other half: a target that is not there must still be reported,
+        // or silencing the hang-ups would have hidden a real problem.
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_address = dead.local_addr().unwrap();
+        drop(dead);
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET http://127.0.0.1:{}/nope HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                    dead_address.port(),
+                    dead_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = vec![0_u8; 512];
+        let _ = timeout(Duration::from_secs(5), client.read(&mut response)).await;
+        handle.stop().await;
+
+        let seen = errors.lock().unwrap();
+        assert!(
+            seen.iter().any(|error| error.contains("连接")),
+            "an unreachable target must still reach the user: {seen:?}"
+        );
     }
 
     #[tokio::test]
