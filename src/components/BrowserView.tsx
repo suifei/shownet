@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   Chrome,
+  CircleAlert,
   CircleDot,
   Code2,
   Copy,
@@ -42,6 +43,7 @@ import {
   type WebRiskFixtureProbeResult,
 } from "../browserBus";
 import { formatClock } from "../format";
+import { trackNavigation } from "../reloadLoop";
 import type { BrowserHookEvent, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
@@ -133,6 +135,8 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const [browserMenuOpen, setBrowserMenuOpen] = useState(false);
   const [selectedHookId, setSelectedHookId] = useState("");
   const [busNote, setBusNote] = useState("");
+  const [reloadLoopHost, setReloadLoopHost] = useState("");
+  const navigationLogRef = useRef<Array<{ url: string; at: number }>>([]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const browserSurfaceRef = useRef<HTMLDivElement | null>(null);
   const screencastFrameRef = useRef<ScreencastFrame | null>(null);
@@ -322,6 +326,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     setAddress(target);
     setCurrentUrl(target);
     setExternalPage(target);
+    // A deliberate navigation is the user's answer to the warning; give the
+    // new destination a clean slate rather than carrying the old verdict over.
+    navigationLogRef.current = [];
+    setReloadLoopHost("");
     if (!desktop) return;
     setBrowserLoading(true);
     void (async () => {
@@ -580,6 +588,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             setAddress(frame.url);
             setCurrentUrl(frame.url);
             writeStoredBrowserUrl(frame.url);
+            const tracked = trackNavigation(navigationLogRef.current, frame.url, Date.now());
+            navigationLogRef.current = tracked.log;
+            setReloadLoopHost(tracked.loopHost);
           }
           return;
         }
@@ -1160,6 +1171,16 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                 </div>
               )}
               {browserLoading && proxyBrowser?.running && <div className="browser-loading-indicator"><RefreshCw className="spin" size={13} /></div>}
+              {reloadLoopHost && (
+                <div className="browser-reload-loop" role="alert">
+                  <span><CircleAlert size={18} /></span>
+                  <div>
+                    <strong>{reloadLoopHost} 正在反复刷新</strong>
+                    <small>该站点的风控挑战没有通过。多数情况是 MITM 解密改变了 TLS 指纹：在「设置 → HTTPS 解密」把该域名加入绕行清单后重试，绕行域名仍会被抓包，只是不再解密正文。</small>
+                  </div>
+                  <button type="button" onClick={() => setReloadLoopHost("")}>知道了</button>
+                </div>
+              )}
               {fileDropState && (
                 <div className={`browser-file-drop is-${fileDropState.phase}`} aria-live="polite">
                   <span><FileUp size={20} /></span>
@@ -1180,9 +1201,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <span><FlaskConical size={13} />{labState === "complete" ? "已转交内置 Agent" : labState === "error" ? "场景验证失败" : labState === "running" ? "加密场景运行中" : "Crypto Lab"}</span>
           <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
           <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
-          {/baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl) && (
-            <span className="browser-statusbar__hint" title="若图裂/脚本失效：设置 → HTTPS 解密 → 推荐静态 CDN 绕行">
-              图裂时启用静态 CDN 绕行
+          {(reloadLoopHost || /baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl)) && (
+            <span className="browser-statusbar__hint" title="若页面反复刷新或图裂：设置 → HTTPS 解密 → 为该域名启用绕行">
+              {reloadLoopHost ? `${reloadLoopHost} 反复刷新，试试解密绕行` : "图裂时启用静态 CDN 绕行"}
             </span>
           )}
           <span className="browser-statusbar__right">100%</span>

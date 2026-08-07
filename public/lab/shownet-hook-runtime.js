@@ -68,29 +68,35 @@
     catch { return scrub(value); }
   };
 
+  // Nothing in here may throw. These hooks sit in the middle of the page's own
+  // control flow, so an observer that raises kills the very call it was
+  // watching — payload building walks hostile objects and can trip on a getter
+  // or an unserialisable value at any depth.
   const emit = (event) => {
-    const payload = {
-      timestamp: Date.now(),
-      kind: event.kind || "runtime",
-      name: event.name || "unknown",
-      url: trim(event.url || location.href),
-      method: event.method || undefined,
-      input: scrub(event.input),
-      output: scrub(event.output),
-      stack: trim(event.stack || new Error().stack, 16384),
-      durationMs: Math.max(0, Math.round(event.durationMs || 0)),
-    };
     try {
-      const bridge = globalThis[BRIDGE];
-      if (typeof bridge === "function") {
-        bridge(JSON.stringify(payload));
-        return;
-      }
+      const payload = {
+        timestamp: Date.now(),
+        kind: event.kind || "runtime",
+        name: event.name || "unknown",
+        url: trim(event.url || location.href),
+        method: event.method || undefined,
+        input: scrub(event.input),
+        output: scrub(event.output),
+        stack: trim(event.stack || new Error().stack, 16384),
+        durationMs: Math.max(0, Math.round(event.durationMs || 0)),
+      };
+      try {
+        const bridge = globalThis[BRIDGE];
+        if (typeof bridge === "function") {
+          bridge(JSON.stringify(payload));
+          return;
+        }
+      } catch {}
+      const queue = globalThis[QUEUE] || [];
+      queue.push(payload);
+      if (queue.length > 500) queue.splice(0, queue.length - 500);
+      globalThis[QUEUE] = queue;
     } catch {}
-    const queue = globalThis[QUEUE] || [];
-    queue.push(payload);
-    if (queue.length > 500) queue.splice(0, queue.length - 500);
-    globalThis[QUEUE] = queue;
   };
 
   const replace = (owner, key, factory) => {
@@ -115,10 +121,14 @@
       emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started });
       throw error;
     }
-    promise.then(
-      (response) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { status: response.status, ok: response.ok, redirected: response.redirected, headers: headerEntries(response.headers) }, durationMs: performance.now() - started }),
-      (error) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started }),
-    );
+    // Observing the result must not change what the caller gets back, and a
+    // caller that hands us a thenable-less value must still get it back.
+    try {
+      promise.then(
+        (response) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { status: response.status, ok: response.ok, redirected: response.redirected, headers: headerEntries(response.headers) }, durationMs: performance.now() - started }),
+        (error) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started }),
+      );
+    } catch {}
     return promise;
   });
 
@@ -208,20 +218,28 @@
         enumerable: cookieDescriptor.enumerable,
         get: cookieDescriptor.get,
         set(value) {
-          const text = String(value || "");
-          const [pair, ...attributes] = text.split(";");
-          const name = pair.split("=")[0]?.trim();
-          emit({ kind: "storage", name: "document.cookie.set", input: { name, value: text, attributes: attributes.map((item) => item.trim()) }, output: null });
-          return Reflect.apply(cookieDescriptor.set, this, [value]);
+          // The write goes first and unconditionally. Reporting the cookie used
+          // to happen before it, so anything that went wrong while describing
+          // the cookie meant the cookie was never stored at all — a challenge
+          // page that cannot keep its clearance cookie reloads forever.
+          const result = Reflect.apply(cookieDescriptor.set, this, [value]);
+          try {
+            const text = String(value || "");
+            const [pair, ...attributes] = text.split(";");
+            const name = pair.split("=")[0]?.trim();
+            emit({ kind: "storage", name: "document.cookie.set", input: { name, value: text, attributes: attributes.map((item) => item.trim()) }, output: null });
+          } catch {}
+          return result;
         },
       });
     } catch {}
   }
 
   replace(globalThis.Storage?.prototype, "setItem", (original) => function shownetStorageSetItem(key, value) {
-    const storageKey = String(key || "");
     const result = Reflect.apply(original, this, arguments);
-    emit({ kind: "storage", name: "Storage.prototype.setItem", input: { key: storageKey, value }, output: null });
+    try {
+      emit({ kind: "storage", name: "Storage.prototype.setItem", input: { key: String(key || ""), value }, output: null });
+    } catch {}
     return result;
   });
 

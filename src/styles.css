@@ -6127,6 +6127,29 @@ kbd {
 .browser-file-drop small { color: var(--text-faint); font-size: 12px; }
 .browser-file-drop.is-delivered { background: var(--success-bg); border-style: solid; }
 
+.browser-reload-loop {
+  position: absolute;
+  z-index: 7;
+  top: 12px;
+  right: 12px;
+  left: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  color: var(--warning-ink);
+  background: var(--dark-surface);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+}
+
+.browser-reload-loop > span { display: grid; place-items: center; width: 32px; height: 32px; flex: none; }
+.browser-reload-loop > div { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.browser-reload-loop strong { font-size: 13px; }
+.browser-reload-loop small { color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+.browser-reload-loop > button { flex: none; align-self: center; height: 28px; padding: 0 12px; color: var(--text-body); font-size: 12px; background: var(--surface-panel); border: 1px solid var(--border-default); border-radius: 8px; }
+.browser-reload-loop > button:hover { border-color: var(--border-strong); }
+
 .capture-corner {
   position: absolute;
   z-index: 5;
