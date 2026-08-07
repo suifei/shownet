@@ -58,6 +58,25 @@ describe("hook runtime tests keep one realm per install", () => {
     }
   });
 
+  it("fakes the clock before installing, in any file that drives the probe", async () => {
+    // The interval is registered when the runtime is evaluated. Evaluate it
+    // under the real clock and no amount of advanceTimersByTime afterwards will
+    // fire it — the count check above still passes, because the file only
+    // advances once. This is the ordering that actually makes a probe test live.
+    for (const name of await hookRuntimeTestFiles()) {
+      const source = stripComments(await readFile(new URL(name, RENDER_DIR), "utf8"));
+      if (!source.includes("advanceTimersByTime")) continue;
+
+      const faked = source.indexOf("useFakeTimers");
+      const installed = source.indexOf("new Function(RUNTIME_SOURCE)");
+      assert.ok(faked !== -1, `${name} drives the probe without ever faking the clock`);
+      assert.ok(
+        faked < installed,
+        `${name} installs the runtime before faking the clock, so its probe interval belongs to the real clock and advancing the fake one drives nothing`,
+      );
+    }
+  });
+
   it("says why in each file, so the constraint survives the next edit", async () => {
     for (const name of await hookRuntimeTestFiles()) {
       const source = await readFile(new URL(name, RENDER_DIR), "utf8");
