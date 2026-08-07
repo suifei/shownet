@@ -932,9 +932,18 @@ function App() {
         // showing 抓包中 for a capture that is down, with the takeover switch
         // greyed out behind that stale flag.
         listen("capture://stopped", () => {
+          // Known for certain: the capture is down, and restore_system_proxy
+          // gives up `active` on both its branches.
           setCapturing(false);
-          setRuntime((current) => ({ ...current, proxyRunning: false }));
-          void refreshSessions();
+          setRuntime((current) => ({ ...current, proxyRunning: false, systemProxyActive: false }));
+          // Not known: whether a recovery is now outstanding — that lives in the
+          // read which just failed. Ask again; by now the contention may have
+          // cleared, and without it 设置 shows no 重试恢复 button while starting
+          // a capture refuses and tells the user to press it.
+          void invoke<RuntimeStatus>("get_runtime_status")
+            .then((status) => setRuntime(withClientAccessDefaults(status)))
+            .catch(() => undefined);
+          void refreshSessions().catch(() => undefined);
         }),
         listen<Session>("session://created", () => void refreshSessions()),
         listen<Session>("session://updated", () => void refreshSessions()),

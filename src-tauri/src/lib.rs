@@ -2761,9 +2761,10 @@ async fn set_capture_running(
     } else {
         // Everything that can bail out happens before the takeover is released.
         // These are std mutexes, so one panic elsewhere poisons them for the
-        // process; returning here leaves the machine exactly as it was, whereas
-        // returning after the restore would hand the system proxy back and then
-        // abort with capture still marked running and nothing emitted.
+        // process. Returning after the restore would hand the system proxy back
+        // and then abort with capture still marked running and nothing emitted;
+        // returning here costs at most an already-detached reverse proxy, which
+        // shuts itself down when its shutdown sender drops.
         let reverse_proxy = state
             .reverse_proxy
             .lock()
