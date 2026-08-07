@@ -2604,9 +2604,14 @@ async fn forward_mitm_https(
         // lazy streaming that follows when none does — so an h1 connection can
         // still overlap a request with an unread body. And when a response
         // breakpoint is set on an h1 tunnel, other requests on it wait for the
-        // operator, bounded by the breakpoint timeout. Both are the shape of
-        // sharing one non-pipelining connection; the real answer is a small
-        // pool of them, which is a larger change than this release.
+        // operator, bounded by the breakpoint timeout — which `storage.rs`
+        // validates to 5s..=300s and defaults to 120s, so the worst case is a
+        // host that appears frozen for two minutes while one response is held.
+        // The wait is only genuinely necessary when the body is still
+        // streaming; once a rewrite rule has collected it the connection is
+        // idle and the guard is dead weight. Both are the shape of sharing one
+        // non-pipelining connection; the real answer is a small pool of them,
+        // which is a larger change than this release.
         if outbound_is_http2 {
             drop(shared_guard);
         }
