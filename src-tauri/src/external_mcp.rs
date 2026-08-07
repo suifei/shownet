@@ -556,6 +556,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_configured_egress_proxy_still_applies_after_clearing_the_environment() {
+        // `no_proxy()` is called first so the environment cannot leak in. If it
+        // also disabled a proxy added afterwards, the entire configured-egress
+        // feature would be dead — silently, since requests would simply go
+        // direct. Asserted against a real proxy rather than reqwest's docs.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let saw_request = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = saw_request.clone();
+        let proxy_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = proxy_listener.accept().await {
+                let mut buffer = vec![0u8; 1024];
+                if socket.read(&mut buffer).await.is_ok() {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let upstream = EffectiveUpstreamProxy {
+            mode: "http".to_string(),
+            host: proxy_address.ip().to_string(),
+            port: proxy_address.port(),
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        };
+        let client = build_client(&upstream, "http://configured-egress.test/mcp").unwrap();
+        let _ = client
+            .get("http://configured-egress.test/mcp")
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        proxy_task.abort();
+
+        assert!(
+            saw_request.load(std::sync::atomic::Ordering::SeqCst),
+            "a configured egress proxy must still be used after no_proxy()"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires local socket permissions"]
     async fn local_socket_discovers_and_calls_a_real_streamable_http_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
