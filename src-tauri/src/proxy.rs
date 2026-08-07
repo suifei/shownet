@@ -10320,6 +10320,105 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires local socket permissions"]
+    async fn local_socket_a_websocket_dying_with_its_page_reports_nothing() {
+        // Closing or reloading a page drops a live socket without a closing
+        // handshake. tungstenite calls that ResetWithoutClosingHandshake, and
+        // every one of the relay's six steps used to turn it into a toast — so
+        // any page holding a socket produced an error on every reload. The unit
+        // test pins the classifier; this proves the relay actually reaches it.
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = tokio::spawn(async move {
+            let (stream, _) = target.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            // Echo until the client disappears; never send a Close.
+            while let Some(message) = websocket.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if websocket.send(Message::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let events = Arc::new(Mutex::new(Vec::<CaptureEventInput>::new()));
+        let event_sink: EventSink = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-websocket-hangup".to_string(),
+            EffectiveUpstreamProxy {
+                mode: "direct".to_string(),
+                host: String::new(),
+                port: 0,
+                username: String::new(),
+                password: None,
+                bypass: vec![],
+            },
+            test_certificate_authority(),
+            capture_sink,
+            None,
+            event_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        let stream = TcpStream::connect(handle.local_addr()).await.unwrap();
+        let (mut client, response) = client_async(
+            format!("ws://127.0.0.1:{}/live", target_address.port()),
+            stream,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        client.send(Message::text("still here")).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            Message::text("still here")
+        );
+
+        // The page goes away: no Close frame, just a dropped socket.
+        drop(client);
+        target_task.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.stop().await;
+
+        let seen = errors.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "a socket dying with its page is not a relay failure, but these were reported: {seen:?}"
+        );
+        assert!(
+            !captured.lock().unwrap().is_empty(),
+            "the handshake must still be captured — going quiet must not mean recording nothing"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local socket permissions"]
     async fn local_socket_relays_and_captures_plain_websocket_messages() {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_address = target.local_addr().unwrap();
