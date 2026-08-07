@@ -2283,6 +2283,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_har_form_survives_the_round_trip_to_postman() {
+        // The import fix is only worth anything if the shape it produces is the
+        // one export expects. Before it, a Chrome HAR form imported as "raw",
+        // so this exported a raw string where Postman describes urlencoded
+        // entries — and re-importing it elsewhere would have lost the fields
+        // again.
+        let har = json!({
+            "log":{"entries":[{"request":{
+                "method":"POST","url":"https://api.example.test/login",
+                "headers":[],
+                "postData":{"mimeType":"application/x-www-form-urlencoded","text":"user=ada&pass=a%20b%26c"}
+            }}]}
+        });
+        let imported = parse_har(&har, "fallback".to_string()).unwrap();
+        let item = &imported.items[0];
+        assert_eq!(item.body_type, "urlencoded");
+
+        let collection = collection("HAR form");
+        let draft = draft_from_import_item(item, "draft-har-form", &collection.id);
+        let exported =
+            render_collection_export("postman", &collection, &[], &[draft], &[]).unwrap();
+        let value: Value = serde_json::from_str(&exported).unwrap();
+
+        let body = value
+            .pointer("/item/0/request/body")
+            .expect("the exported request carries a body");
+        assert_eq!(body["mode"], "urlencoded", "{body}");
+        let entries = body["urlencoded"]
+            .as_array()
+            .expect("urlencoded entries are a list");
+        assert_eq!(entries.len(), 2, "{body}");
+        assert_eq!(entries[0]["key"], "user");
+        assert_eq!(entries[0]["value"], "ada");
+        // Decoded once on import and not re-encoded on the way out.
+        assert_eq!(entries[1]["key"], "pass");
+        assert_eq!(entries[1]["value"], "a b&c");
+        assert_eq!(entries[0]["disabled"], false);
+    }
+
+    #[test]
     fn a_numeric_spec_parameter_keeps_its_value() {
         // page=1 and limit=50 are how specs actually write these, and as_str()
         // returns None for a JSON number — so the query arrived as `?page=`
