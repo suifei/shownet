@@ -200,6 +200,21 @@ impl HttpsRequestSender {
         matches!(self, Self::Http2(_))
     }
 
+    /// Whether this connection can still carry a request.
+    ///
+    /// One sender is shared by every request inside a CONNECT tunnel. Origins
+    /// routinely retire an h2 connection with GOAWAY — Cloudflare does it after
+    /// a bounded number of streams — and once that lands, every later
+    /// `send_request` on it fails. Without this check the tunnel stayed broken
+    /// for good: the page's requests all failed, its challenge could never
+    /// complete, and it reloaded forever.
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Http1(sender) => sender.is_closed(),
+            Self::Http2(sender) => sender.is_closed(),
+        }
+    }
+
     async fn send_request(
         &mut self,
         request: Request<TapBody<ProxyBody>>,
@@ -2276,17 +2291,11 @@ async fn forward_mitm_https(
             .map(|(host, _)| host)
             .unwrap_or(&host);
         // WebSocket / extended CONNECT stay on dedicated HTTP/1.1; normal traffic may use shared h2.
-        let use_dedicated = authority_changed || extended_websocket;
-        let shared_is_http2 = if use_dedicated {
-            false
-        } else {
-            sender.lock().await.is_http2()
-        };
-        parts.version = if shared_is_http2 && !websocket && !extended_websocket {
-            Version::HTTP_2
-        } else {
-            Version::HTTP_11
-        };
+        let use_dedicated_base = authority_changed || extended_websocket;
+        // A shared connection the origin has retired cannot carry anything more,
+        // so those requests go out on a fresh dedicated one instead of failing.
+        let shared_retired = !use_dedicated_base && sender.lock().await.is_closed();
+        let use_dedicated = use_dedicated_base || shared_retired;
         let outbound_profile =
             tls_outbound::OutboundTlsProfile::parse(tls_fingerprint.outbound.profile.as_str());
         let dedicated_route = DedicatedRequestRoute {
@@ -2296,6 +2305,26 @@ async fn forward_mitm_https(
             tls_identity_host: tls_identity_host.to_string(),
             prefer_http2: !extended_websocket && !websocket,
             tls_profile: outbound_profile,
+        };
+        // The sender is chosen before the request is shaped, because how it must
+        // be shaped — absolute vs origin-form URI, and whether h1's
+        // connection-specific headers are legal — depends on the protocol of the
+        // connection it actually goes out on. Deciding that from the client's
+        // protocol, or from the shared connection while sending on a dedicated
+        // one, produces a request the origin rejects outright.
+        let mut dedicated_sender = if use_dedicated {
+            Some(dedicated_sender_factory(dedicated_route).await?)
+        } else {
+            None
+        };
+        let outbound_is_http2 = match dedicated_sender.as_ref() {
+            Some(dedicated) => dedicated.is_http2(),
+            None => sender.lock().await.is_http2(),
+        };
+        parts.version = if outbound_is_http2 && !websocket && !extended_websocket {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
         };
         let (host_header_host, host_header_port) = active_mirror_route
             .map(RuntimeMirrorRoute::identity_target)
@@ -2329,6 +2358,15 @@ async fn forward_mitm_https(
         if websocket {
             parts.headers.remove("sec-websocket-extensions");
         }
+        // A client may reach the MITM over HTTP/1.1 while the origin negotiated
+        // h2 — our leaf offers both. Forwarding h1's connection-specific headers
+        // onto an h2 stream is a protocol violation, and hyper rejects the whole
+        // request with a bare "http2 error", which reads as the site refusing us
+        // rather than as us sending something illegal. Stripped before capture so
+        // the recorded headers are the ones actually sent.
+        if parts.version == Version::HTTP_2 {
+            strip_http2_forbidden_headers(&mut parts.headers);
+        }
         request_headers = request_headers_for_capture(
             &parts.headers,
             active_mirror_route,
@@ -2351,11 +2389,9 @@ async fn forward_mitm_https(
         )
         .with_rate_limit(control.upload_bytes_per_second);
         let outbound_request = Request::from_parts(parts, request_body);
-        let mut response = if authority_changed || extended_websocket {
-            let mut dedicated_sender = dedicated_sender_factory(dedicated_route).await?;
-            dedicated_sender.send_request(outbound_request).await
-        } else {
-            sender.lock().await.send_request(outbound_request).await
+        let mut response = match dedicated_sender.as_mut() {
+            Some(dedicated) => dedicated.send_request(outbound_request).await,
+            None => sender.lock().await.send_request(outbound_request).await,
         }
         .map_err(|error| format!("转发目标请求失败: {error}"))?;
         let upstream_status = response.status().as_u16() as i64;
