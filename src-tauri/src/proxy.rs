@@ -1167,8 +1167,11 @@ async fn forward_reverse_proxy_request(
     }
     .await;
     Ok(result.unwrap_or_else(|error| {
-        error_sink(error.clone());
-        error_response(StatusCode::BAD_GATEWAY, &error)
+        let (report, message) = split_failure_report(error);
+        if report {
+            error_sink(message.clone());
+        }
+        error_response(StatusCode::BAD_GATEWAY, &message)
     }))
 }
 
@@ -1289,8 +1292,11 @@ async fn handle_request(
         .await
     };
     Ok(result.unwrap_or_else(|error| {
-        error_sink(error.clone());
-        error_response(StatusCode::BAD_GATEWAY, &error)
+        let (report, message) = split_failure_report(error);
+        if report {
+            error_sink(message.clone());
+        }
+        error_response(StatusCode::BAD_GATEWAY, &message)
     }))
 }
 
@@ -1559,7 +1565,9 @@ async fn handle_connect(
                     Some(detail),
                     502,
                 );
-                error_sink(format!("客户端 TLS 握手失败 {host}:{port}: {error}"));
+                if !is_benign_client_handshake_end(&error) {
+                    error_sink(format!("客户端 TLS 握手失败 {host}:{port}: {error}"));
+                }
                 return;
             }
             Err(_) => {
@@ -1865,6 +1873,39 @@ where
 /// surfaces: an origin refusing our HTTP/2, a malformed frame, a timeout. Those
 /// are the reports that led to the fixes in this file, and silencing them to
 /// tidy up the toast area would cost more than the noise does.
+/// Marks a failure that still owes the caller a 502 but must not raise a toast.
+///
+/// The forwarding path carries `String` errors end to end, so by the time the
+/// sink sees one the typed reason is gone. This keeps the decision at the point
+/// that still holds the `hyper::Error`, rather than re-deriving it from message
+/// text — which would break the first time hyper rewords something.
+const UNREPORTED_FAILURE_PREFIX: &str = "\u{1}";
+
+/// Splits a forwarding failure into "show the user?" and the message itself.
+fn split_failure_report(error: String) -> (bool, String) {
+    match error.strip_prefix(UNREPORTED_FAILURE_PREFIX) {
+        Some(rest) => (false, rest.to_string()),
+        None => (true, error),
+    }
+}
+
+/// Whether a client-side TLS handshake ended for a reason the user caused.
+///
+/// Browsers pre-open TLS connections they may never use and drop them without
+/// completing the handshake; racing connections lose and get closed the same
+/// way. Each one produced "客户端 TLS 握手失败 …: tls handshake eof". A refused
+/// or untrusted certificate does not look like this and still reports.
+fn is_benign_client_handshake_end(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
 fn is_benign_connection_end(error: &hyper::Error) -> bool {
     if error.is_closed() || error.is_incomplete_message() || error.is_canceled() {
         return true;
@@ -2518,6 +2559,12 @@ async fn forward_mitm_https(
                 format!(
                     "转发目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
                 )
+            } else if error.is_canceled() {
+                // The client abandoned the request — a cancelled image load, an
+                // abandoned prefetch, a navigation away mid-flight. Browsers do
+                // this constantly. Still a failed forward, so the 502 stands and
+                // the capture records it; it is just not news.
+                format!("{UNREPORTED_FAILURE_PREFIX}转发目标请求失败: {error}")
             } else {
                 format!("转发目标请求失败: {error}")
             }
@@ -2678,8 +2725,11 @@ async fn forward_mitm_https(
     }
     .await;
     Ok(result.unwrap_or_else(|error| {
-        error_sink(error.clone());
-        error_response(StatusCode::BAD_GATEWAY, &error)
+        let (report, message) = split_failure_report(error);
+        if report {
+            error_sink(message.clone());
+        }
+        error_response(StatusCode::BAD_GATEWAY, &message)
     }))
 }
 
@@ -6452,6 +6502,79 @@ mod tests {
         assert!(
             is_benign_connection_end(&error),
             "a half-sent request from a departed client must stay silent: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_browser_dropping_a_handshake_is_silent_but_a_refused_certificate_is_not() {
+        use std::io::ErrorKind;
+        // Observed: "客户端 TLS 握手失败 fonts.gstatic.com:443: tls handshake eof".
+        // Browsers pre-open TLS connections they may never use, and racing
+        // connections lose and close the same way.
+        for kind in [
+            ErrorKind::UnexpectedEof,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::NotConnected,
+        ] {
+            assert!(
+                is_benign_client_handshake_end(&std::io::Error::from(kind)),
+                "{kind:?} is a client hanging up, not a failure to report"
+            );
+        }
+        // A client refusing our CA arrives as a fatal alert, which rustls
+        // surfaces as InvalidData. That one has to reach the user — it is
+        // exactly the setup problem the certificate page exists to fix.
+        assert!(
+            !is_benign_client_handshake_end(&std::io::Error::new(
+                ErrorKind::InvalidData,
+                "received fatal alert: UnknownCA",
+            )),
+            "a rejected certificate must still be reported"
+        );
+        assert!(!is_benign_client_handshake_end(&std::io::Error::from(
+            ErrorKind::TimedOut
+        )));
+    }
+
+    #[test]
+    fn a_cancelled_request_still_answers_the_caller_without_raising_a_toast() {
+        let (report, message) = split_failure_report(format!(
+            "{UNREPORTED_FAILURE_PREFIX}转发目标请求失败: operation was canceled"
+        ));
+        assert!(!report, "a client that cancelled must not raise a toast");
+        assert_eq!(message, "转发目标请求失败: operation was canceled");
+        assert!(
+            !message.contains(UNREPORTED_FAILURE_PREFIX),
+            "the marker must never reach the 502 body the caller reads"
+        );
+
+        let (report, message) = split_failure_report("转发目标请求失败: http2 error".to_string());
+        assert!(report, "a protocol failure must still be reported");
+        assert_eq!(message, "转发目标请求失败: http2 error");
+    }
+
+    #[test]
+    fn only_a_cancellation_is_marked_unreported_on_the_forward_path() {
+        // The wiring the two tests above cannot reach: a cancelled send is what
+        // gets marked, and an origin refusing our h2 is not. Pinned against the
+        // production source only, so the test module cannot stand in for it.
+        let source = production_source();
+        let marked = source
+            .matches(&format!("{{UNREPORTED_FAILURE_PREFIX}}"))
+            .count();
+        assert_eq!(
+            marked, 1,
+            "exactly one failure is silenced; a second needs its own justification"
+        );
+        let at = source
+            .find("} else if error.is_canceled() {")
+            .expect("the cancellation branch is what marks the failure");
+        let branch = &source[at..at + 600];
+        assert!(
+            branch.contains("{UNREPORTED_FAILURE_PREFIX}转发目标请求失败"),
+            "the cancellation branch must be the one that marks it"
         );
     }
 
