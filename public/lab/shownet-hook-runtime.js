@@ -109,14 +109,20 @@
   };
 
   const skipReports = new WeakMap();
+  const primitiveSkipReports = new Set();
 
   /** Emits `hook.skipped` the first time a given property is passed over. */
   const reportSkippedOnce = (owner, key, reason) => {
     try {
-      // A WeakMap rejects primitive keys, and a page can set `globalThis.sm4` to
-      // a string. Reporting matters less than not throwing, but silently losing
-      // every report to a caught TypeError is worse than skipping the dedup.
+      // A WeakMap rejects primitive keys, and a page can set `globalThis.sm4`
+      // to a string. Those still need deduping — the probe retries every 500ms
+      // up to 120 times, so an undeduped branch floods the log just as badly as
+      // the one this replaced. A plain Set keyed by value works because a
+      // primitive is its own identity.
       if (owner === null || (typeof owner !== "object" && typeof owner !== "function")) {
+        const marker = `${typeof owner}:${String(owner)}:${String(key)}`;
+        if (primitiveSkipReports.has(marker)) return;
+        primitiveSkipReports.add(marker);
         emit({ kind: "runtime", name: "hook.skipped", input: { property: String(key), reason }, output: null });
         return;
       }

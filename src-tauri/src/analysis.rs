@@ -2560,23 +2560,22 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
-/// Spreads retries out so that the graph nodes running concurrently do not all
-/// come back at the same instant and rebuild the burst that got us limited.
+/// Millisecond offset for one retry, spreading concurrent graph nodes out so
+/// they do not all come back at the same instant and rebuild the burst that got
+/// them rate-limited.
 ///
-/// The modulus has to be coprime with the clock's granularity. macOS reports
-/// wall time in whole microseconds, so `subsec_nanos()` is always a multiple of
-/// 1000; taking that modulo 250 gave exactly zero every single time, leaving the
-/// jitter dead on the primary release target while still looking plausible. The
-/// clock alone is still not enough — see `jitter_millis` for why a sequence
-/// number has to go in with it.
-/// Millisecond offset for one retry.
+/// Two things are load-bearing. The modulus must be coprime with the clock's
+/// granularity: macOS reports wall time in whole microseconds, so
+/// `subsec_nanos()` is always a multiple of 1000, and an earlier `% 250` gave
+/// exactly zero every single time — jitter dead on the primary release target
+/// while still looking plausible. And the clock alone cannot separate callers
+/// that read the *same* timestamp, which nodes waking from one backoff sleep
+/// routinely do; `sequence` is what distinguishes them.
 ///
-/// `sequence` is what separates two callers that read the *same* timestamp —
-/// on a microsecond clock, graph nodes waking from the same backoff sleep
-/// routinely do. Measured, plain modulo distributes better than hashing: 251 is
-/// prime, so every remainder stays reachable at any clock granularity, and 83 is
-/// coprime with it, so consecutive callers land far apart and cycle through all
-/// 251 buckets before repeating.
+/// 251 is prime so every remainder stays reachable, and 83 is coprime with it,
+/// so 251 consecutive callers cover all 251 buckets before repeating. Measured
+/// over 10^6 sequential ticks, plain modulo fills every bucket at occupancy
+/// 3984-3985; a multiply-and-shift hash of the same input spread 3966-4005.
 fn jitter_millis(nanos: u64, sequence: u64) -> u64 {
     nanos.wrapping_add(sequence.wrapping_mul(83)) % AI_RETRY_JITTER_SPREAD_MS
 }

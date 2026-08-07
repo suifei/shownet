@@ -925,6 +925,17 @@ function App() {
           setCapturing(event.payload.proxyRunning);
           void refreshSessions();
         }),
+        // Sent when the capture stopped but reading the full status failed —
+        // typically the same storage fault that broke the stop in the first
+        // place. Carries no payload because anything it could carry comes from
+        // the read that just failed; it exists so the shell cannot be left
+        // showing 抓包中 for a capture that is down, with the takeover switch
+        // greyed out behind that stale flag.
+        listen("capture://stopped", () => {
+          setCapturing(false);
+          setRuntime((current) => ({ ...current, proxyRunning: false }));
+          void refreshSessions();
+        }),
         listen<Session>("session://created", () => void refreshSessions()),
         listen<Session>("session://updated", () => void refreshSessions()),
         listen<string>("session://deleted", () => void refreshSessions()),

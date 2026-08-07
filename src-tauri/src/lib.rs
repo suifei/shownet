@@ -2759,12 +2759,11 @@ async fn set_capture_running(
             .ok_or_else(|| "开始抓包需要指定会话".to_string())?;
         start_capture_for_session(&app, &state, session_id, true).await?;
     } else {
-        // Stopping must not be blocked by a restore that failed. Bailing out here
-        // left capture running with the takeover already given up, which put the
-        // recovery notice on screen next to a 重试恢复 button that refuses while
-        // capture runs — and 停止抓包 failed on the same restore, so both exits
-        // were closed. Tear the capture down, then report the restore failure.
-        let restore_result = restore_system_proxy(&state);
+        // Everything that can bail out happens before the takeover is released.
+        // These are std mutexes, so one panic elsewhere poisons them for the
+        // process; returning here leaves the machine exactly as it was, whereas
+        // returning after the restore would hand the system proxy back and then
+        // abort with capture still marked running and nothing emitted.
         let reverse_proxy = state
             .reverse_proxy
             .lock()
@@ -2780,6 +2779,9 @@ async fn set_capture_running(
             capture.listen_address = None;
             (capture.proxy.take(), stopped_session_id)
         };
+        // Released only once the teardown is committed and nothing left can
+        // short-circuit. A failure here is reported, not allowed to strand.
+        let restore_result = restore_system_proxy(&state);
         if let Some(session_id) = stopped_session_id.as_deref() {
             state.breakpoints.cancel_session(session_id, "抓包已停止");
         }
@@ -2793,10 +2795,15 @@ async fn set_capture_running(
         // Teardown is complete, so the frontend hears about it before anything
         // is reported as a failure — returning first left the UI showing 抓包中
         // for a capture that had already stopped, with the takeover switch gated
-        // on that same stale flag. Unconditional, because gating it on "did
-        // something fail" left the success path emitting nothing until a later
-        // fallible read, and held is still held if that read is what fails.
+        // on that same stale flag.
         let emitted = emit_capture_status(&app, &state);
+        if emitted.is_err() {
+            // Building the full status re-reads the same storage that just
+            // failed, so on a locked database the push never happens and the UI
+            // is stranded again. This carries the one fact that cannot be got
+            // wrong: the capture is down.
+            let _ = emit(&app, "capture://stopped", &());
+        }
         // The teardown failures come first: they are what the user has to act
         // on, and a push that failed must not stand in for them.
         restore_result?;

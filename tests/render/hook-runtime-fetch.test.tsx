@@ -30,13 +30,14 @@ class SentinelFailure extends Error {}
 describe("fetch wrapper", () => {
   it("rethrows the failure the page's fetch produced, not the one describing it produced", async () => {
     const nativeCalls: unknown[] = [];
+    const sentinel = (...args: unknown[]) => {
+      nativeCalls.push(args);
+      throw new SentinelFailure("the real reason");
+    };
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
       writable: true,
-      value: (...args: unknown[]) => {
-        nativeCalls.push(args);
-        throw new SentinelFailure("the real reason");
-      },
+      value: sentinel,
     });
 
     // eslint-disable-next-line no-new-func -- evaluating the shipped file is the point
@@ -52,6 +53,14 @@ describe("fetch wrapper", () => {
     } catch (error) {
       raised = error;
     }
+
+    // Liveness first: every assertion below is equally true of the bare
+    // sentinel, so without this the test passes against no wrapper at all.
+    expect(globalThis.fetch).not.toBe(sentinel);
+    const queued = (globalThis as Record<string, unknown>).__SHOWNET_HOOK_QUEUE__ as
+      | Array<{ name?: string }>
+      | undefined;
+    expect(queued?.map((event) => event.name)).toContain("window.fetch");
 
     expect(nativeCalls).toHaveLength(1);
     expect(raised).toBeInstanceOf(SentinelFailure);
