@@ -6547,6 +6547,15 @@ mod tests {
             looks_like_origin_http2_refusal(&error),
             "a GOAWAY carrying ENHANCE_YOUR_CALM must count as a refusal: {error:?}"
         );
+        // The two classifiers on this path must not overlap. A refusal that also
+        // read as a routine ending would be silenced by the `else` below it once
+        // the host had already been downgraded — so the one refusal that arrives
+        // after a TTL expiry, which is what re-arms the workaround, could pass
+        // without a word. They are disjoint by construction; this keeps them so.
+        assert!(
+            !is_benign_forward_end(&error),
+            "an origin refusing our h2 is not a routine ending: {error:?}"
+        );
     }
 
     /// Serves one connection and hands back whatever hyper concluded about it.
