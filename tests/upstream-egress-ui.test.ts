@@ -43,14 +43,24 @@ describe("upstream egress probe and env import (P1)", () => {
 
 describe("connect_tcp Happy Eyeballs / IPv4 preference (P4)", () => {
   it("implements IPv4-first connect with host:port errors in proxy.rs", async () => {
-    const proxy = await readFile(new URL("../src-tauri/src/proxy.rs", import.meta.url), "utf8");
-    assert.match(proxy, /fn order_connect_addrs_ipv4_first/);
-    assert.match(proxy, /async fn connect_tcp_addrs/);
-    assert.match(proxy, /CONNECT_IPV6_WHEN_IPV4_EXISTS/);
-    assert.match(proxy, /lookup_host/);
-    assert.match(proxy, /connect_tcp_falls_back_to_ipv4_when_ipv6_is_unreachable/);
-    assert.match(proxy, /连接 \{host\}:\{port\}/);
-    assert.match(proxy, /pub async fn probe_upstream_egress/);
-    assert.match(proxy, /pub fn parse_proxy_env_value/);
+    const whole = await readFile(new URL("../src-tauri/src/proxy.rs", import.meta.url), "utf8");
+    // Searching the whole file lets a mention inside `mod tests` stand in for
+    // the production symbol it names, so deleting the real function would leave
+    // this green. Production assertions run against the file with its own tests
+    // cut off; the one that genuinely names a test keeps the full text.
+    const testModuleAt = whole.indexOf("\n#[cfg(test)]\nmod tests {");
+    assert.ok(testModuleAt > 0, "test module marker not found; the slice below would be a no-op");
+    const production = whole.slice(0, testModuleAt);
+
+    assert.match(production, /fn order_connect_addrs_ipv4_first/);
+    assert.match(production, /async fn connect_tcp_addrs/);
+    assert.match(production, /CONNECT_IPV6_WHEN_IPV4_EXISTS/);
+    assert.match(production, /lookup_host/);
+    assert.match(production, /连接 \{host\}:\{port\}/);
+    assert.match(production, /pub async fn probe_upstream_egress/);
+    assert.match(production, /pub fn parse_proxy_env_value/);
+
+    // This one is a test name, so it lives in the module the slice removes.
+    assert.match(whole, /connect_tcp_falls_back_to_ipv4_when_ipv6_is_unreachable/);
   });
 });
