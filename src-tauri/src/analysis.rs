@@ -3061,7 +3061,9 @@ mod tests {
 
     #[test]
     fn a_whole_retry_sequence_fits_in_a_sane_wait() {
-        let total: Duration = (0..MAX_AI_ATTEMPTS - 1).map(|a| ai_retry_delay(a, None)).sum();
+        let total: Duration = (0..MAX_AI_ATTEMPTS - 1)
+            .map(|a| ai_retry_delay(a, None))
+            .sum();
         assert!(
             total <= Duration::from_secs(60),
             "a user watching a stalled analysis waited {total:?}"
@@ -3427,7 +3429,10 @@ mod tests {
                     "429 Too Many Requests",
                     r#"{"error":{"message":"Requests are too frequent."}}"#,
                 ),
-                http_response("429 Too Many Requests", r#"{"error":{"message":"slow down"}}"#),
+                http_response(
+                    "429 Too Many Requests",
+                    r#"{"error":{"message":"slow down"}}"#,
+                ),
                 http_response("200 OK", r#"{"choices":[{"message":{"content":"报告"}}]}"#),
             ];
             for reply in replies {

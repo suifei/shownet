@@ -5603,6 +5603,8 @@ kbd {
 .agent-skill-runs li > div strong { display: flex; min-width: 0; align-items: baseline; gap: 5px; overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-skill-runs li > div strong small { color: var(--text-subtle); font-family: "DM Mono", monospace; font-size: 11px; font-weight: 500; }
 .agent-skill-runs li > div > span { overflow: hidden; color: var(--text-subtle); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+/* A failed run used to show a red icon and nothing about what went wrong. */
+.agent-skill-runs__error { color: var(--danger-ink) !important; }
 .agent-skill-runs time { color: var(--text-subtle); font-family: "DM Mono", monospace; font-size: 11px; }
 
 .generated-report {
@@ -8331,6 +8333,9 @@ kbd {
 .rule-row strong { overflow: hidden; color: var(--text-body); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .rule-row small { color: var(--text-subtle); font-size: 11px; }
 .rule-row code { color: var(--codex-accent-ink); font-size: 12px; }
+/* A rule whose action keeps failing used to look identical to an idle one. */
+.rule-row__error { display: flex; align-items: center; gap: 4px; overflow: hidden; color: var(--warning-ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.rule-row__error svg { flex: none; }
 .rule-row-actions { display: grid; grid-template-columns: repeat(3, 28px); justify-content: end; gap: 3px; }
 .rule-row-actions button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: var(--text-muted); background: transparent; border-radius: 8px; }
 .rule-row-actions button:hover:not(:disabled), .rule-row-actions button.is-active { color: var(--codex-accent-ink); background: var(--codex-accent-soft); }

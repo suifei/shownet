@@ -1323,7 +1323,7 @@ function AgentActivityPanel({ activities, skillRuns, running }: { activities: Ag
                 <span className={`agent-skill-runs__status is-${run.status}`}>
                   {run.status === "running" ? <LoaderCircle className="spin" size={12} /> : run.status === "failed" ? <CircleAlert size={12} /> : <Check size={12} />}
                 </span>
-                <div><strong>{run.skillName}<small>v{run.skillVersion}</small></strong><span>{run.actualToolCalls.length} 次工具调用 · {run.permissions.length} 项权限</span></div>
+                <div><strong>{run.skillName}<small>v{run.skillVersion}</small></strong><span>{run.actualToolCalls.length} 次工具调用 · {run.permissions.length} 项权限</span>{run.error && <span className="agent-skill-runs__error" title={run.error}>{run.error}</span>}</div>
                 <time>{formatDuration(run.durationMs, run.status)}</time>
               </li>
             ))}

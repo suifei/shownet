@@ -14,6 +14,8 @@ const confirmDialog = await readFile(new URL("../src/components/ConfirmDialog.ts
 const shortcuts = await readFile(new URL("../src/components/ShortcutsSheet.tsx", import.meta.url), "utf8");
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+const analysis = await readFile(new URL("../src/components/AnalysisView.tsx", import.meta.url), "utf8");
+const bodyViewer = await readFile(new URL("../src/components/HttpBodyViewer.tsx", import.meta.url), "utf8");
 
 describe("settings stop offering edits that do not exist", () => {
   it("presents the listener address and port as facts, not form fields", () => {
@@ -30,6 +32,28 @@ describe("settings stop offering edits that do not exist", () => {
 
   it("still lets the user copy the endpoint", () => {
     assert.match(settings, /copyText\(`\$\{runtime\.listenHost\}:\$\{runtime\.proxyPort\}`, "代理地址"\)/);
+  });
+});
+
+describe("recorded failures are shown, not just stored", () => {
+  it("tells the user why a capture rule stopped working", () => {
+    // `last_error` is written on every rule run (storage.rs), but the row only
+    // ever showed 命中 0 — a rule whose action keeps failing looked idle.
+    assert.match(workbench, /rule\.lastError && <small className="rule-row__error"/);
+    assert.match(styles, /\.rule-row__error \{/);
+  });
+
+  it("tells the user why a skill run failed", () => {
+    // The status dot went red and nothing said what went wrong.
+    assert.match(analysis, /run\.error && <span className="agent-skill-runs__error"/);
+    assert.match(styles, /\.agent-skill-runs__error \{/);
+  });
+
+  it("does not treat an omitted binary body as a fault", () => {
+    // 保存二进制响应 is off by default, so every image would carry an alert.
+    assert.match(bodyViewer, /const warning = Boolean\(metadata\.error \|\| metadata\.truncated \|\| !metadata\.complete\)/);
+    assert.doesNotMatch(bodyViewer, /const warning = Boolean\(omitted \|\|/);
+    assert.match(styles, /\.response-body-status\.is-omitted \{/);
   });
 });
 
