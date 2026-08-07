@@ -108,6 +108,23 @@
     } catch {}
   };
 
+  const skipReports = new WeakMap();
+
+  /** Emits `hook.skipped` the first time a given property is passed over. */
+  const reportSkippedOnce = (owner, key, reason) => {
+    try {
+      let seen = skipReports.get(owner);
+      if (!seen) {
+        seen = new Set();
+        skipReports.set(owner, seen);
+      }
+      const name = String(key);
+      if (seen.has(name)) return;
+      seen.add(name);
+      emit({ kind: "runtime", name: "hook.skipped", input: { property: name, reason }, output: null });
+    } catch {}
+  };
+
   /**
    * True when `key` resolves to an accessor anywhere on the prototype chain.
    *
@@ -140,8 +157,10 @@
       if (inheritedAccessor(owner, key)) {
         // Wrapping would flatten the accessor into a data property, losing its
         // per-access behaviour. Skipping is the safe choice, but it is a hole in
-        // what gets captured, so it is reported rather than passed over quietly.
-        emit({ kind: "runtime", name: "hook.skipped", input: { property: String(key), reason: "accessor" }, output: null });
+        // what gets captured, so it is reported — once. The library probe retries
+        // on a 500ms interval up to 120 times, so reporting on every pass would
+        // bury the log an operator reads under a thousand copies of one fact.
+        reportSkippedOnce(owner, key, "accessor");
         return false;
       }
       original = owner[key];
