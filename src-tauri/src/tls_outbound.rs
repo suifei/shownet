@@ -512,6 +512,18 @@ pub fn note_origin_http2_rejected(host: &str) -> bool {
         count: 0,
         downgraded_at: None,
     });
+    // An expired downgrade starts the host over rather than leaving its old
+    // tally standing. Without this the count stayed above the threshold forever
+    // and the `==` below could never match again, so a host could be downgraded
+    // exactly once per process and never again however often it refused — the
+    // TTL disarmed the feature instead of re-evaluating it.
+    if entry
+        .downgraded_at
+        .is_some_and(|at| at.elapsed() >= H2_DOWNGRADE_TTL)
+    {
+        entry.count = 0;
+        entry.downgraded_at = None;
+    }
     entry.count = entry.count.saturating_add(1);
     if entry.count == H2_REJECTIONS_BEFORE_DOWNGRADE {
         entry.downgraded_at = Some(std::time::Instant::now());
@@ -535,6 +547,17 @@ fn origin_http2_rejected(host: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Ages a host's downgrade past the TTL, for tests that must not sleep for it.
+#[cfg(test)]
+fn expire_downgrade_for_test(host: &str) {
+    if let Ok(mut hosts) = H2_REJECTED_HOSTS.write() {
+        if let Some(entry) = hosts.get_mut(host) {
+            entry.downgraded_at = std::time::Instant::now()
+                .checked_sub(H2_DOWNGRADE_TTL + std::time::Duration::from_secs(1));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -750,6 +773,23 @@ mod tests {
         // genuine repeat offender is not starved by the cap.
         assert!(note_origin_http2_rejected("host-0.test"));
         assert!(origin_force_http11_for_host("host-0.test"));
+
+        // Once the downgrade ages out the host is offered h2 again — and can be
+        // downgraded again if it still refuses. The first version could not:
+        // the tally stayed above the threshold, so the equality that arms it
+        // never matched twice and one expiry disarmed the host for good.
+        clear_origin_http2_rejections();
+        assert!(!note_origin_http2_rejected(host));
+        assert!(note_origin_http2_rejected(host));
+        assert!(origin_force_http11_for_host(host));
+        expire_downgrade_for_test(host);
+        assert!(!origin_force_http11_for_host(host), "downgrade expires");
+        assert!(!note_origin_http2_rejected(host), "and starts over");
+        assert!(
+            note_origin_http2_rejected(host),
+            "second refusal re-arms it"
+        );
+        assert!(origin_force_http11_for_host(host));
 
         clear_origin_http2_rejections();
         assert!(!origin_force_http11_for_host(host));
