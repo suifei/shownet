@@ -10,7 +10,7 @@
 use crate::tls_clienthello_catalog::{self, AlpnRecipe, ClientHelloPreset};
 use crate::tls_fingerprint::ClientTlsFingerprint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -470,26 +470,49 @@ pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<Clien
 /// egress settled after one navigation. Until outbound h2 can be shaped to
 /// match a real browser, remembering which origins refuse ours and speaking
 /// HTTP/1.1 to them is what keeps those sites usable.
-static H2_REJECTED_HOSTS: std::sync::LazyLock<std::sync::RwLock<HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashSet::new()));
+static H2_REJECTED_HOSTS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
-/// Records that `host` failed over HTTP/2. Returns true when newly recorded.
+/// How many h2 failures for one origin before we stop offering it h2.
+///
+/// One is not enough. A browser abandoning a request, a network blip or a
+/// mid-stream close all surface as send errors, and downgrading a host for the
+/// life of the process on a single such event would quietly cost every later
+/// request to it the multiplexing it should have had — a regression nobody
+/// would connect to the request that caused it.
+const H2_REJECTIONS_BEFORE_DOWNGRADE: u32 = 2;
+
+/// Records an HTTP/2 failure for `host`. Returns true when this observation is
+/// the one that downgrades it.
 pub fn note_origin_http2_rejected(host: &str) -> bool {
     let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if key.is_empty() {
         return false;
     }
-    match H2_REJECTED_HOSTS.write() {
-        Ok(mut hosts) => hosts.insert(key),
-        Err(_) => false,
+    let Ok(mut hosts) = H2_REJECTED_HOSTS.write() else {
+        return false;
+    };
+    // Bounded so a host-header-controlled flood cannot grow it without limit.
+    if hosts.len() >= MAX_TRACKED_H2_HOSTS && !hosts.contains_key(&key) {
+        return false;
     }
+    let seen = hosts.entry(key).or_insert(0);
+    *seen = seen.saturating_add(1);
+    *seen == H2_REJECTIONS_BEFORE_DOWNGRADE
 }
+
+/// Ceiling on the rejection table; hostnames come from the wire.
+const MAX_TRACKED_H2_HOSTS: usize = 1024;
 
 fn origin_http2_rejected(host: &str) -> bool {
     let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
     H2_REJECTED_HOSTS
         .read()
-        .map(|hosts| hosts.contains(&key))
+        .map(|hosts| {
+            hosts
+                .get(&key)
+                .is_some_and(|seen| *seen >= H2_REJECTIONS_BEFORE_DOWNGRADE)
+        })
         .unwrap_or(false)
 }
 
@@ -657,9 +680,22 @@ mod tests {
             "unknown host starts on h2"
         );
 
-        // Recorded once; a repeat is not a new observation.
-        assert!(note_origin_http2_rejected(host));
-        assert!(!note_origin_http2_rejected(host));
+        // One failure is not a verdict: a browser abandoning a request or a
+        // network blip must not cost every later request to this host its
+        // multiplexing for the life of the process.
+        assert!(
+            !note_origin_http2_rejected(host),
+            "first failure only observes"
+        );
+        assert!(!origin_force_http11_for_host(host), "still offered h2");
+
+        // The second is. `true` marks the transition, so the caller can say so
+        // once rather than on every subsequent failure.
+        assert!(
+            note_origin_http2_rejected(host),
+            "second failure downgrades"
+        );
+        assert!(!note_origin_http2_rejected(host), "already downgraded");
 
         // Every later connection to it takes the HTTP/1.1 route, which is what
         // stops a page whose h2 connection the origin refuses from reloading
@@ -676,6 +712,24 @@ mod tests {
 
         // The static list is unaffected either way.
         assert!(origin_force_http11_for_host("pss.bdstatic.com"));
+
+        // Hostnames arrive from the wire, so the table is capped. Asserted here
+        // rather than in its own test because this state is process-global and
+        // Rust runs tests in parallel — two tests mutating it raced each other.
+        clear_origin_http2_rejections();
+        for index in 0..(MAX_TRACKED_H2_HOSTS + 50) {
+            note_origin_http2_rejected(&format!("host-{index}.test"));
+        }
+        let tracked = H2_REJECTED_HOSTS
+            .read()
+            .map(|hosts| hosts.len())
+            .unwrap_or(0);
+        assert!(tracked <= MAX_TRACKED_H2_HOSTS, "tracked {tracked} hosts");
+        // A host already counted still progresses once the table is full, so a
+        // genuine repeat offender is not starved by the cap.
+        assert!(note_origin_http2_rejected("host-0.test"));
+        assert!(origin_force_http11_for_host("host-0.test"));
+
         clear_origin_http2_rejections();
         assert!(!origin_force_http11_for_host(host));
     }

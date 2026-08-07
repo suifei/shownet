@@ -2473,7 +2473,10 @@ async fn forward_mitm_https(
             // in 20 seconds while h1 settled after one navigation. The current
             // request still fails, but the retry the page is about to make
             // succeeds instead of looping forever.
-            if outbound_is_http2 && tls_outbound::note_origin_http2_rejected(&host) {
+            if outbound_is_http2
+                && looks_like_origin_http2_refusal(&error)
+                && tls_outbound::note_origin_http2_rejected(&host)
+            {
                 format!(
                     "转发目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
                 )
@@ -4483,7 +4486,10 @@ async fn forward_http(
             // protocol, but never contributed to it — so a client reaching an
             // h2-refusing origin this way kept retrying h2 forever while the
             // MITM path had already learned better. Both paths teach it now.
-            if outbound_is_http2 && tls_outbound::note_origin_http2_rejected(tls_identity_host) {
+            if outbound_is_http2
+                && looks_like_origin_http2_refusal(&error)
+                && tls_outbound::note_origin_http2_rejected(tls_identity_host)
+            {
                 format!(
                     "目标请求失败: {error}（该源站拒绝我们的 HTTP/2 连接，已记住并对其改用 HTTP/1.1，重试即可）"
                 )
@@ -5030,6 +5036,16 @@ fn ensure_host_header(
         .map_err(|error| format!("目标 Host 标头无效: {error}"))?;
     headers.insert(HOST, value);
     Ok(())
+}
+
+/// Whether a send failure looks like the origin refusing our HTTP/2, as opposed
+/// to the client going away.
+///
+/// A browser abandoning a request — navigating away, aborting a fetch — arrives
+/// here as a cancellation, and counting those as the origin's verdict would
+/// downgrade perfectly healthy hosts to HTTP/1.1 on ordinary browsing.
+fn looks_like_origin_http2_refusal(error: &hyper::Error) -> bool {
+    !error.is_canceled() && !error.is_user()
 }
 
 fn strip_http2_forbidden_headers(headers: &mut HeaderMap) {
