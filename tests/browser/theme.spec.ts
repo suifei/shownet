@@ -132,3 +132,40 @@ test("declares the dark color scheme so native UI matches", async ({ page }) => 
   const brightest = Math.max(...channels);
   expect(brightest, `scrollbar thumb ${thumb} is too bright for a dark surface`).toBeLessThan(140);
 });
+
+test("floating surfaces read as glass with thickness", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTitle("快捷命令").click();
+  const palette = page.locator(".command-palette");
+  await expect(palette).toBeVisible();
+
+  const shadow = await palette.evaluate((el) => getComputedStyle(el).boxShadow);
+  // Glass catches light on its whole rim, not just along the top. A single
+  // inset line is a drawn border; three layers — perimeter, lit top, and a
+  // short inner falloff — is what makes the edge look like it has depth.
+  const insets = shadow.split(/,(?![^(]*\))/).filter((part) => part.includes("inset"));
+  expect(insets.length, `expected a layered rim, got: ${shadow}`).toBeGreaterThanOrEqual(3);
+
+  // Bright enough to see. An earlier attempt sat at ~1% brightness difference,
+  // which measured as "applied" and looked like nothing at all.
+  const brightest = Math.max(
+    ...[...shadow.matchAll(/rgba?\(([^)]+)\)/g)].map((match) => {
+      const [r, g, b, a = "1"] = match[1].split(",").map((v) => parseFloat(v));
+      return Math.max(r, g, b) > 200 ? parseFloat(a) : 0;
+    }),
+  );
+  expect(brightest, `rim highlight is too faint to notice: ${shadow}`).toBeGreaterThan(0.1);
+});
+
+test("the dense interface keeps its flat chrome", async ({ page }) => {
+  await page.goto("/");
+  // The rim belongs to surfaces that float over content. Putting it on the grid
+  // or the rails would outline every panel in the app.
+  for (const selector of [".request-grid", ".nav-rail", ".sessions-panel"]) {
+    const element = page.locator(selector).first();
+    if ((await element.count()) === 0) continue;
+    const shadow = await element.evaluate((el) => getComputedStyle(el).boxShadow);
+    const insets = shadow.split(/,(?![^(]*\))/).filter((part) => part.includes("inset"));
+    expect(insets.length, `${selector} picked up the floating-surface rim`).toBeLessThan(3);
+  }
+});

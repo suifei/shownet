@@ -109,9 +109,26 @@
   --glass-blur-strong: saturate(200%) blur(44px);
 
   /* ---- depth ---- */
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.075);
-  --glass-edge-strong: inset 0 1px 0 rgba(255, 255, 255, 0.13);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 42%);
+  /* Glass has thickness, so its rim catches light all the way round rather than
+     only along the top. Three layers: a hairline on the whole perimeter, a
+     brighter top where the light actually comes from, and a short inner falloff
+     that reads as the edge having depth instead of being a drawn border.
+     Kept dim on purpose — this sits over dense data, and a rim bright enough to
+     notice on its own becomes an outline around every dialog. */
+  --glass-edge:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 3px 7px -5px rgba(255, 255, 255, 0.30);
+  --glass-edge-strong:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 4px 10px -6px rgba(255, 255, 255, 0.42);
+  /* A curved surface does not light evenly: brightest where it turns toward the
+     light, falling off across the face. The diagonal is what separates this from
+     a flat panel with a gradient on it. */
+  --sheen:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 42%),
+    linear-gradient(118deg, rgba(255, 255, 255, 0.085) 0%, rgba(255, 255, 255, 0) 28%, rgba(255, 255, 255, 0) 72%, rgba(255, 255, 255, 0.04) 100%);
   --elev-1: 0 1px 2px rgba(0, 0, 0, 0.42), 0 4px 12px -4px rgba(0, 0, 0, 0.5);
   --elev-2: 0 2px 6px rgba(0, 0, 0, 0.44), 0 12px 32px -10px rgba(0, 0, 0, 0.62);
   --elev-3: 0 8px 20px rgba(0, 0, 0, 0.5), 0 32px 72px -18px rgba(0, 0, 0, 0.72);
