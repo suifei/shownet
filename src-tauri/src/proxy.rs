@@ -1024,6 +1024,15 @@ impl ReverseProxyHandle {
         self.address
     }
 
+    /// Whether the accept loop is still alive.
+    ///
+    /// Holding the handle only proves nobody asked it to stop. If the bound task
+    /// died on its own, reporting "运行中" from the handle's mere existence sends
+    /// the user to an entry point that refuses every connection.
+    pub fn is_serving(&self) -> bool {
+        !self.task.inner().is_finished()
+    }
+
     pub async fn stop(mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -7490,6 +7499,30 @@ mod tests {
             reverse_target_uri(&base, &incoming).unwrap().to_string(),
             "https://api.example.test/v2/orders/42?expand=items"
         );
+    }
+
+    #[tokio::test]
+    async fn local_socket_reverse_proxy_reports_serving_only_while_its_task_lives() {
+        let capture_sink: CaptureSink = Arc::new(|_| {});
+        let error_sink: ErrorSink = Arc::new(|_| {});
+        let reverse = ReverseProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-liveness".to_string(),
+            "http://127.0.0.1:9/unused".to_string(),
+            false,
+            direct_upstream(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        assert!(reverse.is_serving(), "a freshly started entry point serves");
+
+        // Holding the handle after a stop must not keep reporting 运行中 — that
+        // is the shape that sends users to an entry point nothing is listening on.
+        reverse.stop().await;
     }
 
     #[tokio::test]

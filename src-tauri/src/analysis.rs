@@ -660,6 +660,19 @@ pub async fn followup_analysis(
     let plan = skills::build_plan(&report.mode, &requests)?;
     let (tool_definitions, external_tools) =
         analysis_tool_definitions(state, &analysis_settings, &plan.tool_names).await;
+    // A graph run says so when an external MCP server fails to load; a follow-up
+    // used to answer as if the evidence source had simply not been asked for.
+    for error in external_tools.errors.iter().take(3) {
+        emit_stream(
+            app,
+            &report,
+            "tool-error",
+            "",
+            report.key_request_count,
+            None,
+            Some(format!("本次追问未加载外部 MCP：{error}")),
+        )?;
+    }
     if !tool_definitions.is_empty() {
         let tool_log_id = state.storage.begin_ai_request_log(
             &report.id,

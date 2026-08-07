@@ -2864,7 +2864,12 @@ fn reverse_proxy_status(state: &AppState) -> Result<ReverseProxyStatus, String> 
         .lock()
         .map_err(|_| "免代理入口运行状态已损坏".to_string())?;
     let bound_port = runtime.as_ref().map(|runtime| runtime.bound_address.port());
-    let running = runtime.is_some();
+    // Holding a handle only means nobody stopped it; the accept loop can still
+    // have died underneath us, and claiming 运行中 then points the user at an
+    // entry point that refuses every connection.
+    let running = runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_serving());
     let local_url = bound_port.map(|port| format!("http://127.0.0.1:{port}"));
     let lan_urls = if running && settings.lan_enabled {
         bound_port
