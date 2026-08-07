@@ -1180,13 +1180,15 @@ fn insomnia_url(
         if name.is_empty() {
             continue;
         }
-        let value = resolve_insomnia_value(
-            parameter
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            variables,
-        );
+        // A spec parameter is routinely a number — page=1, limit=50, an id.
+        // `as_str()` returns None for those and the empty default silently
+        // turned them into `?page=`, importing a request that asks for
+        // something different from the one the spec describes.
+        let raw = parameter
+            .get("value")
+            .map(value_to_string)
+            .unwrap_or_default();
+        let value = resolve_insomnia_value(&raw, variables);
         url.query_pairs_mut().append_pair(name, &value);
     }
     url.to_string()
@@ -2279,6 +2281,40 @@ fn postman_body(draft: &RequestDraft) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_numeric_spec_parameter_keeps_its_value() {
+        // page=1 and limit=50 are how specs actually write these, and as_str()
+        // returns None for a JSON number — so the query arrived as `?page=`
+        // and the imported request asked for something else entirely.
+        let mut builder = ImportBuilder::new();
+        let parameters = vec![
+            json!({"name":"page","value":1}),
+            json!({"name":"limit","value":50}),
+            json!({"name":"active","value":true}),
+            json!({"name":"q","value":"tea & coffee"}),
+            json!({"name":"skipped","value":null}),
+        ];
+        let url = insomnia_url(
+            "https://api.example.test/items",
+            Some(&parameters),
+            &HashMap::new(),
+            &mut builder,
+        );
+        assert!(url.contains("page=1"), "{url}");
+        assert!(url.contains("limit=50"), "{url}");
+        assert!(url.contains("active=true"), "{url}");
+        // Strings still work, and encoding is unchanged.
+        assert!(
+            url.contains("q=tea+%26+coffee") || url.contains("q=tea%20%26%20coffee"),
+            "{url}"
+        );
+        // A null value stays empty rather than becoming the text "null".
+        assert!(
+            url.contains("skipped=&") || url.ends_with("skipped="),
+            "{url}"
+        );
+    }
 
     #[test]
     fn a_form_example_written_as_a_string_is_not_dropped() {
