@@ -36,14 +36,45 @@ describe("wrapping an inherited method leaves it as writable as it was", () => {
     expect(descriptor, "the probe should have wrapped the prototype method").toBeTruthy();
 
     // `encrypt` is inherited, so there was no own descriptor to copy. Defaulting
-    // to defineProperty's own defaults would have made it non-writable,
-    // non-enumerable and non-configurable — the page could then never take its
-    // own method back, and it would vanish from for...in and object spread.
+    // to defineProperty's own defaults would have made it non-writable and
+    // non-configurable, so the page could never take its own method back.
     expect(descriptor?.writable).toBe(true);
     expect(descriptor?.configurable).toBe(true);
-    expect(descriptor?.enumerable).toBe(true);
+
+    // But it must not become enumerable either. A prototype method is never an
+    // own enumerable key, and inventing one changes Object.keys, for...in,
+    // object spread and structuredClone for every instance.
+    expect(descriptor?.enumerable).toBe(false);
+    expect(Object.keys(sm4)).not.toContain("encrypt");
+    expect({ ...sm4 }).not.toHaveProperty("encrypt");
 
     (sm4 as unknown as Record<string, unknown>).encrypt = () => "replaced";
     expect((sm4 as unknown as { encrypt: () => string }).encrypt()).toBe("replaced");
+  });
+
+  it("leaves an inherited accessor alone rather than flattening it", () => {
+    let reads = 0;
+    class Lazy {
+      get encrypt() {
+        reads += 1;
+        return (value: string) => `enc:${value}`;
+      }
+    }
+    const sm2 = new Lazy();
+    Object.defineProperty(globalThis, "sm2", { configurable: true, writable: true, value: sm2 });
+
+    vi.useFakeTimers();
+    // eslint-disable-next-line no-new-func -- evaluating the shipped file is the point
+    new Function(RUNTIME_SOURCE)();
+    vi.advanceTimersByTime(600);
+
+    // Replacing the getter with a data property would shadow it permanently:
+    // the per-access work would stop running and the property would freeze at
+    // whatever the first read returned.
+    expect(Object.getOwnPropertyDescriptor(sm2, "encrypt")).toBeUndefined();
+    const before = reads;
+    void sm2.encrypt;
+    void sm2.encrypt;
+    expect(reads).toBe(before + 2);
   });
 });

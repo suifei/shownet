@@ -108,6 +108,15 @@
     } catch {}
   };
 
+  /** True when `key` resolves to an accessor anywhere on the prototype chain. */
+  const inheritedAccessor = (owner, key) => {
+    for (let node = owner; node; node = Object.getPrototypeOf(node)) {
+      const descriptor = Object.getOwnPropertyDescriptor(node, key);
+      if (descriptor) return typeof descriptor.get === "function" || typeof descriptor.set === "function";
+    }
+    return false;
+  };
+
   const replace = (owner, key, factory) => {
     if (!owner) return false;
     // Reading the property can trip a throwing getter, and building the wrapper
@@ -115,6 +124,10 @@
     let original;
     let wrapped;
     try {
+      // An accessor is left alone. Replacing one with a data property would
+      // shadow the getter for good, losing whatever per-access work it does and
+      // silently disabling the matching setter.
+      if (inheritedAccessor(owner, key)) return false;
       original = owner[key];
       if (typeof original !== "function" || original[WRAPPED]) return false;
       wrapped = factory(original);
@@ -122,13 +135,14 @@
     try {
       Object.defineProperty(wrapped, WRAPPED, { value: true });
       Object.defineProperty(wrapped, "toString", { value: original.toString.bind(original) });
-      // When the method is inherited, there is no own descriptor to copy and the
-      // defaults would make it non-writable, non-enumerable and non-configurable
-      // — so a later `obj.method = ...` by the page would fail, and the method
-      // would drop out of for...in and object spread. Install a plain data
-      // property instead, matching how an ordinary assignment behaves.
+      // An inherited method has no own descriptor to copy, and defineProperty's
+      // defaults would install it non-writable and non-configurable, so the page
+      // could never reassign or delete its own method again. Restore writability
+      // without also making it enumerable: a prototype method is never an own
+      // enumerable key, and inventing one changes Object.keys, for...in, object
+      // spread and structuredClone on every instance.
       const existing = Object.getOwnPropertyDescriptor(owner, key)
-        ?? { writable: true, enumerable: true, configurable: true };
+        ?? { writable: true, enumerable: false, configurable: true };
       Object.defineProperty(owner, key, { ...existing, value: wrapped });
       return true;
     } catch { return false; }
@@ -136,23 +150,49 @@
 
   replace(globalThis, "fetch", (original) => function shownetFetch(resource, init) {
     const started = performance.now();
-    const url = typeof resource === "string" ? resource : resource?.url;
-    const method = String(init?.method || resource?.method || "GET").toUpperCase();
+    // Reading `resource.url`, `.method`, `.headers` and `.credentials` runs
+    // page-supplied getters, so it happens once, defensively, and never on the
+    // path to issuing the request. Doing it inline ahead of the real fetch meant
+    // a throwing getter aborted the request the page had asked for.
+    const describe = () => {
+      try {
+        return {
+          url: typeof resource === "string" ? resource : resource?.url,
+          method: String(init?.method || resource?.method || "GET").toUpperCase(),
+          input: {
+            headers: headerEntries(init?.headers || resource?.headers),
+            credentials: init?.credentials || resource?.credentials,
+            body: init?.body,
+          },
+        };
+      } catch { return { url: undefined, method: "GET", input: "[Unavailable]" }; }
+    };
+    const report = (output) => {
+      try {
+        const { url, method, input } = describe();
+        emit({ kind: "network", name: "window.fetch", url, method, input, output, durationMs: performance.now() - started });
+      } catch {}
+    };
     let promise;
     try { promise = Reflect.apply(original, this, arguments); } catch (error) {
-      // Report on a best-effort basis, then rethrow what fetch actually threw.
-      // Describing the failed call must not become the failure the page sees.
-      try {
-        emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started });
-      } catch {}
+      // Report best-effort, then rethrow what fetch actually threw. Describing
+      // the failed call must not become the failure the page sees.
+      report({ error });
       throw error;
     }
     // Observing the result must not change what the caller gets back, and a
     // caller that hands us a thenable-less value must still get it back.
     try {
       promise.then(
-        (response) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { status: response.status, ok: response.ok, redirected: response.redirected, headers: headerEntries(response.headers) }, durationMs: performance.now() - started }),
-        (error) => emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started }),
+        (response) => {
+          // Reading the response also runs page code when it is a proxy, and a
+          // throw here would surface as an unhandledrejection on the page —
+          // observable to exactly the scripts this runtime watches.
+          try {
+            report({ status: response.status, ok: response.ok, redirected: response.redirected, headers: headerEntries(response.headers) });
+          } catch { report({ error: "[Unavailable]" }); }
+        },
+        (error) => report({ error }),
       );
     } catch {}
     return promise;
@@ -179,11 +219,20 @@
       // guarded: a page that shadows addEventListener must not be able to
       // cancel its own request through our listener.
       try {
-        this.addEventListener("loadend", () => emit({
-          kind: "network", name: "XMLHttpRequest.send", url: this.responseURL || state.url,
-          method: state.method, input: { headers: state.headers, body: state.body, withCredentials: this.withCredentials }, output: { status: this.status, responseType: this.responseType, headers: this.getAllResponseHeaders() },
-          durationMs: performance.now() - state.started,
-        }), { once: true });
+        // The callback body reads responseURL/status/withCredentials, which a
+        // fingerprinting page can redefine as throwing getters. A throw inside
+        // DOM dispatch cannot stop the request, but it does raise an uncaught
+        // error on window for every XHR — so the body is guarded too, not just
+        // the addEventListener call.
+        this.addEventListener("loadend", () => {
+          try {
+            emit({
+              kind: "network", name: "XMLHttpRequest.send", url: this.responseURL || state.url,
+              method: state.method, input: { headers: state.headers, body: state.body, withCredentials: this.withCredentials }, output: { status: this.status, responseType: this.responseType, headers: this.getAllResponseHeaders() },
+              durationMs: performance.now() - state.started,
+            });
+          } catch {}
+        }, { once: true });
       } catch {}
       return Reflect.apply(original, this, arguments);
     });

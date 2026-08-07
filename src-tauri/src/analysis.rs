@@ -43,7 +43,11 @@ const MAX_MODELS_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AI_ATTEMPTS: u32 = 5;
 const AI_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const AI_RETRY_MAX_DELAY: Duration = Duration::from_secs(20);
-const AI_RETRY_JITTER_MAX_MS: u64 = 250;
+/// Floor for a provider-supplied `Retry-After`, so `0` cannot spend the whole
+/// retry budget in one burst.
+const AI_RETRY_MIN_DELAY: Duration = Duration::from_millis(250);
+/// Coprime with both 1000 (macOS microsecond clock) and 100 (Windows ticks).
+const AI_RETRY_JITTER_SPREAD_MS: u64 = 251;
 
 pub async fn list_models(
     state: &AppState,
@@ -2555,19 +2559,33 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 
 /// Spreads retries out so that the graph nodes running concurrently do not all
 /// come back at the same instant and rebuild the burst that got us limited.
+///
+/// The clock alone is not enough of a source. macOS reports wall time to
+/// microsecond granularity, so `subsec_nanos()` is always a multiple of 1000 and
+/// taking it modulo a multiple of 250 yielded exactly zero every single time —
+/// dead jitter on the primary release target. Hashing the nanos together with
+/// the address of a stack local separates callers that share a timestamp, and
+/// the modulus is now coprime with both clock granularities.
 fn retry_jitter() -> Duration {
+    let anchor = 0u8;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::from(elapsed.subsec_nanos()))
         .unwrap_or(0);
-    Duration::from_millis(nanos % AI_RETRY_JITTER_MAX_MS)
+    let mixed = nanos
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(std::ptr::from_ref(&anchor) as u64);
+    Duration::from_millis((mixed >> 17) % AI_RETRY_JITTER_SPREAD_MS)
 }
 
 /// Obeys `Retry-After` when the provider sends one; otherwise backs off
 /// exponentially from `AI_RETRY_BASE_DELAY`.
+///
+/// A provider-supplied wait is honoured but bounded at both ends: `Retry-After: 0`
+/// would otherwise fire the whole retry budget back-to-back with no delay at all.
 fn ai_retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
     if let Some(delay) = retry_after {
-        return delay.min(AI_RETRY_MAX_DELAY);
+        return delay.clamp(AI_RETRY_MIN_DELAY, AI_RETRY_MAX_DELAY);
     }
     let exponential = AI_RETRY_BASE_DELAY.saturating_mul(1u32 << attempt.min(5));
     exponential.min(AI_RETRY_MAX_DELAY) + retry_jitter()
@@ -3053,13 +3071,32 @@ mod tests {
         assert!(delay(1) >= delay(0));
         assert!(delay(2) >= delay(1));
         // Jitter is additive, so the ceiling is the cap plus one jitter step.
-        let ceiling = AI_RETRY_MAX_DELAY + Duration::from_millis(AI_RETRY_JITTER_MAX_MS);
+        let ceiling = AI_RETRY_MAX_DELAY + Duration::from_millis(AI_RETRY_JITTER_SPREAD_MS);
         for attempt in 0..64 {
             assert!(
                 ai_retry_delay(attempt, None) <= ceiling,
                 "attempt {attempt} exceeded the delay ceiling"
             );
         }
+    }
+
+    #[test]
+    fn jitter_actually_varies() {
+        // The first version took the clock's nanoseconds modulo 250. macOS
+        // reports wall time in whole microseconds, so every sample was a
+        // multiple of 1000 and the remainder was always exactly 0 — concurrent
+        // graph nodes retried in lockstep, rebuilding the burst the jitter
+        // exists to break up. A single distinct value here means it is dead.
+        let samples: std::collections::HashSet<u128> =
+            (0..500).map(|_| retry_jitter().as_millis()).collect();
+        assert!(
+            samples.len() > 1,
+            "jitter produced only {:?} across 500 samples",
+            samples
+        );
+        assert!(samples
+            .iter()
+            .all(|value| *value < AI_RETRY_JITTER_SPREAD_MS as u128));
     }
 
     #[test]
@@ -3074,6 +3111,9 @@ mod tests {
             ai_retry_delay(0, Some(Duration::from_secs(86_400))),
             AI_RETRY_MAX_DELAY
         );
+        // `Retry-After: 0` is honoured as "soon", not as "immediately" — without
+        // a floor the whole retry budget fires back-to-back with no wait at all.
+        assert_eq!(ai_retry_delay(0, Some(Duration::ZERO)), AI_RETRY_MIN_DELAY);
     }
 
     #[test]

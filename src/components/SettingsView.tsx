@@ -486,7 +486,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         pushed.port !== savedMcpSettings.current.port ||
         pushed.enabled !== savedMcpSettings.current.enabled ||
         pushed.allowWrites !== savedMcpSettings.current.allowWrites;
-      setMcpStatus((current) => (settingsChanged ? pushed : { ...pushed, port: current.port, enabled: current.enabled, allowWrites: current.allowWrites }));
+      setMcpStatus((current) => (settingsChanged
+        ? pushed
+        // `endpoint` is derived from the port, so preserving the edited
+        // port without it left 服务地址 — and its copy button — handing
+        // out a URL for the old one.
+        : { ...pushed, port: current.port, enabled: current.enabled, allowWrites: current.allowWrites, endpoint: mcpEndpoint(pushed.host, current.port) }));
       if (settingsChanged) {
         savedMcpSettings.current = { port: pushed.port, enabled: pushed.enabled, allowWrites: pushed.allowWrites };
         commitBaseline("mcp.server", savedMcpSettings.current);

@@ -88,6 +88,11 @@ describe("an MCP activity push does not eat the user's edits", () => {
     // The push carries the *saved* port 8899; adopting it would silently undo
     // the edit and, because it also re-baselined, hide that anything was lost.
     await waitFor(() => expect(portField().value).toBe("9100"));
+
+    // 服务地址 is derived from the port, so it has to follow the preserved edit
+    // — otherwise the copy button beside it hands out the old URL.
+    const endpoint = screen.getByDisplayValue(/^http:\/\/127\.0\.0\.1:/) as HTMLInputElement;
+    expect(endpoint.value).toBe("http://127.0.0.1:9100/mcp");
   });
 
   it("keeps a flipped switch, and keeps saying it is unsaved", async () => {

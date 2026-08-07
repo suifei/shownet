@@ -108,12 +108,15 @@ describe("settings surfaces its unsaved state", () => {
     // settings://mcp-server also fires on every MCP tool call, carrying the
     // saved port/enabled/allowWrites. Adopting those unconditionally discarded
     // whatever the user was typing and re-baselined so the badge never showed.
+    // Behaviour is covered by tests/render/status-push-preserves-edits.test.tsx;
+    // these only pin that the decision is made against the last confirmed
+    // settings rather than adopting every push wholesale.
     assert.match(settings, /const settingsChanged =/);
     assert.match(settings, /savedMcpSettings\.current\.port/);
-    assert.match(
-      settings,
-      /setMcpStatus\(\(current\) => \(settingsChanged \? pushed : \{ \.\.\.pushed, port: current\.port, enabled: current\.enabled, allowWrites: current\.allowWrites \}\)\)/,
-    );
+    assert.match(settings, /settingsChanged\s*\n?\s*\?\s*pushed/);
+    for (const field of ["port", "enabled", "allowWrites"]) {
+      assert.match(settings, new RegExp(`${field}: current\\.${field}`), `${field} must survive a push`);
+    }
   });
 
   it("does not let a status refresh revert a pending takeover toggle", () => {

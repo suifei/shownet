@@ -2759,7 +2759,12 @@ async fn set_capture_running(
             .ok_or_else(|| "开始抓包需要指定会话".to_string())?;
         start_capture_for_session(&app, &state, session_id, true).await?;
     } else {
-        restore_system_proxy(&state)?;
+        // Stopping must not be blocked by a restore that failed. Bailing out here
+        // left capture running with the takeover already given up, which put the
+        // recovery notice on screen next to a 重试恢复 button that refuses while
+        // capture runs — and 停止抓包 failed on the same restore, so both exits
+        // were closed. Tear the capture down, then report the restore failure.
+        let restore_result = restore_system_proxy(&state);
         let reverse_proxy = state
             .reverse_proxy
             .lock()
@@ -2785,6 +2790,9 @@ async fn set_capture_running(
         if let Some(reverse_proxy) = reverse_proxy {
             reverse_proxy.handle.stop().await;
         }
+        // Surfaced only now that the user is genuinely stopped and the retry
+        // button in 设置 can actually run.
+        restore_result?;
     }
 
     let status = runtime_status(&state)?;
@@ -2958,6 +2966,16 @@ fn activate_system_proxy(state: &AppState) -> Result<(), String> {
     let preferences = state.storage.get_system_proxy_preferences()?;
     if !preferences.enabled {
         return Ok(());
+    }
+    // An outstanding record means the machine is still pointing at us from a
+    // takeover that never got restored. Snapshotting now would capture ShowNet's
+    // own settings and overwrite the only copy of what the user actually had —
+    // every later "restore" would then hand them a proxy on a dead port.
+    if state.storage.has_system_proxy_recovery()? {
+        return Err(
+            "上一次系统代理接管尚未恢复；请先在「设置 → 流量路由」点击「重试恢复」，再开始抓包"
+                .to_string(),
+        );
     }
     let snapshot = system_proxy::capture_snapshot()?;
     state.storage.save_system_proxy_recovery(&snapshot)?;

@@ -10438,6 +10438,39 @@ mod tests {
     }
 
     #[test]
+    fn a_second_snapshot_overwrites_the_only_copy_of_the_users_settings() {
+        // This is why `activate_system_proxy` refuses to start a takeover while a
+        // recovery record is outstanding. The save is an unconditional upsert, so
+        // snapshotting a machine that is still pointing at ShowNet would replace
+        // the user's real proxy configuration with ShowNet's own — and every
+        // later "restore" would hand them a proxy on a dead port.
+        let storage = storage();
+        let original = SystemProxySnapshot::Windows(crate::system_proxy::WindowsProxySnapshot {
+            proxy_enable: Some("0x1".to_string()),
+            proxy_server: Some("corp-proxy.example:3128".to_string()),
+            proxy_override: Some("<local>".to_string()),
+            auto_config_url: None,
+        });
+        storage.save_system_proxy_recovery(&original).unwrap();
+        assert!(storage.has_system_proxy_recovery().unwrap());
+
+        let shownets_own =
+            SystemProxySnapshot::Windows(crate::system_proxy::WindowsProxySnapshot {
+                proxy_enable: Some("0x1".to_string()),
+                proxy_server: Some("127.0.0.1:8888".to_string()),
+                proxy_override: Some("<local>".to_string()),
+                auto_config_url: None,
+            });
+        storage.save_system_proxy_recovery(&shownets_own).unwrap();
+
+        // The corporate proxy is gone; nothing else recorded it.
+        assert_eq!(
+            storage.get_system_proxy_recovery().unwrap().unwrap(),
+            shownets_own
+        );
+    }
+
+    #[test]
     fn encrypts_system_proxy_recovery_and_keeps_loopback_bypassed() {
         let storage = storage();
         let preferences = storage
