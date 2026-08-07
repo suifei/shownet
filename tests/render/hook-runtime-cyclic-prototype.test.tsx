@@ -42,4 +42,5 @@ describe("a prototype chain that points at itself", () => {
     // as happily against an install that never ran.
     expect(traversals).toBeGreaterThan(0);
   });
+
 });
