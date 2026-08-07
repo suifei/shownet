@@ -629,6 +629,32 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn no_caller_of_read_client_hello_can_leak_the_marker() {
+        // read_client_hello marks an abandoned connection so the proxy can stay
+        // quiet. Any caller that forwards that string without stripping puts a
+        // raw control character into output — which is what tls_probe.rs did
+        // when the marker was introduced.
+        for file in ["proxy.rs", "tls_probe.rs", "tls_fingerprint.rs"] {
+            let source =
+                std::fs::read_to_string(format!("src/{file}")).expect("source is readable");
+            let production = match source.find("\n#[cfg(test)]\nmod tests {") {
+                Some(at) => &source[..at],
+                None => &source[..],
+            };
+            let mut from = 0;
+            while let Some(at) = production[from..].find("read_client_hello(") {
+                let at = from + at;
+                let after = &production[at..(at + 400).min(production.len())];
+                assert!(
+                    after.contains("split_failure_report"),
+                    "{file}: a read_client_hello caller must strip the marker before reporting"
+                );
+                from = at + 1;
+            }
+        }
+    }
+
+    #[test]
     fn an_abandoned_connection_is_marked_but_a_truncated_hello_is_not() {
         use std::io::ErrorKind;
         // A browser pre-opens CONNECT tunnels it may never use, then closes
