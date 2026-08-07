@@ -1846,7 +1846,47 @@ where
             .with_upgrades()
             .await
     };
-    result.map_err(|error| error.to_string())
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if is_benign_connection_end(&error) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Whether a served connection ended in a way not worth interrupting the user for.
+///
+/// `serve_connection` returns `Err` for endings that are simply how HTTP ends: a
+/// browser dropping an idle keep-alive socket, a tab closed mid-response, a peer
+/// that resets instead of shutting down cleanly. Every one of those raised
+/// "HTTPS MITM 连接结束: …" over a session that was working, which trains the
+/// user to ignore the error channel — the one place a real failure has to land.
+///
+/// Deliberately narrow. A protocol-level complaint is not covered here and still
+/// surfaces: an origin refusing our HTTP/2, a malformed frame, a timeout. Those
+/// are the reports that led to the fixes in this file, and silencing them to
+/// tidy up the toast area would cost more than the noise does.
+fn is_benign_connection_end(error: &hyper::Error) -> bool {
+    if error.is_closed() || error.is_incomplete_message() || error.is_canceled() {
+        return true;
+    }
+    // A reset or a broken pipe reaches us as an io::Error wrapped by hyper, and
+    // answers false to every predicate hyper exposes. Walk the chain, as
+    // `looks_like_origin_http2_refusal` does for the same reason.
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = cause.source();
+    }
+    false
 }
 
 fn capture_connect_record(
@@ -6379,6 +6419,51 @@ mod tests {
         assert!(
             looks_like_origin_http2_refusal(&error),
             "a GOAWAY carrying ENHANCE_YOUR_CALM must count as a refusal: {error:?}"
+        );
+    }
+
+    /// Serves one connection and hands back whatever hyper concluded about it.
+    async fn serve_one_and_capture_error(client_bytes: &'static [u8]) -> hyper::Error {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut client = TcpStream::connect(address).await.unwrap();
+            client.write_all(client_bytes).await.unwrap();
+            // Vanish without a shutdown, the way a closed tab does.
+            drop(client);
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let service = service_fn(|_request: Request<hyper::body::Incoming>| async move {
+            Ok::<_, std::convert::Infallible>(Response::new(empty_body()))
+        });
+        http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .expect_err("the client went away, so hyper must report an error")
+    }
+
+    #[tokio::test]
+    async fn a_client_that_vanishes_mid_request_is_not_reported_as_a_failure() {
+        // Observed in the running app: "HTTPS MITM 连接结束: connection closed
+        // before message completed" arrived as an error toast while browsing
+        // worked. A browser dropping an idle keep-alive socket, or a tab closed
+        // mid-response, is how HTTP ends — not something to interrupt over.
+        let error = serve_one_and_capture_error(b"GET / HTTP/1.1\r\nHost: x.test\r\n").await;
+        assert!(
+            is_benign_connection_end(&error),
+            "a half-sent request from a departed client must stay silent: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_is_still_reported() {
+        // The other half of the contract. Silencing the routine endings is only
+        // safe if a genuine protocol fault still reaches the user — those
+        // reports are what produced the h2 fixes in this file.
+        let error = serve_one_and_capture_error(b"not http at all\r\n\r\n").await;
+        assert!(
+            !is_benign_connection_end(&error),
+            "a protocol fault must still surface: {error:?}"
         );
     }
 
