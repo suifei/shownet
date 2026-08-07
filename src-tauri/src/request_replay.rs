@@ -952,6 +952,9 @@ fn build_client(
         reqwest::redirect::Policy::none()
     };
     let mut builder = reqwest::Client::builder()
+        // Egress is whatever the user configured, never what the environment
+        // happens to say — see build_client in external_mcp.rs.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(15))
         .redirect(redirect)
         .danger_accept_invalid_certs(!settings.verify_tls);

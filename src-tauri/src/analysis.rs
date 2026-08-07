@@ -2134,6 +2134,9 @@ pub(crate) fn build_egress_client(
     target_base_url: &str,
 ) -> Result<Client, String> {
     let mut builder = Client::builder()
+        // Egress is whatever the user configured, never what the environment
+        // happens to say — see build_client in external_mcp.rs.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(300));
     if upstream.mode != "direct" && !target_is_bypassed(target_base_url, &upstream.bypass) {

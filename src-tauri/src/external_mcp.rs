@@ -439,6 +439,15 @@ fn build_client(
     target_endpoint: &str,
 ) -> Result<Client, String> {
     let mut builder = Client::builder()
+        // reqwest reads http_proxy/https_proxy from the environment unless told
+        // not to, and this product's whole egress model is that it does not
+        // inherit them — the settings page says so, and an env proxy is offered
+        // for one-click import precisely because it is not picked up silently.
+        // Worse here than elsewhere: ShowNet points the system proxy at itself,
+        // so an inherited env proxy can route these requests back through the
+        // capture proxy. Cleared first so an explicitly configured egress proxy
+        // below still applies.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60));
     if upstream.mode != "direct" && !target_is_bypassed(target_endpoint, &upstream.bypass) {

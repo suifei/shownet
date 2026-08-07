@@ -41,6 +41,30 @@ describe("upstream egress probe and env import (P1)", () => {
   });
 });
 
+describe("egress ignores the ambient environment", () => {
+  it("clears env proxies on every outbound client", async () => {
+    // BUGFIXES.md records the invariant: ShowNet does not inherit env/system
+    // proxies — an env proxy is *offered for import* precisely because it is
+    // not picked up silently. reqwest reads http_proxy/https_proxy by default,
+    // so each builder has to say otherwise. It bit hardest here: ShowNet points
+    // the system proxy at itself, so an inherited env proxy can route the app's
+    // own requests back through its capture proxy.
+    for (const file of ["external_mcp.rs", "analysis.rs", "request_replay.rs"]) {
+      const source = await readFile(
+        new URL(`../src-tauri/src/${file}`, import.meta.url),
+        "utf8",
+      );
+      const testModuleAt = source.indexOf("\n#[cfg(test)]\nmod tests {");
+      const production = testModuleAt > 0 ? source.slice(0, testModuleAt) : source;
+      assert.match(
+        production,
+        /Client::builder\(\)\s*(?:\/\/[^\n]*\n\s*)*\.no_proxy\(\)/,
+        `${file} must clear env proxies before configuring egress`,
+      );
+    }
+  });
+});
+
 describe("connect_tcp Happy Eyeballs / IPv4 preference (P4)", () => {
   it("implements IPv4-first connect with host:port errors in proxy.rs", async () => {
     const whole = await readFile(new URL("../src-tauri/src/proxy.rs", import.meta.url), "utf8");
