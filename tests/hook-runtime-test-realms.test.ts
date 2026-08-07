@@ -23,9 +23,21 @@ async function hookRuntimeTestFiles() {
   return entries.filter((name) => name.startsWith("hook-runtime-") && name.endsWith(".test.tsx"));
 }
 
-/** Strips block comments and line comments so doc text is not counted as code. */
+/**
+ * Strips block comments and line comments so doc text is not counted as code.
+ *
+ * Block comments are anchored to the start of a line. An unanchored
+ * `/\*[\s\S]*?\*\//` also matches a literal `/*` inside a string — a URL glob in
+ * a fixture is enough — and then swallows everything up to the next `*​/`,
+ * deleting real code. Every count below would drop to zero and this whole file
+ * would pass while checking nothing, which is precisely the failure it exists to
+ * catch.
+ */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  return source
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "")
+    .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, "")
+    .replace(/^\s*\/\/.*$/gm, "");
 }
 
 describe("hook runtime tests keep one realm per install", () => {
@@ -50,10 +62,32 @@ describe("hook runtime tests keep one realm per install", () => {
   it("evaluates the runtime source at most once per file", async () => {
     for (const name of await hookRuntimeTestFiles()) {
       const source = stripComments(await readFile(new URL(name, RENDER_DIR), "utf8"));
-      const installs = source.match(/new Function\(RUNTIME_SOURCE\)/g) ?? [];
+      // Any Function call, not just the literal `new Function(RUNTIME_SOURCE)`:
+      // binding the source to another name (`new Function(SRC)`) installs just
+      // as silently, and matching only the canonical spelling would wave it
+      // through. The suite has one such call per file, so this stays exact.
+      const installs = source.match(/\bFunction\s*\(/g) ?? [];
       assert.ok(
         installs.length <= 1,
         `${name} evaluates the runtime ${installs.length} times; every call after the first is a silent no-op`,
+      );
+    }
+  });
+
+  it("leaves no other route to a second install", async () => {
+    // `eval(RUNTIME_SOURCE)` and an aliased constructor both reach the same
+    // no-op, and neither looks like a Function call to the check above.
+    for (const name of await hookRuntimeTestFiles()) {
+      const source = stripComments(await readFile(new URL(name, RENDER_DIR), "utf8"));
+      assert.doesNotMatch(
+        source,
+        /\beval\s*\(/,
+        `${name} evaluates source through eval, which the install count cannot see`,
+      );
+      assert.doesNotMatch(
+        source,
+        /=\s*Function\s*[;,)]/,
+        `${name} aliases the Function constructor, which the install count cannot see`,
       );
     }
   });
