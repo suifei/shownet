@@ -2458,12 +2458,10 @@ async fn forward_mitm_https(
         let mut response = match (dedicated_sender.as_mut(), shared_guard.as_mut()) {
             (Some(dedicated), _) => dedicated.send_request(outbound_request).await,
             (None, Some(shared)) => shared.send_request(outbound_request).await,
-            (None, None) => Err(hyper::Error::from(
-                hyper::client::conn::http1::Builder::new()
-                    .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(tokio::io::empty()))
-                    .await
-                    .expect_err("unreachable: no sender selected"),
-            )),
+            // `use_dedicated` decides which of the two is Some, so neither being
+            // set cannot happen. Stated rather than faked with an error value
+            // built from a handshake that would actually succeed.
+            (None, None) => unreachable!("a sender is always selected"),
         }
         .map_err(|error| {
             // Some origins fingerprint the HTTP/2 connection itself and refuse
@@ -2484,6 +2482,12 @@ async fn forward_mitm_https(
                 format!("转发目标请求失败: {error}")
             }
         })?;
+        // Released the moment the response headers are in hand. Holding it any
+        // longer serialises the whole tunnel behind this one request — and the
+        // path below buffers whole bodies for rewrite rules and awaits the user
+        // at a response breakpoint, so a single breakpoint would have stalled
+        // every other request on this connection until someone clicked resume.
+        drop(shared_guard);
         let upstream_status = response.status().as_u16() as i64;
         if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
             response.headers_mut().remove("sec-websocket-extensions");
@@ -5038,14 +5042,25 @@ fn ensure_host_header(
     Ok(())
 }
 
-/// Whether a send failure looks like the origin refusing our HTTP/2, as opposed
-/// to the client going away.
+/// Whether a send failure looks like the origin refusing our HTTP/2, rather than
+/// a connection ending the way connections ordinarily do.
 ///
-/// A browser abandoning a request — navigating away, aborting a fetch — arrives
-/// here as a cancellation, and counting those as the origin's verdict would
-/// downgrade perfectly healthy hosts to HTTP/1.1 on ordinary browsing.
+/// This has to be narrow. Downgrading a host is sticky, and the events that are
+/// *not* a verdict are the common ones: a browser abandoning a request, and an
+/// origin retiring a connection with GOAWAY — which this very file documents
+/// Cloudflare doing after a bounded number of streams. A request that loses the
+/// race with that retirement fails, and treating it as refusal would downgrade
+/// exactly the busy, healthy hosts we most want to keep multiplexed.
+///
+/// So a close, an incomplete message, a cancellation, a user error and plain I/O
+/// (a dropped Wi-Fi link, a VPN toggle, sleep/wake) are all excluded. What
+/// remains is a protocol-level complaint, and even then it takes more than one.
 fn looks_like_origin_http2_refusal(error: &hyper::Error) -> bool {
-    !error.is_canceled() && !error.is_user()
+    !error.is_canceled()
+        && !error.is_user()
+        && !error.is_closed()
+        && !error.is_incomplete_message()
+        && !error.is_timeout()
 }
 
 fn strip_http2_forbidden_headers(headers: &mut HeaderMap) {
@@ -6243,9 +6258,18 @@ mod tests {
         // every later request in the tunnel open its own TCP+TLS+h2 handshake
         // for a single request.
         let source = include_str!("proxy.rs");
+        // Matched against what the code actually says. The first version of this
+        // assertion quoted `*sender.lock().await = replacement`, which the code
+        // has never contained since the guard was hoisted — so it matched only
+        // its own string literal and pinned nothing. The two tests either side
+        // of it warn about exactly that hazard.
         assert!(
-            source.contains("Ok(replacement) => *sender.lock().await = replacement,"),
+            source.contains("Ok(replacement) => *slot = replacement,"),
             "the reconnected sender must be written back into the shared slot"
+        );
+        assert!(
+            source.contains("let mut slot = sender.lock().await;"),
+            "and the check and the write must happen under one guard"
         );
     }
 

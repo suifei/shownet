@@ -83,7 +83,16 @@ function navigatorPlatform(): string {
 
 /** CPU architecture as UA-CH reports it; Apple Silicon is "arm". */
 function uaArchitecture(): string {
-  return /arm|aarch64/i.test(navigator.userAgent) || /Mac/i.test(navigator.platform)
+  // `navigator.platform` is "MacIntel" on Apple Silicon too, so it cannot
+  // distinguish them — claiming "arm" for every Mac made Intel Macs report an
+  // architecture their UA and WebGL renderer contradict.
+  const cores = navigator as Navigator & { userAgentData?: { platform?: string } };
+  if (/aarch64|arm64/i.test(navigator.userAgent)) return "arm";
+  if (/Win|X11|Linux/i.test(navigator.platform)) return "x86";
+  // On macOS the only reliable in-page signal is the WebGL renderer string;
+  // absent that, report what the majority of the fleet is rather than guessing
+  // per-machine, and leave it out of the equation by keeping it consistent.
+  return cores.userAgentData?.platform === "macOS" && /Apple/i.test(navigator.vendor)
     ? "arm"
     : "x86";
 }
@@ -400,7 +409,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         cdpSendRef.current("Page.navigate", { url: target });
         setBusNote("导航经 UI CDP（总线不可用）");
       } else if (capturing) {
-        void launchProxyChrome(target);
+        // The socket is gone but the browser is still marked running, so the
+        // toggle would stop it here instead of reviving it.
+        void startProxyChrome(target);
       } else {
         setBrowserLoading(false);
         setBrowserError("请先开始抓包，再启动内嵌浏览器");
@@ -520,11 +531,12 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           cdpSendRef.current("Page.navigate", { url: labUrl });
           setBusNote("Crypto Lab 经 UI CDP");
         } else {
-          void launchProxyChrome("__shownet_lab__");
+          // No CDP socket: this means start, not toggle.
+          void startProxyChrome("__shownet_lab__");
         }
       })();
     } else if (desktop) {
-      void launchProxyChrome("__shownet_lab__");
+      void startProxyChrome("__shownet_lab__");
     } else {
       const target = `${window.location.origin}/lab/index.html?autorun=1`;
       setAddress(target);
@@ -1244,6 +1256,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "CDP" : "Chrome"}</span></button>
           <button
             className={`hook-toggle ${hooksEnabled ? "is-active" : ""}`}
+            disabled={browserConnecting}
             onClick={() => {
               const next = !hooksEnabled;
               hooksEnabledRef.current = next;
@@ -1255,8 +1268,12 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               if (proxyBrowser?.running) {
                 const destination = currentUrl;
                 void (async () => {
-                  await stopProxyChrome();
-                  await startProxyChrome(destination);
+                  try {
+                    await stopProxyChrome();
+                    await startProxyChrome(destination);
+                  } catch (error) {
+                    setBrowserError(`重启内嵌浏览器失败：${String(error)}`);
+                  }
                 })();
               }
             }}

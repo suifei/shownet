@@ -25,6 +25,11 @@ const FAILURE = [
   "未完成",
   "被拒绝",
   "异常",
+  // "MCP Server 已保存，连接测试未通过" pairs a success word with a failure —
+  // without this it scored as a win and rendered a tick over a failed test.
+  "未通过",
+  "未成功",
+  "不可达",
   "error",
   "failed",
   "timeout",
@@ -33,7 +38,25 @@ const FAILURE = [
 ];
 
 /** Words that confirm something completed. */
-const SUCCESS = ["已保存", "已生效", "已完成", "已安装", "已导出", "已复制", "已清除", "已启用"];
+const SUCCESS = [
+  "已保存",
+  "已生效",
+  "已完成",
+  "已安装",
+  "已导出",
+  "已复制",
+  "已清除",
+  "已启用",
+  "已创建",
+  "已删除",
+  "已重命名",
+  "已开始",
+  "已停止",
+  "已打开",
+  "已加入",
+  "已应用",
+  "已恢复",
+];
 
 export function toastTone(message: string): ToastTone {
   const text = message.toLowerCase();

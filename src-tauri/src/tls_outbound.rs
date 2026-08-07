@@ -470,7 +470,19 @@ pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<Clien
 /// egress settled after one navigation. Until outbound h2 can be shaped to
 /// match a real browser, remembering which origins refuse ours and speaking
 /// HTTP/1.1 to them is what keeps those sites usable.
-static H2_REJECTED_HOSTS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, u32>>> =
+/// A downgrade is re-evaluated after this long. Without it a single bad spell —
+/// an origin under load, a network that misbehaved for a minute — would cost a
+/// host its multiplexing until the app restarted, and nothing would ever
+/// re-check whether the condition still held.
+const H2_DOWNGRADE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy)]
+struct H2Rejections {
+    count: u32,
+    downgraded_at: Option<std::time::Instant>,
+}
+
+static H2_REJECTED_HOSTS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, H2Rejections>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
 /// How many h2 failures for one origin before we stop offering it h2.
@@ -496,9 +508,16 @@ pub fn note_origin_http2_rejected(host: &str) -> bool {
     if hosts.len() >= MAX_TRACKED_H2_HOSTS && !hosts.contains_key(&key) {
         return false;
     }
-    let seen = hosts.entry(key).or_insert(0);
-    *seen = seen.saturating_add(1);
-    *seen == H2_REJECTIONS_BEFORE_DOWNGRADE
+    let entry = hosts.entry(key).or_insert(H2Rejections {
+        count: 0,
+        downgraded_at: None,
+    });
+    entry.count = entry.count.saturating_add(1);
+    if entry.count == H2_REJECTIONS_BEFORE_DOWNGRADE {
+        entry.downgraded_at = Some(std::time::Instant::now());
+        return true;
+    }
+    false
 }
 
 /// Ceiling on the rejection table; hostnames come from the wire.
@@ -509,9 +528,11 @@ fn origin_http2_rejected(host: &str) -> bool {
     H2_REJECTED_HOSTS
         .read()
         .map(|hosts| {
-            hosts
-                .get(&key)
-                .is_some_and(|seen| *seen >= H2_REJECTIONS_BEFORE_DOWNGRADE)
+            hosts.get(&key).is_some_and(|entry| {
+                entry
+                    .downgraded_at
+                    .is_some_and(|at| at.elapsed() < H2_DOWNGRADE_TTL)
+            })
         })
         .unwrap_or(false)
 }

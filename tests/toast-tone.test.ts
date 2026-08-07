@@ -26,11 +26,19 @@ describe("toast tone follows what the message says", () => {
     }
   });
 
+  it("does not let a success word outvote a failure in the same sentence", () => {
+    // Observed: this rendered a green tick over a failed connection test.
+    assert.equal(toastTone("MCP Server 已保存，连接测试未通过"), "error");
+    assert.equal(toastTone("已保存，但探测未成功"), "error");
+  });
+
   it("still recognises a completed action", () => {
     for (const message of [
       "AI 配置、凭据与分析策略已保存",
       "ShowNet Root CA 已导出",
       "AI API Key 已清除",
+      "新会话已创建",
+      "抓包已开始",
     ]) {
       assert.equal(toastTone(message), "success", `${message} completed`);
     }
