@@ -17,6 +17,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
@@ -48,6 +49,8 @@ const AI_RETRY_MAX_DELAY: Duration = Duration::from_secs(20);
 const AI_RETRY_MIN_DELAY: Duration = Duration::from_millis(250);
 /// Coprime with both 1000 (macOS microsecond clock) and 100 (Windows ticks).
 const AI_RETRY_JITTER_SPREAD_MS: u64 = 251;
+/// Distinguishes retries that read the same timestamp.
+static RETRY_JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub async fn list_models(
     state: &AppState,
@@ -2563,15 +2566,19 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 /// The modulus has to be coprime with the clock's granularity. macOS reports
 /// wall time in whole microseconds, so `subsec_nanos()` is always a multiple of
 /// 1000; taking that modulo 250 gave exactly zero every single time, leaving the
-/// jitter dead on the primary release target while still looking plausible.
-fn jitter_millis(nanos: u64) -> u64 {
-    // The modulus is what actually fixes this: 251 is prime, so it is coprime
-    // with every clock granularity and each remainder stays reachable. The
-    // multiply-and-shift only spreads adjacent timestamps further apart.
-    nanos
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_shr(17)
-        % AI_RETRY_JITTER_SPREAD_MS
+/// jitter dead on the primary release target while still looking plausible. The
+/// clock alone is still not enough — see `jitter_millis` for why a sequence
+/// number has to go in with it.
+/// Millisecond offset for one retry.
+///
+/// `sequence` is what separates two callers that read the *same* timestamp —
+/// on a microsecond clock, graph nodes waking from the same backoff sleep
+/// routinely do. Measured, plain modulo distributes better than hashing: 251 is
+/// prime, so every remainder stays reachable at any clock granularity, and 83 is
+/// coprime with it, so consecutive callers land far apart and cycle through all
+/// 251 buckets before repeating.
+fn jitter_millis(nanos: u64, sequence: u64) -> u64 {
+    nanos.wrapping_add(sequence.wrapping_mul(83)) % AI_RETRY_JITTER_SPREAD_MS
 }
 
 fn retry_jitter() -> Duration {
@@ -2579,7 +2586,8 @@ fn retry_jitter() -> Duration {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::from(elapsed.subsec_nanos()))
         .unwrap_or(0);
-    Duration::from_millis(jitter_millis(nanos))
+    let sequence = RETRY_JITTER_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    Duration::from_millis(jitter_millis(nanos, sequence))
 }
 
 /// Obeys `Retry-After` when the provider sends one; otherwise backs off
@@ -3094,8 +3102,9 @@ mod tests {
         // a "more than one value" check over the real clock goes green on CI
         // while the release target stays broken.
         for tick in [1_000u64, 100, 1] {
-            let samples: std::collections::HashSet<u64> =
-                (0..2_000).map(|step| jitter_millis(step * tick)).collect();
+            let samples: std::collections::HashSet<u64> = (0..2_000)
+                .map(|step| jitter_millis(step * tick, 0))
+                .collect();
             assert!(
                 samples.len() > AI_RETRY_JITTER_SPREAD_MS as usize / 2,
                 "a {tick}ns clock produced only {} distinct delays",
@@ -3105,6 +3114,29 @@ mod tests {
                 .iter()
                 .all(|value| *value < AI_RETRY_JITTER_SPREAD_MS));
         }
+    }
+
+    #[test]
+    fn callers_sharing_a_timestamp_still_get_different_delays() {
+        // The whole point. On a microsecond clock, graph nodes waking from the
+        // same backoff sleep read the same `subsec_nanos()`; if the delay came
+        // from the clock alone they would retry in lockstep and rebuild the
+        // burst that got them limited. An earlier version mixed in the address
+        // of a stack local for this — measured, that address was identical on
+        // every call, so it separated nothing.
+        let same_instant = 1_234_567_000u64;
+        let delays: std::collections::HashSet<u64> = (0..251)
+            .map(|sequence| jitter_millis(same_instant, sequence))
+            .collect();
+        assert_eq!(
+            delays.len(),
+            AI_RETRY_JITTER_SPREAD_MS as usize,
+            "callers sharing an instant must cycle the whole spread"
+        );
+        assert_ne!(
+            jitter_millis(same_instant, 0),
+            jitter_millis(same_instant, 1)
+        );
     }
 
     #[test]

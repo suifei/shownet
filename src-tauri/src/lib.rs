@@ -2790,27 +2790,22 @@ async fn set_capture_running(
         if let Some(reverse_proxy) = reverse_proxy {
             reverse_proxy.handle.stop().await;
         }
-        // The teardown is done, so the frontend has to hear about it before any
-        // of it is reported as a failure. Returning first left the UI showing
-        // 抓包中 for a capture that had already stopped — and the takeover switch
-        // is gated on that same stale flag, which disabled the one control that
-        // could have got the user out.
-        //
-        // Only on the failing path: the success path already emits below, and
-        // pushing the same state twice re-renders the whole shell for nothing.
-        if restore_result.is_err() || session_cleared.is_err() {
-            emit_capture_status(&app, &state)?;
-        }
+        // Teardown is complete, so the frontend hears about it before anything
+        // is reported as a failure — returning first left the UI showing 抓包中
+        // for a capture that had already stopped, with the takeover switch gated
+        // on that same stale flag. Unconditional, because gating it on "did
+        // something fail" left the success path emitting nothing until a later
+        // fallible read, and held is still held if that read is what fails.
+        let emitted = emit_capture_status(&app, &state);
+        // The teardown failures come first: they are what the user has to act
+        // on, and a push that failed must not stand in for them.
         restore_result?;
         session_cleared?;
+        return emitted;
     }
 
     let status = runtime_status(&state)?;
     emit(&app, "capture://status", &status)?;
-    if !running {
-        let reverse_status = reverse_proxy_status(&state)?;
-        emit(&app, "reverse-proxy://status", &reverse_status)?;
-    }
     Ok(status)
 }
 
@@ -2843,15 +2838,18 @@ pub(crate) fn persist_captured_request(
     Ok(request)
 }
 
-/// Pushes the current capture and reverse-proxy state to the frontend.
+/// Pushes the current capture and reverse-proxy state to the frontend and
+/// returns it.
 ///
 /// Used on the stop path so a teardown that ends in an error still leaves the UI
-/// agreeing with the backend about what is running.
-fn emit_capture_status(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+/// agreeing with the backend about what is running. Returning the status lets
+/// the caller emit exactly once and still have something to hand back.
+fn emit_capture_status(app: &tauri::AppHandle, state: &AppState) -> Result<RuntimeStatus, String> {
     let status = runtime_status(state)?;
     emit(app, "capture://status", &status)?;
     let reverse_status = reverse_proxy_status(state)?;
-    emit(app, "reverse-proxy://status", &reverse_status)
+    emit(app, "reverse-proxy://status", &reverse_status)?;
+    Ok(status)
 }
 
 fn runtime_status(state: &AppState) -> Result<RuntimeStatus, String> {

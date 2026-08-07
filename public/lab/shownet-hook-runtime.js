@@ -113,6 +113,13 @@
   /** Emits `hook.skipped` the first time a given property is passed over. */
   const reportSkippedOnce = (owner, key, reason) => {
     try {
+      // A WeakMap rejects primitive keys, and a page can set `globalThis.sm4` to
+      // a string. Reporting matters less than not throwing, but silently losing
+      // every report to a caught TypeError is worse than skipping the dedup.
+      if (owner === null || (typeof owner !== "object" && typeof owner !== "function")) {
+        emit({ kind: "runtime", name: "hook.skipped", input: { property: String(key), reason }, output: null });
+        return;
+      }
       let seen = skipReports.get(owner);
       if (!seen) {
         seen = new Set();
@@ -141,7 +148,10 @@
       if (descriptor) return typeof descriptor.get === "function" || typeof descriptor.set === "function";
       node = Object.getPrototypeOf(node);
     }
-    return false;
+    // Bound exhausted without an answer. Only a pathological chain gets here, so
+    // report "accessor" and decline to wrap: a chain we could not inspect is not
+    // one to install a data property onto.
+    return Boolean(node);
   };
 
   const replace = (owner, key, factory) => {
