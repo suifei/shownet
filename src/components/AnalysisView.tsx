@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ANALYSIS_MODES } from "../analysisModes";
+import { DEFAULT_AI_CONTEXT_TOKENS, promptBudgetBytes } from "../aiContextBudget";
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
 import { pickReplayExportDirectory } from "../replayExport";
@@ -15,7 +16,7 @@ const fallbackAiSettings: AiProviderSettings = {
   provider: "claudegpt",
   baseUrl: "https://claudegpt.org/v1",
   model: "gpt-5.5",
-  contextTokens: 200_000,
+  contextTokens: DEFAULT_AI_CONTEXT_TOKENS,
   hasApiKey: false,
 };
 
@@ -801,7 +802,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
               <div key={request.id}><span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.method}</span><span><strong>{request.path}</strong><small>{request.host}</small></span></div>
             ))}
           </div>
-          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 384 KiB 上限保护</footer></div>
+          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 {formatContextSize(promptBudgetBytes(aiSettings.contextTokens))} 上限保护</footer></div>
     </>
   );
 

@@ -101,8 +101,19 @@ describe("settings surfaces its unsaved state", () => {
   });
 
   it("treats a backend push as saved state, not a local edit", () => {
-    assert.match(settings, /\/\/ A push from the backend is the saved state, not a local edit\./);
     assert.match(settings, /mirroring it\s+\/\/ is not an edit\./);
+  });
+
+  it("does not let an MCP activity push overwrite in-progress edits", () => {
+    // settings://mcp-server also fires on every MCP tool call, carrying the
+    // saved port/enabled/allowWrites. Adopting those unconditionally discarded
+    // whatever the user was typing and re-baselined so the badge never showed.
+    assert.match(settings, /const settingsChanged =/);
+    assert.match(settings, /savedMcpSettings\.current\.port/);
+    assert.match(
+      settings,
+      /setMcpStatus\(\(current\) => \(settingsChanged \? pushed : \{ \.\.\.pushed, port: current\.port, enabled: current\.enabled, allowWrites: current\.allowWrites \}\)\)/,
+    );
   });
 
   it("does not let a status refresh revert a pending takeover toggle", () => {
@@ -140,6 +151,9 @@ describe("analysis scope is written once", () => {
     assert.match(analysis, /className="analysis-config__section analysis-scope">\{scopeControls\}<\/div>/);
     assert.match(analysis, /aria-label="移动端分析范围">\{scopeControls\}<\/section>/);
     assert.equal((analysis.match(/仅分析已标记关键请求/g) ?? []).length, 1);
-    assert.equal((analysis.match(/总提示受 384 KiB 上限保护/g) ?? []).length, 1);
+    assert.equal((analysis.match(/总提示受 \{formatContextSize\(/g) ?? []).length, 1);
+    // The budget follows the configured context window; a literal here would go
+    // stale the moment the user changes 上下文上限.
+    assert.doesNotMatch(analysis, /总提示受 \d+ KiB/);
   });
 });

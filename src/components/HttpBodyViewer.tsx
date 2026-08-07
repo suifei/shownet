@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleAlert, Code2, Download, ShieldAlert } from "lucide-react";
+import { CheckCircle2, CircleAlert, Code2, Download, Info, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { availableBodyModes, bodyHex, bodyPreviewPolicy, detectBodyKind, headerValue, legacyBodyMetadata, parseJsonBody, prettyBody, type BodyViewMode } from "../requestInspector";
 import type { BodyCaptureMetadata, HeaderEntry } from "../types";
@@ -49,10 +49,13 @@ function SafeBodyPreview({ content, contentType, kind, metadata }: { content: st
 
 export function HttpBodyStatus({ metadata }: { metadata: BodyCaptureMetadata }) {
   const omitted = Boolean(metadata.omittedReason);
-  const warning = Boolean(omitted || metadata.error || metadata.truncated || !metadata.complete);
+  // Omission is the configured behaviour, not a fault: 保存二进制响应 is off by
+  // default, so treating it as a warning put an alert icon on every image, font
+  // and video in a fresh install — next to text saying nothing was affected.
+  const warning = Boolean(metadata.error || metadata.truncated || !metadata.complete);
   const encoding = metadata.contentEncoding?.toUpperCase();
   const headline = omitted ? "二进制正文未保存" : encoding ? `${encoding} ${metadata.decoded ? "已解压" : "未解压"}` : metadata.format === "base64" ? "二进制正文" : "正文已捕获";
-  return <div className={`response-body-status ${warning ? "has-warning" : "is-ready"}`}><span className="response-body-status__icon">{warning ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}</span><div><strong>{headline}</strong><span><em>{formatBytes(metadata.wireBytes)} 传输</em>{metadata.decoded && <em>{formatBytes(metadata.decodedBytes)} 解压后</em>}{metadata.format === "base64" && <em>Base64</em>}{metadata.truncated && <em>已截断</em>}{!metadata.complete && <em>流未完整结束</em>}</span>{omitted && <small>已按存储策略省略正文；请求转发与响应大小统计不受影响</small>}{!omitted && metadata.error && <small>{metadata.error}</small>}</div></div>;
+  return <div className={`response-body-status ${warning ? "has-warning" : omitted ? "is-omitted" : "is-ready"}`}><span className="response-body-status__icon">{warning ? <CircleAlert size={14} /> : omitted ? <Info size={14} /> : <CheckCircle2 size={14} />}</span><div><strong>{headline}</strong><span><em>{formatBytes(metadata.wireBytes)} 传输</em>{metadata.decoded && <em>{formatBytes(metadata.decodedBytes)} 解压后</em>}{metadata.format === "base64" && <em>Base64</em>}{metadata.truncated && <em>已截断</em>}{!metadata.complete && <em>流未完整结束</em>}</span>{omitted && <small>已按存储策略省略正文；请求转发与响应大小统计不受影响</small>}{!omitted && metadata.error && <small>{metadata.error}</small>}</div></div>;
 }
 
 function CodeBlock({ content }: { content: string }) { return <pre className="code-block">{content}</pre>; }

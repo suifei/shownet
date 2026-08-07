@@ -3001,6 +3001,12 @@ fn restore_system_proxy(state: &AppState) -> Result<(), String> {
         }
         Err(error) => {
             if let Ok(mut runtime) = state.system_proxy.lock() {
+                // We are no longer holding the takeover on purpose — we tried to
+                // give the settings back and could not. Staying `active` would
+                // mean the snapshot still in storage reads as "in use rather
+                // than owed", which hides the recovery notice and its retry
+                // button behind a status that claims everything is fine.
+                runtime.active = false;
                 runtime.last_error = Some(error.clone());
             }
             Err(error)

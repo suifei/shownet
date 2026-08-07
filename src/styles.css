@@ -3966,6 +3966,14 @@ kbd {
   border-color: var(--warning-border);
 }
 
+/* Omission is a configured outcome, so it reads as neutral rather than green
+   (nothing was captured) or amber (nothing went wrong). */
+.response-body-status.is-omitted {
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  border-color: var(--border-default);
+}
+
 .response-body-status__icon {
   display: grid;
   width: 24px;

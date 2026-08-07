@@ -318,6 +318,16 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     return () => window.removeEventListener("message", receiveHook);
   }, [desktop, handleLabStatus, pausedDisplay, sessionId]);
 
+  /**
+   * Clears the verdict *and* the evidence behind it. Dropping only the verdict
+   * left the log full, so the very next navigation re-derived the same loop and
+   * the notice reappeared — a dismiss button that did nothing.
+   */
+  const dismissReloadLoop = () => {
+    navigationLogRef.current = [];
+    setReloadLoopHost("");
+  };
+
   const navigate = (event: FormEvent) => {
     event.preventDefault();
     let target = address.trim();
@@ -328,8 +338,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     setExternalPage(target);
     // A deliberate navigation is the user's answer to the warning; give the
     // new destination a clean slate rather than carrying the old verdict over.
-    navigationLogRef.current = [];
-    setReloadLoopHost("");
+    dismissReloadLoop();
     if (!desktop) return;
     setBrowserLoading(true);
     void (async () => {
@@ -365,6 +374,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const reload = () => {
     setReloading(true);
     setBrowserLoading(true);
+    // A refresh the user asked for is not the page refreshing itself. Without
+    // this, four impatient clicks on a slow page accuse the site of a failed
+    // bot-management challenge.
+    dismissReloadLoop();
     void (async () => {
       if (proxyBrowser?.running && desktop) {
         try {
@@ -1178,7 +1191,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                     <strong>{reloadLoopHost} 正在反复刷新</strong>
                     <small>该站点的风控挑战没有通过。多数情况是 MITM 解密改变了 TLS 指纹：在「设置 → HTTPS 解密」把该域名加入绕行清单后重试，绕行域名仍会被抓包，只是不再解密正文。</small>
                   </div>
-                  <button type="button" onClick={() => setReloadLoopHost("")}>知道了</button>
+                  <button type="button" onClick={dismissReloadLoop}>知道了</button>
                 </div>
               )}
               {fileDropState && (

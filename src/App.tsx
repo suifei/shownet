@@ -2169,15 +2169,25 @@ function ReverseProxySetup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  // Depends on the saved values themselves, not on the status object. The
+  // backend re-emits this status on unrelated events — stopping a capture, for
+  // one — and a fresh object identity each time meant a user part-way through
+  // typing a target URL had the field blanked out from under them by the
+  // stored value, which for a first-time user is empty.
+  const hasStatus = Boolean(status);
+  const savedTargetUrl = status?.targetUrl ?? "";
+  const savedLocalPort = status?.localPort ?? 0;
+  const savedLanEnabled = status?.lanEnabled ?? false;
+  const savedPreserveHost = status?.preserveHost ?? false;
   useEffect(() => {
-    if (!status) return;
+    if (!hasStatus) return;
     setDraft({
-      targetUrl: status.targetUrl,
-      localPort: status.localPort,
-      lanEnabled: status.lanEnabled,
-      preserveHost: status.preserveHost,
+      targetUrl: savedTargetUrl,
+      localPort: savedLocalPort,
+      lanEnabled: savedLanEnabled,
+      preserveHost: savedPreserveHost,
     });
-  }, [status]);
+  }, [hasStatus, savedTargetUrl, savedLocalPort, savedLanEnabled, savedPreserveHost]);
 
   const start = async () => {
     setBusy(true);

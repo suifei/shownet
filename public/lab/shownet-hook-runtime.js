@@ -54,18 +54,27 @@
     if (typeof value !== "object") return trim(value);
     if (seen.has(value)) return "[Circular]";
     seen.add(value);
-    if (Array.isArray(value)) return value.slice(0, 200).map((item) => scrub(item, depth + 1, seen));
+    if (Array.isArray(value)) {
+      try { return value.slice(0, 200).map((item) => scrub(item, depth + 1, seen)); } catch { return "[Unavailable]"; }
+    }
+    // Enumerating is itself refusable — a proxy can throw from its ownKeys
+    // trap — so listing the keys has to be guarded, not just reading them.
+    let keys;
+    try { keys = Object.keys(value).slice(0, 200); } catch { return "[Unavailable]"; }
     const output = {};
-    for (const entry of Object.keys(value).slice(0, 200)) {
+    for (const entry of keys) {
       try { output[trim(entry, 256)] = scrub(value[entry], depth + 1, seen); } catch { output[entry] = "[Unavailable]"; }
     }
     return output;
   };
 
+  // Never throws: it is called while building a payload in the *caller's* frame,
+  // outside emit's guard, so a throw here would surface as the page's own error.
   const headerEntries = (value) => {
     if (!value) return [];
     try { return [...new Headers(value).entries()].map(([name, headerValue]) => ({ name, value: headerValue })); }
-    catch { return scrub(value); }
+    catch {}
+    try { return scrub(value); } catch { return "[Unavailable]"; }
   };
 
   // Nothing in here may throw. These hooks sit in the middle of the page's own
@@ -101,9 +110,15 @@
 
   const replace = (owner, key, factory) => {
     if (!owner) return false;
-    const original = owner[key];
-    if (typeof original !== "function" || original[WRAPPED]) return false;
-    const wrapped = factory(original);
+    // Reading the property can trip a throwing getter, and building the wrapper
+    // runs page-supplied code, so both sit inside the guard.
+    let original;
+    let wrapped;
+    try {
+      original = owner[key];
+      if (typeof original !== "function" || original[WRAPPED]) return false;
+      wrapped = factory(original);
+    } catch { return false; }
     try {
       Object.defineProperty(wrapped, WRAPPED, { value: true });
       Object.defineProperty(wrapped, "toString", { value: original.toString.bind(original) });
@@ -118,7 +133,11 @@
     const method = String(init?.method || resource?.method || "GET").toUpperCase();
     let promise;
     try { promise = Reflect.apply(original, this, arguments); } catch (error) {
-      emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started });
+      // Report on a best-effort basis, then rethrow what fetch actually threw.
+      // Describing the failed call must not become the failure the page sees.
+      try {
+        emit({ kind: "network", name: "window.fetch", url, method, input: { headers: headerEntries(init?.headers || resource?.headers), credentials: init?.credentials || resource?.credentials, body: init?.body }, output: { error }, durationMs: performance.now() - started });
+      } catch {}
       throw error;
     }
     // Observing the result must not change what the caller gets back, and a
@@ -149,11 +168,16 @@
       state.started = performance.now();
       state.body = body;
       xhrState.set(this, state);
-      this.addEventListener("loadend", () => emit({
-        kind: "network", name: "XMLHttpRequest.send", url: this.responseURL || state.url,
-        method: state.method, input: { headers: state.headers, body: state.body, withCredentials: this.withCredentials }, output: { status: this.status, responseType: this.responseType, headers: this.getAllResponseHeaders() },
-        durationMs: performance.now() - state.started,
-      }), { once: true });
+      // Registered before send so a synchronous XHR is still observed, but
+      // guarded: a page that shadows addEventListener must not be able to
+      // cancel its own request through our listener.
+      try {
+        this.addEventListener("loadend", () => emit({
+          kind: "network", name: "XMLHttpRequest.send", url: this.responseURL || state.url,
+          method: state.method, input: { headers: state.headers, body: state.body, withCredentials: this.withCredentials }, output: { status: this.status, responseType: this.responseType, headers: this.getAllResponseHeaders() },
+          durationMs: performance.now() - state.started,
+        }), { once: true });
+      } catch {}
       return Reflect.apply(original, this, arguments);
     });
   }
@@ -167,10 +191,12 @@
         emit({ kind: "crypto", name: `crypto.subtle.${operation}`, input: [...arguments], output: { error }, durationMs: performance.now() - started });
         throw error;
       }
-      promise.then(
-        (result) => emit({ kind: "crypto", name: `crypto.subtle.${operation}`, input: [...arguments], output: result, durationMs: performance.now() - started }),
-        (error) => emit({ kind: "crypto", name: `crypto.subtle.${operation}`, input: [...arguments], output: { error }, durationMs: performance.now() - started }),
-      );
+      try {
+        promise.then(
+          (result) => emit({ kind: "crypto", name: `crypto.subtle.${operation}`, input: [...arguments], output: result, durationMs: performance.now() - started }),
+          (error) => emit({ kind: "crypto", name: `crypto.subtle.${operation}`, input: [...arguments], output: { error }, durationMs: performance.now() - started }),
+        );
+      } catch {}
       return promise;
     });
   }
@@ -190,6 +216,14 @@
   let libraryAttempts = 0;
   const libraryTimer = setInterval(() => {
     libraryAttempts += 1;
+    // Reading these globals runs page code. Unguarded, a throwing getter on
+    // `CryptoJS` dispatched an uncaught error to the page every 500 ms for a
+    // minute — plainly visible to anything listening on window.onerror.
+    try { probeCryptoLibraries(); } catch {}
+    if (libraryAttempts >= 120) clearInterval(libraryTimer);
+  }, 500);
+
+  function probeCryptoLibraries() {
     const CryptoJS = globalThis.CryptoJS;
     if (CryptoJS) {
       for (const algorithm of ["AES", "DES", "TripleDES", "Rabbit", "RC4"]) {
@@ -207,8 +241,7 @@
     if (typeof sm3 === "function") wrapLibraryMethod(globalThis, globalThis.sm3 === sm3 ? "sm3" : "SM3", "sm3");
     const sm4 = globalThis.sm4 || globalThis.SM4;
     for (const operation of ["encrypt", "decrypt"]) wrapLibraryMethod(sm4, operation, `sm4.${operation}`);
-    if (libraryAttempts >= 120) clearInterval(libraryTimer);
-  }, 500);
+  }
 
   const cookieDescriptor = globalThis.Document && Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
   if (cookieDescriptor?.get && cookieDescriptor?.set) {
@@ -258,8 +291,15 @@
     return snapshot;
   };
 
-  addEventListener("click", (event) => emit({ kind: "interaction", name: "pointer.click", input: { selector: selector(event.target), button: event.button, x: event.clientX, y: event.clientY }, output: null }), true);
-  addEventListener("input", (event) => emit({ kind: "interaction", name: "form.input", input: { selector: selector(event.target), inputType: event.inputType, ...formValue(event.target) }, output: null }), true);
+  // `selector` and `formValue` read page-controlled properties, and they run in
+  // the listener's frame rather than inside emit. A throw here cannot stop
+  // dispatch, but it does surface as an uncaught error on every click.
+  const observe = (build) => (event) => {
+    try { emit(build(event)); } catch {}
+  };
+
+  addEventListener("click", observe((event) => ({ kind: "interaction", name: "pointer.click", input: { selector: selector(event.target), button: event.button, x: event.clientX, y: event.clientY }, output: null })), true);
+  addEventListener("input", observe((event) => ({ kind: "interaction", name: "form.input", input: { selector: selector(event.target), inputType: event.inputType, ...formValue(event.target) }, output: null })), true);
 
   // Agent-facing lab surface: fixed params / dump / hijack logs without replacing core hooks.
   globalThis.__SHOWNET_LAB__ = Object.assign(globalThis.__SHOWNET_LAB__ || {}, {

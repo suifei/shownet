@@ -85,6 +85,19 @@ describe("reporting never escapes into the page", () => {
   });
 });
 
+describe("describing a value is always possible", () => {
+  it("falls back to a placeholder rather than throwing", () => {
+    installRuntime();
+    const lab = (globalThis as Record<string, unknown>).__SHOWNET_LAB__ as {
+      scrub: (value: unknown) => unknown;
+    };
+
+    expect(() => lab.scrub(unwalkable())).not.toThrow();
+    // Nested is guarded too, and was even before this pass.
+    expect(() => lab.scrub({ nested: unwalkable() })).not.toThrow();
+  });
+});
+
 describe("document.cookie hook", () => {
   it("stores the cookie and reports it", () => {
     installRuntime();

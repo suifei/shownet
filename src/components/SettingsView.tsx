@@ -47,7 +47,7 @@ import type { ReactNode } from "react";
 import { formatBytes } from "../format";
 import { sourceLabels } from "../data";
 import { formatReleaseNotes } from "../format";
-import { defaultMcpServerStatus } from "../mcpDefaults";
+import { defaultMcpServerStatus, mcpEndpoint } from "../mcpDefaults";
 import {
   computeDirtySections,
   seedMissingBaselines,
@@ -60,6 +60,14 @@ import {
   SETTINGS_INDEX,
   SETTINGS_OPEN_SECTIONS_KEY,
 } from "../settingsIndex";
+import {
+  DEFAULT_AI_CONTEXT_TOKENS,
+  MAX_AI_CONTEXT_TOKENS,
+  MIN_AI_CONTEXT_TOKENS,
+  clampContextTokens,
+  formatContextTokens,
+  promptBudgetBytes,
+} from "../aiContextBudget";
 import type { AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
@@ -85,22 +93,6 @@ interface McpClientDraft {
 }
 
 const DEFAULT_AI_MODEL = "gpt-5.5";
-// Mirrors DEFAULT/MIN/MAX_AI_CONTEXT_TOKENS and PROMPT_BYTES_PER_TOKEN in the Rust backend.
-const DEFAULT_AI_CONTEXT_TOKENS = 200_000;
-const MIN_AI_CONTEXT_TOKENS = 1_024;
-const MAX_AI_CONTEXT_TOKENS = 2_000_000;
-const PROMPT_BYTES_PER_TOKEN = 2;
-
-const clampContextTokens = (value: number) => {
-  if (!Number.isFinite(value)) return DEFAULT_AI_CONTEXT_TOKENS;
-  return Math.min(MAX_AI_CONTEXT_TOKENS, Math.max(MIN_AI_CONTEXT_TOKENS, Math.trunc(value)));
-};
-
-const formatContextTokens = (value: number) => {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 1)}K`;
-  return String(value);
-};
 const emptyMcpClientDraft: McpClientDraft = {
   name: "",
   endpoint: "http://127.0.0.1:9000/mcp",
@@ -228,6 +220,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const [systemProxy, setSystemProxy] = useState(defaultSystemProxy);
   const [systemProxyBypass, setSystemProxyBypass] = useState(defaultSystemProxy.bypass.join(", "));
   const [savingSystemProxy, setSavingSystemProxy] = useState(false);
+  const [systemProxyTouched, setSystemProxyTouched] = useState(false);
   const [lanEnabled, setLanEnabled] = useState(runtime.lanEnabled);
   const [accessMode, setAccessMode] = useState<ClientAccessMode>(effectiveRuntimeAccessMode);
   const [accessRulesDraft, setAccessRulesDraft] = useState(effectiveRuntimeAccessRules.join("\n"));
@@ -252,6 +245,16 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const [modelDiscoveryError, setModelDiscoveryError] = useState("");
   const [aiSettingsLoaded, setAiSettingsLoaded] = useState(false);
   const modelDiscoveryRequestId = useRef(0);
+  /**
+   * The last MCP settings the backend confirmed. A status push carries these
+   * alongside live activity data, so this is how we tell "the saved config
+   * changed" from "a tool call happened while the user was editing".
+   */
+  const savedMcpSettings = useRef({
+    port: defaultMcpStatus.port,
+    enabled: defaultMcpStatus.enabled,
+    allowWrites: defaultMcpStatus.allowWrites,
+  });
   const [qrOpen, setQrOpen] = useState(false);
   const [upstream, setUpstream] = useState(defaultUpstream);
   const [upstreamPassword, setUpstreamPassword] = useState("");
@@ -394,6 +397,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     if (!isTauri()) return;
     invoke<SystemProxySettings>("get_system_proxy_settings")
       .then((settings) => {
+        setSystemProxyTouched(false);
         setSystemProxy(settings);
         setSystemProxyBypass(settings.bypass.join(", "));
         commitBaseline("capture.routing", { enabled: settings.enabled, bypass: settings.bypass.join(", ") });
@@ -418,6 +422,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     // A change in the saved preference is a push from the backend, so mirroring it
     // is not an edit. It fires only when that saved value actually changes, which
     // is what keeps a status refresh from silently reverting a pending toggle.
+    setSystemProxyTouched(false);
     setSystemProxy((current) => ({ ...current, enabled: runtime.systemProxyEnabled }));
     setSystemProxyBypass((bypass) => {
       commitBaseline("capture.routing", { enabled: runtime.systemProxyEnabled, bypass });
@@ -427,7 +432,11 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 
   // The preference only reaches the backend through 保存路由设置; until it does,
   // starting a capture reads the old value and quietly takes nothing over.
-  const systemProxyTakeoverUnsaved = systemProxy.enabled !== runtime.systemProxyEnabled;
+  // Gated on a real edit: the settings load and the runtime status land in
+  // either order, and a mismatch between them during startup is not the user
+  // having changed anything.
+  const systemProxyTakeoverUnsaved =
+    systemProxyTouched && systemProxy.enabled !== runtime.systemProxyEnabled;
 
   const runtimeAccessRulesText = effectiveRuntimeAccessRules.join("\n");
 
@@ -446,8 +455,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     invoke<McpServerStatus>("get_mcp_server_status")
       .then((status) => {
         setMcpStatus(status);
-      commitBaseline("mcp.server", { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites });
-        commitBaseline("mcp.server", { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites });
+        savedMcpSettings.current = { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites };
+        commitBaseline("mcp.server", savedMcpSettings.current);
       })
       .catch((error) => onNotify(`读取 MCP 服务状态失败：${String(error)}`));
   }, [onNotify]);
@@ -458,9 +467,20 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     let stopListening: (() => void) | undefined;
     void listen<McpServerStatus>("settings://mcp-server", (event) => {
       if (disposed) return;
-      // A push from the backend is the saved state, not a local edit.
-      setMcpStatus(event.payload);
-      commitBaseline("mcp.server", { port: event.payload.port, enabled: event.payload.enabled, allowWrites: event.payload.allowWrites });
+      // This event also fires on every MCP tool call, carrying the *saved*
+      // settings alongside the live ones. Replacing the whole object threw away
+      // whatever the user was editing — and re-baselining hid that it had
+      // happened, so the next 保存并应用 silently re-saved the old config.
+      const pushed = event.payload;
+      const settingsChanged =
+        pushed.port !== savedMcpSettings.current.port ||
+        pushed.enabled !== savedMcpSettings.current.enabled ||
+        pushed.allowWrites !== savedMcpSettings.current.allowWrites;
+      setMcpStatus((current) => (settingsChanged ? pushed : { ...pushed, port: current.port, enabled: current.enabled, allowWrites: current.allowWrites }));
+      if (settingsChanged) {
+        savedMcpSettings.current = { port: pushed.port, enabled: pushed.enabled, allowWrites: pushed.allowWrites };
+        commitBaseline("mcp.server", savedMcpSettings.current);
+      }
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stopListening = unlisten;
@@ -563,6 +583,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     const bypass = systemProxyBypass.split(",").map((value) => value.trim()).filter(Boolean);
     if (!isTauri()) {
       const saved = { ...systemProxy, bypass };
+      setSystemProxyTouched(false);
       setSystemProxy(saved);
       setSystemProxyBypass(saved.bypass.join(", "));
       commitBaseline("capture.routing", { enabled: saved.enabled, bypass: saved.bypass.join(", ") });
@@ -574,6 +595,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       const saved = await invoke<SystemProxySettings>("save_system_proxy_settings", {
         settings: { enabled: systemProxy.enabled, bypass },
       });
+      setSystemProxyTouched(false);
       setSystemProxy(saved);
       setSystemProxyBypass(saved.bypass.join(", "));
       onRuntimeChange({
@@ -1236,6 +1258,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         },
       });
       setMcpStatus(status);
+      savedMcpSettings.current = { port: status.port, enabled: status.enabled, allowWrites: status.allowWrites };
+      commitBaseline("mcp.server", savedMcpSettings.current);
       onNotify(status.running ? "MCP 服务配置已保存并生效" : status.lastError ? `MCP 服务启动失败：${status.lastError}` : "MCP 服务已停止");
     } catch (error) {
       onNotify(`保存 MCP 服务配置失败：${String(error)}`);
@@ -1621,9 +1645,9 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 {runtime.transparentModeAvailable && <button className={routingMode === "transparent" ? "is-active" : ""} onClick={() => setRoutingMode("transparent")} title="透明导流"><span><Network size={19} /></span><div><strong>透明模式</strong><small>TUN 自动导流到本机代理</small></div>{routingMode === "transparent" && <Check size={15} />}</button>}
               </div>
               {routingMode === "transparent" && <div className="settings-notice"><CircleAlert size={15} /><span>TUN 负责透明导流，HTTPS 内容仍由本地 CA 与 MITM 解密。</span></div>}
-              <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : systemProxyTakeoverUnsaved ? "尚未保存 · 保存路由设置后，下次启动抓包才会接管" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxy((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : systemProxyTakeoverUnsaved ? "尚未保存 · 保存路由设置后，下次启动抓包才会接管" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => { setSystemProxyTouched(true); setSystemProxy((current) => ({ ...current, enabled: event.target.checked })); }} /><i /></label>
               {systemProxyTakeoverUnsaved && <div className="settings-notice"><CircleAlert size={15} /><span>接管开关改动尚未保存，点击下方「保存路由设置」后才会在启动抓包时生效。</span></div>}
-              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>检测到尚未完成的系统代理恢复记录</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
+              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError ? `系统代理恢复未完成：${systemProxy.lastError}` : "检测到尚未完成的系统代理恢复记录"}</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
               {!systemProxy.recoveryPending && systemProxy.lastError && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError}</span></div>}
               {/* These were `readOnly` inputs, which read as "editable but
                   broken" — there is no command anywhere that changes the
@@ -1897,7 +1921,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 <label className="context-tokens-field">
                   <span>上下文上限</span>
                   <input type="number" min={MIN_AI_CONTEXT_TOKENS} max={MAX_AI_CONTEXT_TOKENS} step="1024" value={contextTokens} onChange={(event) => setContextTokens(Math.trunc(Number(event.target.value)) || 0)} onBlur={() => setContextTokens((current) => clampContextTokens(current))} />
-                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(contextTokens * PROMPT_BYTES_PER_TOKEN)}</small>
+                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(promptBudgetBytes(contextTokens))}</small>
                 </label>
               </div>
             </SettingsSection>
@@ -1945,10 +1969,17 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
             <SettingsSection id="mcp.server" title="ShowNet MCP Server">
               <div className="mcp-settings-status"><span className="server-emblem"><RadioTower size={20} /></span><div><strong>Streamable HTTP</strong><small>{mcpStatus.toolCount} Tools · MCP {mcpStatus.protocolVersion}</small></div><span className={`server-running ${mcpStatus.running ? "" : "is-stopped"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? "启动中" : mcpStatus.running ? "运行中" : "已停止"}</span></div>
               {mcpStatus.lastError && <div className="settings-notice"><CircleAlert size={15} /><span>{mcpStatus.lastError}</span></div>}
-              <div className="settings-field-row"><label><span>监听地址</span><input value={mcpStatus.host} readOnly /></label><label><span>端口</span><input type="number" min="1024" max="65535" value={mcpStatus.port} onChange={(event) => setMcpStatus((current) => ({ ...current, port: Number(event.target.value) || 0, endpoint: `http://127.0.0.1:${Number(event.target.value) || 0}/mcp` }))} /></label></div>
+              {/* 监听地址 was a readOnly input, which reads as "editable but
+                  broken" — McpServerSettingsInput carries no host field, so
+                  nothing can change it. It is a fact, like the capture port. */}
+              <div className="settings-fact-row">
+                <div className="settings-fact"><span>监听地址</span><code>{mcpStatus.host}</code></div>
+                <p className="settings-fact__note">MCP 服务固定只监听回环地址；端口可在下方修改。</p>
+              </div>
+              <div className="settings-field-row"><label><span>端口</span><input type="number" min="1024" max="65535" value={mcpStatus.port} onChange={(event) => setMcpStatus((current) => ({ ...current, port: Number(event.target.value) || 0, endpoint: mcpEndpoint(current.host, Number(event.target.value) || 0) }))} /></label></div>
               <label className="settings-text-field"><span>服务地址</span><div className="secret-input"><input value={mcpStatus.endpoint} readOnly /><button onClick={() => void copyText(mcpStatus.endpoint, "MCP 服务地址")} title="复制服务地址"><Copy size={14} /></button></div></label>
               <label className="settings-switch-row"><span><strong>随应用启动</strong><small>本机服务仅监听回环地址</small></span><input type="checkbox" checked={mcpStatus.enabled} onChange={(event) => setMcpStatus((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
-              <label className="settings-switch-row"><span><strong>允许写入型工具</strong><small>开放创建、删除会话与运行 AI 分析</small></span><input type="checkbox" checked={mcpStatus.allowWrites} onChange={(event) => setMcpStatus((current) => ({ ...current, allowWrites: event.target.checked, toolCount: event.target.checked ? 36 : 28 }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>允许写入型工具</strong><small>开放创建、删除会话与运行 AI 分析</small></span><input type="checkbox" checked={mcpStatus.allowWrites} onChange={(event) => setMcpStatus((current) => ({ ...current, allowWrites: event.target.checked }))} /><i /></label>
               <button className="save-settings-button" onClick={saveMcpSettings} disabled={savingMcp}><Save size={15} />{savingMcp ? "正在应用" : "保存并应用"}</button>
             </SettingsSection>
             <SettingsSection id="mcp.auth" title="认证">
