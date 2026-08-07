@@ -1402,7 +1402,9 @@ async fn handle_connect(
                 if let Err(tunnel_error) =
                     copy_bidirectional(&mut client, &mut upstream_stream).await
                 {
-                    error_sink(format!("CONNECT 隧道传输失败: {tunnel_error}"));
+                    if !is_benign_io_end(&tunnel_error) {
+                        error_sink(format!("CONNECT 隧道传输失败: {tunnel_error}"));
+                    }
                 }
                 return;
             }
@@ -1506,7 +1508,9 @@ async fn handle_connect(
                         502,
                     );
                 }
-                error_sink(format!("HTTPS 绕行隧道传输失败: {error}"));
+                if !is_benign_io_end(&error) {
+                    error_sink(format!("HTTPS 绕行隧道传输失败: {error}"));
+                }
             }
             return;
         }
@@ -1565,7 +1569,7 @@ async fn handle_connect(
                     Some(detail),
                     502,
                 );
-                if !is_benign_client_handshake_end(&error) {
+                if !is_benign_io_end(&error) {
                     error_sink(format!("客户端 TLS 握手失败 {host}:{port}: {error}"));
                 }
                 return;
@@ -1889,13 +1893,17 @@ fn split_failure_report(error: String) -> (bool, String) {
     }
 }
 
-/// Whether a client-side TLS handshake ended for a reason the user caused.
+/// Whether an I/O failure is just a peer hanging up.
 ///
-/// Browsers pre-open TLS connections they may never use and drop them without
-/// completing the handshake; racing connections lose and get closed the same
-/// way. Each one produced "客户端 TLS 握手失败 …: tls handshake eof". A refused
-/// or untrusted certificate does not look like this and still reports.
-fn is_benign_client_handshake_end(error: &std::io::Error) -> bool {
+/// Three places see this. A browser pre-opens TLS connections it may never use
+/// and drops them mid-handshake — "客户端 TLS 握手失败 …: tls handshake eof". A
+/// CONNECT or bypass tunnel ends when one side closes, which `copy_bidirectional`
+/// reports as a reset rather than a clean EOF. None of it is a fault.
+///
+/// What is excluded matters as much: a refused or untrusted certificate arrives
+/// as a fatal alert (`InvalidData`), a dead route as `TimedOut` or
+/// `ConnectionRefused`. Those stay visible.
+fn is_benign_io_end(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         std::io::ErrorKind::UnexpectedEof
@@ -6506,11 +6514,12 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_dropping_a_handshake_is_silent_but_a_refused_certificate_is_not() {
+    fn a_peer_hanging_up_is_silent_but_a_refused_certificate_or_dead_route_is_not() {
         use std::io::ErrorKind;
         // Observed: "客户端 TLS 握手失败 fonts.gstatic.com:443: tls handshake eof".
         // Browsers pre-open TLS connections they may never use, and racing
-        // connections lose and close the same way.
+        // connections lose and close the same way. The same kinds end a CONNECT
+        // or bypass tunnel, which copy_bidirectional reports as a reset.
         for kind in [
             ErrorKind::UnexpectedEof,
             ErrorKind::ConnectionReset,
@@ -6519,7 +6528,7 @@ mod tests {
             ErrorKind::NotConnected,
         ] {
             assert!(
-                is_benign_client_handshake_end(&std::io::Error::from(kind)),
+                is_benign_io_end(&std::io::Error::from(kind)),
                 "{kind:?} is a client hanging up, not a failure to report"
             );
         }
@@ -6527,15 +6536,21 @@ mod tests {
         // surfaces as InvalidData. That one has to reach the user — it is
         // exactly the setup problem the certificate page exists to fix.
         assert!(
-            !is_benign_client_handshake_end(&std::io::Error::new(
+            !is_benign_io_end(&std::io::Error::new(
                 ErrorKind::InvalidData,
                 "received fatal alert: UnknownCA",
             )),
             "a rejected certificate must still be reported"
         );
-        assert!(!is_benign_client_handshake_end(&std::io::Error::from(
-            ErrorKind::TimedOut
-        )));
+        // A dead route is a real problem the user can act on — a wrong upstream
+        // proxy, a host that is not there. Silencing these alongside the
+        // hang-ups is the mistake this half of the test exists to catch.
+        for kind in [ErrorKind::TimedOut, ErrorKind::ConnectionRefused] {
+            assert!(
+                !is_benign_io_end(&std::io::Error::from(kind)),
+                "{kind:?} is actionable and must still be reported"
+            );
+        }
     }
 
     #[test]
@@ -6553,6 +6568,20 @@ mod tests {
         let (report, message) = split_failure_report("转发目标请求失败: http2 error".to_string());
         assert!(report, "a protocol failure must still be reported");
         assert_eq!(message, "转发目标请求失败: http2 error");
+    }
+
+    #[test]
+    fn every_place_that_reports_a_hang_up_asks_first() {
+        // The classifier above is only useful where it is consulted. Three
+        // sites report an io::Error to the user: the client TLS handshake, the
+        // CONNECT tunnel copy, and the bypass tunnel copy. A fourth added
+        // without a guard reintroduces the noise, so the count is pinned.
+        let source = production_source();
+        assert_eq!(
+            source.matches("if !is_benign_io_end(&").count(),
+            3,
+            "each site that reports an io failure must ask whether it is a hang-up"
+        );
     }
 
     #[test]
