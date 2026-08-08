@@ -543,6 +543,24 @@ describe("release publishing", () => {
     assert.match(body, /\{\{VERSION\}\}/, "the shared body must be a template");
     assert.ok(body.includes("SHA256SUMS.txt"), "it must point at the checksums");
 
+    // Every placeholder must be one the workflows actually substitute. An
+    // unsubstituted one is not caught by anything else: sed leaves it alone and
+    // the release notes show the braces to whoever downloads the build.
+    const placeholders = [...new Set(body.match(/\{\{[A-Z_]+\}\}/g) ?? [])];
+    assert.ok(placeholders.length > 0, "expected at least one placeholder");
+    for (const workflow of ["release.yml", "publish-from-run.yml"]) {
+      const text = await readFile(
+        new URL(`../.github/workflows/${workflow}`, import.meta.url),
+        "utf8",
+      );
+      for (const placeholder of placeholders) {
+        assert.ok(
+          text.includes(`s/${placeholder}/`),
+          `${workflow} never substitutes ${placeholder}, so it reaches users literally`,
+        );
+      }
+    }
+
     for (const workflow of ["release.yml", "publish-from-run.yml"]) {
       const text = await readFile(
         new URL(`../.github/workflows/${workflow}`, import.meta.url),
