@@ -6551,6 +6551,7 @@ mod tests {
         let observed = collector
             .snapshot()
             .expect("the client sent a preface and SETTINGS");
+        assert!(observed.complete || !observed.settings.is_empty());
 
         // 1. The configured SETTINGS values do reach the wire.
         let recipe = tls_outbound::active_http2_recipe();
@@ -6644,6 +6645,91 @@ mod tests {
                 "we do not emit the order the catalog claims for Chrome"
             );
         }
+    }
+
+    /// Whether a Chrome recipe's numbers actually reach the wire.
+    ///
+    /// The catalog carries Chrome SETTINGS per version band, and the settings
+    /// page lets one be chosen. If the values never left the builder the whole
+    /// arrangement would be decorative — a page telling the user something the
+    /// connection does not do. Applied directly rather than through
+    /// set_active_preset, which mutates process-global state other tests read.
+    #[tokio::test]
+    async fn a_chrome_recipe_reaches_the_wire() {
+        use crate::http2_fingerprint::Http2FingerprintCollector;
+        use tokio::io::AsyncReadExt;
+
+        let chrome = crate::tls_clienthello_catalog::H2_CHROME_MID;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let collector = std::sync::Arc::new(Http2FingerprintCollector::default());
+        let observer = collector.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 16 * 1024];
+            for _ in 0..8 {
+                match timeout(Duration::from_millis(300), stream.read(&mut buffer)).await {
+                    Ok(Ok(0)) | Err(_) => break,
+                    Ok(Ok(read)) => observer.observe(&buffer[..read]),
+                    Ok(Err(_)) => break,
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+        tls_outbound::apply_http2_recipe_to_builder(&mut builder, chrome);
+        if let Ok((_sender, connection)) = builder
+            .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
+            .await
+        {
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+        }
+        let _ = timeout(Duration::from_secs(2), server).await;
+
+        let observed = collector.snapshot().expect("SETTINGS were sent");
+        let value_of = |id: u16| {
+            observed
+                .settings
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.value)
+        };
+        assert_eq!(
+            value_of(0x1),
+            Some(chrome.header_table_size),
+            "HEADER_TABLE_SIZE"
+        );
+        assert_eq!(
+            value_of(0x3),
+            Some(chrome.max_concurrent_streams),
+            "MAX_CONCURRENT_STREAMS"
+        );
+        assert_eq!(
+            value_of(0x4),
+            Some(chrome.initial_window_size),
+            "INITIAL_WINDOW_SIZE"
+        );
+        assert_eq!(value_of(0x5), Some(chrome.max_frame_size), "MAX_FRAME_SIZE");
+        assert_eq!(
+            value_of(0x6),
+            Some(chrome.max_header_list_size),
+            "MAX_HEADER_LIST_SIZE"
+        );
+
+        // The connection window is reached by WINDOW_UPDATE rather than by a
+        // SETTINGS entry, so it is only observable as the increment.
+        let expected_increment = chrome.connection_window_size - 65_535;
+        assert!(
+            observed
+                .connection_window_updates
+                .contains(&expected_increment),
+            "connection window {} should appear as increment {expected_increment}: {:?}",
+            chrome.connection_window_size,
+            observed.connection_window_updates
+        );
     }
 
     #[tokio::test]
