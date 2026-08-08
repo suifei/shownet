@@ -23,4 +23,15 @@ xattr -dr com.apple.quarantine /Applications/ShowNet.app
 
 解压后运行 `ShowNetPortable.exe`，SmartScreen 弹窗点**「更多信息」→「仍要运行」**。便携版不写注册表，删除目录即完全卸载。
 
+### 附件里的两份 `release-verification-*.json`
+
+它们记录构建产物**实测**的签名状态，不是构建流程的声明 —— macOS 那份来自挂载 DMG 后对 `ShowNet.app` 跑 `codesign`，Windows 那份来自对打包内每个可执行文件跑 `Get-AuthenticodeSignature`。当前应为 `"mode": "ad-hoc"` 与 `NotSigned`，与上文「未经过商业代码签名」一致。
+
+想自己复核 macOS 这份：
+
+```bash
+hdiutil attach ShowNet_{{VERSION}}_aarch64.dmg
+codesign -dv --verbose=2 /Volumes/ShowNet/ShowNet.app
+```
+
 ---
