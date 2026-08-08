@@ -34,8 +34,6 @@ async function walk(directory: string, out: string[] = []): Promise<string[]> {
 }
 
 async function hasRustTests(manifest: string): Promise<boolean> {
-  const sources = await walk(join(manifest, "..", "src")).catch(() => []);
-  void sources;
   const files: string[] = [];
   const collect = async (directory: string) => {
     for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
