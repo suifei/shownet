@@ -11487,4 +11487,46 @@ mod tests {
             captured.len()
         );
     }
+
+    /// Drives ShowNet's own boring egress against a real host, not a standalone
+    /// probe: TcpStream -> BoxedIo -> connect_verified_tls_boring, and asserts a
+    /// real ClientHello was measured. Ignored because it needs the network and a
+    /// valid public cert (the connector verifies certs, so the local self-signed
+    /// test server cannot stand in). Run with:
+    ///   cargo test --no-default-features --features impersonate-boring \
+    ///     boring_egress_measures_a_real_ja3 -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "network + real cert; run explicitly under --features impersonate-boring"]
+    #[cfg(feature = "impersonate-boring")]
+    async fn boring_egress_measures_a_real_ja3() {
+        use tokio::net::TcpStream;
+        crate::tls_impersonate::set_impersonate_requested(true);
+        assert_eq!(
+            tls_outbound::active_engine(),
+            tls_outbound::OutboundTlsEngine::Impersonate,
+            "the boring path only runs when the engine is Impersonate"
+        );
+
+        let host = "tls.peet.ws";
+        let tcp = TcpStream::connect((host, 443))
+            .await
+            .expect("tcp connect to reflector");
+        let boxed = BoxedIo(Box::new(tcp));
+        let verified =
+            connect_verified_tls_measured(boxed, host, OutboundTlsProfile::ChromeLike, false)
+                .await
+                .expect("boring handshake");
+
+        let ja3 = verified.measured_ja3.expect("a ClientHello was measured");
+        assert_eq!(ja3.len(), 32, "JA3 is an md5 hex digest: {ja3}");
+        // A real TLS 1.3 ClientHello from BoringSSL announces the 1.3 suites.
+        // rustls would too, but the point stands: this went out over boring and
+        // was measured from the wire, closing the gap the standalone probe left.
+        eprintln!("BORING_JA3 {ja3}");
+        assert!(
+            verified.negotiated_alpn.is_some(),
+            "ALPN should have been negotiated"
+        );
+        crate::tls_impersonate::set_impersonate_requested(false);
+    }
 }

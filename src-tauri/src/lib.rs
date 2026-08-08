@@ -3522,9 +3522,19 @@ pub fn run() {
                 if let Some(auto) = value.get("autoFromInbound").and_then(|v| v.as_bool()) {
                     tls_outbound::set_auto_from_inbound(auto);
                 }
-                // Never enable fake impersonate engine from persisted flag without a real stack.
-                let _ = value.get("impersonate");
-                tls_impersonate::set_impersonate_requested(false);
+                // Honor the persisted impersonate flag only when a real
+                // connector is linked. Without one the request is inert anyway —
+                // active_engine() gates on the stack too — but refusing to set
+                // it keeps the false-positive impossible even if that gate ever
+                // loosened. With the boring connector linked, this is what lets
+                // a user's saved choice actually take effect.
+                let wants_impersonate = value
+                    .get("impersonate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                tls_impersonate::set_impersonate_requested(
+                    wants_impersonate && tls_outbound::real_impersonate_stack_available(),
+                );
             }
             if let Ok(Some(value)) = storage.load_app_setting_json("px_console") {
                 if let Some(v) = value.get("decryptEnabled").and_then(|v| v.as_bool()) {
