@@ -606,13 +606,13 @@ fn identify_config(decoded: &[String]) -> ChallengeConfigCandidates {
     let mut api_paths = BTreeSet::new();
 
     for value in decoded {
+        // Takes the first hex64 seen; the pass below upgrades it if this one
+        // turned out to be zero-padded. The two arms this replaces both did
+        // exactly this — the second was guarded by a repeat of the outer
+        // `is_none()` test and so could never be reached with a different
+        // outcome, which read as a preference that was not implemented here.
         if aes_key_hex64.is_none() && is_hex64(value) {
-            // Prefer non-zero-looking keys
-            if value.chars().filter(|ch| *ch != '0').count() >= 8 {
-                aes_key_hex64 = Some(value.clone());
-            } else if aes_key_hex64.is_none() {
-                aes_key_hex64 = Some(value.clone());
-            }
+            aes_key_hex64 = Some(value.clone());
         }
         if signal_version.is_none() {
             if let Some(version) = match_signal_version(value) {
@@ -1151,6 +1151,42 @@ function a0_0x4f2e(index, key){
 }
 "#
         .to_string()
+    }
+
+    #[test]
+    fn a_padded_placeholder_does_not_beat_the_real_key() {
+        // Both are valid hex64, so the order they appear in the dump decided
+        // which one was taken. The comment said non-zero-looking keys were
+        // preferred; the guard made that unreachable, and the AES trial that
+        // follows had nothing to work with when a placeholder came first.
+        let placeholder = "0".repeat(58) + "000000";
+        let real = "9f3c7a1e2b4d6f8a0c5e7b9d1f3a5c7e9b2d4f6a8c0e2b4d6f8a1c3e5b7d9f0a";
+        assert_eq!(placeholder.len(), 64);
+        assert_eq!(real.len(), 64);
+
+        let placeholder_first = identify_config(&[placeholder.clone(), real.to_string()]);
+        assert_eq!(
+            placeholder_first.aes_key_hex64.as_deref(),
+            Some(real),
+            "a real key must win however late it appears"
+        );
+
+        // Order must not matter.
+        let real_first = identify_config(&[real.to_string(), placeholder.clone()]);
+        assert_eq!(real_first.aes_key_hex64.as_deref(), Some(real));
+
+        // With nothing better, the placeholder is still worth reporting.
+        let only_placeholder = identify_config(&[placeholder.clone()]);
+        assert_eq!(
+            only_placeholder.aes_key_hex64.as_deref(),
+            Some(placeholder.as_str()),
+            "a weak key is better than none"
+        );
+
+        // The first strong key wins; a later one does not churn the choice.
+        let second_real = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b";
+        let two_real = identify_config(&[real.to_string(), second_real.to_string()]);
+        assert_eq!(two_real.aes_key_hex64.as_deref(), Some(real));
     }
 
     #[test]
