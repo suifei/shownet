@@ -2515,10 +2515,17 @@ fn extract_token_like(body: &str) -> Vec<String> {
 }
 
 fn mask(value: &str) -> String {
-    if value.len() <= 12 {
+    // Counted and cut in characters, not bytes. This runs on the `token` field
+    // lifted straight from a captured JSON body, which is arbitrary UTF-8 — a
+    // byte cut at 4 lands inside the second character of any Chinese token and
+    // panics, taking the leak scan down with the report it was writing.
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= 12 {
         return "[redacted]".into();
     }
-    format!("{}…{}", &value[..4], &value[value.len() - 4..])
+    let head: String = characters[..4].iter().collect();
+    let tail: String = characters[characters.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 fn is_noise_host(host: &str) -> bool {
@@ -2589,6 +2596,42 @@ fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn masking_a_token_survives_one_that_is_not_ascii() {
+        // extract_token_like takes the `token` field out of a captured JSON
+        // body, so this sees whatever a site sent. The old cut at byte 4 landed
+        // inside the second character of a Chinese token and panicked — a crash
+        // in the leak scan caused by the traffic being inspected.
+        let chinese = "抓包解密验证通过测试令牌样本内容";
+        assert!(chinese.chars().count() > 12, "long enough to show hints");
+        assert!(!chinese.is_char_boundary(4), "byte 4 is mid-character");
+        let masked = mask(chinese);
+        assert!(masked.starts_with("抓包解密"), "{masked}");
+        assert!(
+            masked.ends_with("令牌样本内容".chars().skip(2).collect::<String>().as_str()),
+            "{masked}"
+        );
+        assert!(masked.contains('…'), "{masked}");
+        assert!(
+            !masked.contains(chinese),
+            "the secret must not survive: {masked}"
+        );
+
+        // Counted in characters, so a short Chinese token is withheld entirely
+        // rather than being treated as long merely for being wide — the old
+        // byte guard let a 5-character token through and then panicked on it.
+        assert_eq!(mask("短令牌"), "[redacted]");
+        assert_eq!(mask("抓包解密验"), "[redacted]");
+        assert_eq!(mask(""), "[redacted]");
+
+        // ASCII behaviour is unchanged.
+        assert_eq!(mask("sk-live-0123456789abcdef"), "sk-l…cdef");
+
+        // Either side of the guard.
+        assert!(mask(&"解".repeat(13)).contains('…'));
+        assert_eq!(mask(&"解".repeat(12)), "[redacted]");
+    }
+
     use super::*;
     use crate::models::CapturedRequestInput;
     use crate::scorecard;
