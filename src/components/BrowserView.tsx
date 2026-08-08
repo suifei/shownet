@@ -585,7 +585,13 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         cdpSendRef.current = send;
         send("Runtime.enable");
         send("Page.enable");
-        send("Network.enable");
+        // Network.enable is deliberately absent. It shipped in the first release
+        // and nothing ever consumed it: the packet handler below dispatches only
+        // Page.* and Runtime.bindingCalled, so every Network event was parsed and
+        // dropped. Measured against one bing.com load it emits 246 events and
+        // 464KB of JSON, and this socket is the same one Page.screencastFrame
+        // rides, so that dead traffic competed with the live view. Enable it
+        // again only alongside a handler that reads the events.
         // Resolved before the socket was opened, so this goes out ahead of the
         // Page.navigate below — Chrome runs commands in arrival order, and doing
         // it in a getVersion callback let the main document, the one request a
