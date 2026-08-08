@@ -582,6 +582,23 @@ pub fn origin_force_http11_for_host(host: &str) -> bool {
     if host.is_empty() {
         return false;
     }
+    // Measured 2026-08-08, after the SETTINGS we announce were corrected to
+    // match a captured Chromium 151 handshake. Probing each with those SETTINGS
+    // over TLS+ALPN h2:
+    //
+    //   pss.bdstatic.com  answered HEADERS and DATA — no longer refuses
+    //   ss0.bdstatic.com  completed the handshake, no reply within 6s
+    //   bj.bcebos.com     ALPN alert 120: does not offer h2 at all
+    //
+    // So forcing h1 is a no-op for bcebos, which never negotiates h2 anyway,
+    // and may now be an unnecessary cost for bdstatic — h1 does not multiplex,
+    // and this list exists because images behind that CDN were failing.
+    //
+    // Left in place deliberately. The probe used Node's TLS ClientHello, not
+    // this app's rustls, so it cannot tell whether the original refusal was
+    // triggered by the SETTINGS or by the handshake in front of them. Removing
+    // an entry on that evidence risks bringing the failures back; verifying it
+    // needs the app itself pointed at those hosts.
     const SUFFIXES: &[&str] = &[".bdstatic.com", ".bcebos.com"];
     const EXACT: &[&str] = &["bdstatic.com", "bcebos.com"];
     EXACT.iter().any(|exact| host == *exact)
