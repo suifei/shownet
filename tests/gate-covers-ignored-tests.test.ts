@@ -29,6 +29,8 @@ const EXCLUDED: Record<string, string> = {
     "a benchmark, not a pass/fail check; run via npm run benchmark:request-list",
   dump_real_session_analysis:
     "a manual instrument needing SHOWNET_SESSION and a real captured session",
+  wreq_egress_is_byte_exact_chrome:
+    "hits a live JA4 reflector to prove Chrome parity; run explicitly under --features impersonate-boring",
 };
 
 describe("the release gate runs every ignored test it can", () => {

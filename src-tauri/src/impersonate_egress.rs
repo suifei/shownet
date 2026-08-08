@@ -34,7 +34,12 @@ pub struct ImpersonateResponse {
 /// proxy so the impersonate path reaches the network the same way the rest of
 /// the proxy does.
 pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<Client, String> {
-    let mut builder = Client::builder().emulation(EMULATION);
+    // no_proxy() first: wreq, like reqwest, reads http_proxy/https_proxy from
+    // the environment by default, and ShowNet points the system proxy at
+    // itself — an inherited env proxy would loop the app's own egress back
+    // through its capture proxy. The explicit upstream below is the only proxy
+    // this client may use. (Invariant enforced by upstream-egress-ui.test.ts.)
+    let mut builder = Client::builder().no_proxy().emulation(EMULATION);
     if upstream.mode == "http" && !upstream.host.trim().is_empty() {
         let auth = if upstream.username.trim().is_empty() {
             String::new()

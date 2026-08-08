@@ -88,7 +88,10 @@ describe("egress ignores the ambient environment", () => {
         checked += 1;
       }
     }
-    assert.equal(checked, 5, "expected 5 production egress clients; a new one must be guarded too");
+    // Six once the wreq impersonate client joined (impersonate_egress.rs); it
+    // is feature-gated, but this scans source text, and the invariant holds
+    // regardless of build config.
+    assert.equal(checked, 6, "expected 6 production egress clients; a new one must be guarded too");
   });
 });
 
