@@ -604,6 +604,13 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
         "- 加解密：{} 个步骤复现了抓到的真实值并被写入代码，{} 个只被识别出来、未能复现，因此没有生成\n",
         readiness.crypto_verified, readiness.crypto_unverified
     ));
+    if !inputs.dataflow.edges.is_empty() || !inputs.dataflow.unsourced_credentials.is_empty() {
+        out.push_str(&format!(
+            "- 依赖链路：追出 {} 条「某次响应的值出现在后续请求里」的边；其中 {} 个凭据在这次抓包里没有任何来源\n",
+            inputs.dataflow.edges.len(),
+            inputs.dataflow.unsourced_credentials.len()
+        ));
+    }
     out.push_str(&format!(
         "- 指纹：{}\n\n",
         if readiness.fingerprint_target_known {
@@ -613,7 +620,15 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
         }
     ));
 
-    if model.gaps.is_empty() && inputs.unverified_crypto.is_empty() {
+    if model.gaps.is_empty()
+        && inputs.unverified_crypto.is_empty()
+        && inputs.dataflow.unsourced_credentials.is_empty()
+        && !inputs
+            .dataflow
+            .edges
+            .iter()
+            .any(|edge| edge.occurrences == 1)
+    {
         out.push_str("## 逐条清单\n\n（无）\n");
         return out;
     }
@@ -631,6 +646,22 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
             label, gap.operation_id, gap.detail
         ));
     }
+    for edge in inputs
+        .dataflow
+        .edges
+        .iter()
+        .filter(|edge| edge.occurrences == 1)
+    {
+        out.push_str(&format!(
+            "- **依赖链路只见过一次** · `{}` → `{}` — `{}` 的值只在一次请求里被复用过；一次相同不足以断定它一定来自这里\n",
+            edge.producer, edge.consumer, edge.consumer_name
+        ));
+    }
+    for name in &inputs.dataflow.unsourced_credentials {
+        out.push_str(&format!(
+            "- **凭据没有来源** · `{name}` — 抓包证明接口需要它，但没有任何一次响应产生过它，所以生成的客户端只能要求调用方传入\n"
+        ));
+    }
     for name in &inputs.unverified_crypto {
         out.push_str(&format!(
             "- **算法未通过验证** · `{name}` — 识别出来了，但没有用抓到的值复现成功，因此没有生成代码\n"
@@ -643,6 +674,7 @@ fn render_readme(
     model: &EndpointModel,
     readiness: &SdkReadiness,
     credentials: &[FieldModel],
+    flow: &DataFlow,
 ) -> String {
     let mut out = String::from("# ShowNet 生成的 API SDK\n\n");
     out.push_str(&format!(
@@ -660,21 +692,51 @@ fn render_readme(
         out.push_str("> 这次抓包里没有留下未确认的部分，但样本量仍然决定了它的覆盖范围。\n\n");
     }
 
+    let (sourced, unsourced) = split_credentials(credentials, flow);
+
     out.push_str("## 安装\n\n```bash\npip install -r requirements.txt\n```\n\n## 使用\n\n```python\nfrom shownet_sdk import ApiClient\n\nclient = ApiClient(\n");
-    for credential in credentials {
+    for credential in &unsourced {
         out.push_str(&format!(
-            "    {}=\"...\",  # 抓包显示这个接口需要它；这里必须由你提供\n",
+            "    {}=\"...\",  # 抓包显示这个接口需要它，且没有任何一次响应产生过它\n",
             snake_case(&credential.name)
         ));
     }
-    out.push_str(")\n```\n\n");
+    out.push_str(")\n");
+    for (credential, edge) in &sourced {
+        out.push_str(&format!(
+            "\n# 抓包显示 {} 产生了这个凭据，所以不必手工填：\nclient.authenticate_{}(json_body={{...}})\n",
+            edge.producer,
+            snake_case(&credential.name)
+        ));
+    }
+    out.push_str("```\n\n");
 
-    if !credentials.is_empty() {
-        out.push_str("### 为什么凭据要自己传\n\n");
+    if !sourced.is_empty() {
+        out.push_str("### 登录是从抓包里推出来的\n\n");
+        for (credential, edge) in &sourced {
+            out.push_str(&format!(
+                "`{}` 的值在抓包中由 `{}` 的响应 `{}` 产生，随后出现在 {} 次请求里。\n\
+                 所以客户端提供了 `authenticate_{}()`：它调用那个接口并接住返回值。\n\n",
+                credential.name,
+                edge.producer,
+                edge.producer_pointer,
+                edge.occurrences,
+                snake_case(&credential.name)
+            ));
+        }
+        out.push_str(
+            "这条链路是**推断**出来的，不是接口文档：如果目标改了登录响应的结构，\n\
+             `authenticate_*` 会抛出错误而不是悄悄发一个空凭据。\n\n",
+        );
+    }
+
+    if !unsourced.is_empty() {
+        out.push_str("### 为什么这些凭据要自己传\n\n");
         out.push_str(
             "抓包里的 token 没有被写进代码。它是那一次会话的凭据：写死之后，下一次\n\
-             轮换就会失效，而且等于把一个真实密钥提交进了代码库。抓包能证明的是\n\
-             **这个接口需要一个凭据**，至于是哪一个，由调用方决定。\n\n",
+             轮换就会失效，而且等于把一个真实密钥提交进了代码库。而这几个凭据在\n\
+             这次抓包里**没有任何一次响应产生过**，所以连推断登录都做不到——抓包能\n\
+             证明的只是**这个接口需要一个凭据**，至于它从哪来，这次没拍到。\n\n",
         );
     }
 
@@ -734,7 +796,7 @@ pub fn build_python_sdk(model: &EndpointModel, inputs: &SdkInputs) -> SdkPackage
         &mut files,
         "README.md",
         "readme",
-        render_readme(model, &readiness, &credentials),
+        render_readme(model, &readiness, &credentials, &inputs.dataflow),
     );
     push(
         &mut files,
@@ -947,6 +1009,92 @@ mod tests {
             "the captured `Bearer ` prefix has to be rebuilt:\n{client}"
         );
         assert!(!client.contains(TOKEN), "still no captured value anywhere");
+    }
+
+    #[test]
+    fn the_readme_and_gaps_carry_the_login_chain() {
+        // The chain lived only in a docstring, where someone deciding whether
+        // to trust the package never sees it.
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.body.sig-9f2c";
+        let mut login = request("POST", "/v1/auth/login");
+        login.response_body = format!(r#"{{"token":"{TOKEN}"}}"#);
+        let mut first = request("GET", "/v1/me");
+        first.request_headers = vec![HeaderEntry {
+            name: "Authorization".into(),
+            value: format!("Bearer {TOKEN}"),
+        }];
+        let mut second = request("GET", "/v1/orders");
+        second.request_headers = first.request_headers.clone();
+
+        let session = bundle(vec![login, first, second]);
+        let model = build_endpoint_model(&session);
+        let inputs = SdkInputs {
+            dataflow: crate::dataflow::build_dataflow(&session, &model),
+            ..SdkInputs::default()
+        };
+        let package = build_python_sdk(&model, &inputs);
+
+        let readme = file(&package, "README.md");
+        assert!(readme.contains("登录是从抓包里推出来的"), "{readme}");
+        assert!(
+            readme.contains("postV1AuthLogin"),
+            "the producing call is named"
+        );
+        assert!(readme.contains("client.authenticate_authorization("));
+        assert!(
+            readme.contains("**推断**"),
+            "the chain has to be labelled inference, not documentation"
+        );
+        assert!(!readme.contains(TOKEN));
+
+        let gaps = file(&package, "GAPS.md");
+        assert!(gaps.contains("依赖链路"), "{gaps}");
+    }
+
+    #[test]
+    fn a_credential_with_no_source_is_called_out_in_the_gaps() {
+        let model = build_endpoint_model(&bundle(vec![
+            authorised("GET", "/v1/users/1"),
+            authorised("GET", "/v1/users/2"),
+        ]));
+        let session = bundle(vec![
+            authorised("GET", "/v1/users/1"),
+            authorised("GET", "/v1/users/2"),
+        ]);
+        let inputs = SdkInputs {
+            dataflow: crate::dataflow::build_dataflow(&session, &model),
+            ..SdkInputs::default()
+        };
+        let package = build_python_sdk(&model, &inputs);
+        assert!(file(&package, "GAPS.md").contains("凭据没有来源"));
+        assert!(file(&package, "README.md").contains("没有任何一次响应产生过"));
+    }
+
+    #[test]
+    fn each_verified_step_is_its_own_entry() {
+        // Two steps used to collapse into one blob named after the adapter, so
+        // the count in GAPS.md read 1 however many actually ran.
+        let model = build_endpoint_model(&bundle(vec![request("GET", "/v1/thing")]));
+        let inputs = SdkInputs {
+            verified_crypto: vec![
+                VerifiedCryptoStep {
+                    name: "sign_body".into(),
+                    python_source: "def sign_body(request):\n    return \"a\"\n".into(),
+                    entry_point: "sign_body".into(),
+                },
+                VerifiedCryptoStep {
+                    name: "sign_header".into(),
+                    python_source: "def sign_header(request):\n    return \"b\"\n".into(),
+                    entry_point: "sign_header".into(),
+                },
+            ],
+            ..SdkInputs::default()
+        };
+        let package = build_python_sdk(&model, &inputs);
+        assert_eq!(package.readiness.crypto_verified, 2);
+        let crypto = file(&package, "shownet_sdk/crypto.py");
+        assert!(crypto.contains("\"sign_body\": sign_body,"));
+        assert!(crypto.contains("\"sign_header\": sign_header,"));
     }
 
     #[test]

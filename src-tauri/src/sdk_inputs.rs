@@ -110,23 +110,34 @@ fn crypto_from_replay(
         return (Vec::new(), unverified);
     }
 
-    let source = package
-        .files
+    // One entry per step rather than the whole replay.py. Taking the file
+    // wholesale put an unrelated HTTP client, a manifest loader and every
+    // step into a single "step" named after the adapter, so crypto.py held one
+    // opaque blob and the count in GAPS.md read 1 no matter how many steps
+    // actually ran.
+    let steps: Vec<VerifiedCryptoStep> = package
+        .verified_steps
         .iter()
-        .find(|file| file.name == "replay.py")
-        .map(|file| file.content.clone());
+        .map(|step| VerifiedCryptoStep {
+            name: step.name.clone(),
+            python_source: step.source.clone(),
+            entry_point: step.entry_point.clone(),
+        })
+        .collect();
 
-    match source {
-        Some(content) => (
-            vec![VerifiedCryptoStep {
-                name: package.adapter_id.clone(),
-                python_source: content,
-                entry_point: "AGENT_STEPS".to_string(),
-            }],
+    // crypto_verified without a step to show for it means the verification
+    // lives somewhere this cannot reach; say so rather than emit nothing
+    // silently.
+    if steps.is_empty() {
+        return (
             Vec::new(),
-        ),
-        None => (Vec::new(), Vec::new()),
+            vec![format!(
+                "{} (marked verified, but the package carried no step source)",
+                package.adapter_id
+            )],
+        );
     }
+    (steps, Vec::new())
 }
 
 /// Everything the generator needs for one session.

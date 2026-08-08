@@ -19,6 +19,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SUPPORTED_LANGUAGES: &[&str] =
     &["python", "javascript", "typescript", "go", "java", "csharp"];
 
+/// One agent-written step that ran against this capture's values and
+/// reproduced them.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedStep {
+    pub name: String,
+    pub source: String,
+    pub entry_point: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplayFile {
@@ -43,6 +53,12 @@ pub struct AlgorithmReplayPackage {
     pub report_id: Option<String>,
     pub reconstruction_mode: String,
     pub reconstruction_confidence: String,
+    /// The steps that reproduced captured values, as data. Emitting them is
+    /// `render_agent_algorithms`'s job; carrying them out lets another
+    /// generator — the SDK builder — emit one function per step instead of
+    /// treating the whole replay file as a single opaque blob.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_steps: Vec<VerifiedStep>,
     pub can_emit_runnable_crypto: bool,
     /// Whether the emitted crypto was executed against captured values and
     /// reproduced them. Distinct from `can_emit_runnable_crypto`, which only
@@ -223,6 +239,17 @@ pub fn build_algorithm_replay_for_report(
     let mut notes = notes(&harness, report_id.is_some(), &reconstruction);
     notes.extend(reconstruction.notes.iter().cloned());
 
+    // Computed before the struct so `language` is still owned here rather than
+    // read after it has moved into the field above it.
+    let verified_steps = verified_agent_steps(&reconstruction, &language)
+        .into_iter()
+        .map(|(name, source, entry_point)| VerifiedStep {
+            name: name.to_string(),
+            source: source.to_string(),
+            entry_point: entry_point.to_string(),
+        })
+        .collect();
+
     Ok(AlgorithmReplayPackage {
         session_id: session_id.to_string(),
         language,
@@ -235,6 +262,7 @@ pub fn build_algorithm_replay_for_report(
         report_id,
         reconstruction_mode: reconstruction.reconstruction_mode.clone(),
         reconstruction_confidence: reconstruction.confidence.clone(),
+        verified_steps,
         can_emit_runnable_crypto: reconstruction.can_emit_runnable_crypto,
         crypto_verified: reconstruction.crypto_verified,
         provider_candidates,
