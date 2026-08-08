@@ -67,8 +67,18 @@ jobs:
               *) echo "asset ${name} is not version ${version}" >&2; exit 1 ;;
             esac
           done
-          (cd release-assets && find . -type f ! -name SHA256SUMS.txt -print0 \
-            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          # Same shape as release.yml: publish names, not the paths the assets
+          # happen to be downloaded into, or `shasum -c` cannot find the DMG.
+          (
+            cd release-assets
+            duplicates="$(find . -type f ! -name SHA256SUMS.txt -exec basename {} \; | sort | uniq -d)"
+            if [ -n "$duplicates" ]; then
+              echo "Assets share a basename and would collide once uploaded: $duplicates" >&2
+              exit 1
+            fi
+            find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum \
+              | sed -E 's#^([0-9a-f]{64}  )\./(.*/)?#\1#' > SHA256SUMS.txt
+          )
       - name: Render the release body
         shell: bash
         run: sed "s/{{VERSION}}/${version}/g" .github/release/body.md > release-body.md

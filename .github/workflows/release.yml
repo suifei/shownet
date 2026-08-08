@@ -511,7 +511,22 @@ jobs:
           # statement of "what the latest version is" could only drift from it.
           echo "macOS asset:  $mac_url"
           echo "Windows asset: $win_url"
-          (cd release-assets && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          # Name the files as they are published. The assets upload flattened
+          # (files: release-assets/**/*), but the DMG arrives inside a dmg/
+          # subdirectory, so the sums recorded ./dmg/ShowNet_x.y.z.dmg and
+          # `shasum -a 256 -c SHA256SUMS.txt` in a download folder answered
+          # "FAILED open or read" for the one artifact macOS users most need to
+          # check. The hashes were right the whole time; the paths were not.
+          (
+            cd release-assets
+            duplicates="$(find . -type f ! -name SHA256SUMS.txt -exec basename {} \; | sort | uniq -d)"
+            if [ -n "$duplicates" ]; then
+              echo "Assets share a basename and would collide once uploaded: $duplicates" >&2
+              exit 1
+            fi
+            find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum \
+              | sed -E 's#^([0-9a-f]{64}  )\./(.*/)?#\1#' > SHA256SUMS.txt
+          )
       - name: Ensure git tag exists (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
         shell: bash
