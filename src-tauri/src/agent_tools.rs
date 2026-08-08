@@ -664,7 +664,13 @@ async fn browser_install_lab_tool(state: &AppState, arguments: &Value) -> Result
         let expression = if name == "objectDump" {
             script.to_string()
         } else {
-            format!("(() => {{ {script}; return {{ installed: {name:?} }}; }})()")
+            // The newline before the semicolon is load-bearing. The script is
+            // embedded as code, and the generators in web_risk_lab.rs happen to
+            // end in `})();` today — end one in a line comment instead and
+            // everything after it on the same line, closing braces included,
+            // would be commented out. This costs nothing and removes the
+            // dependency rather than leaving it to be discovered.
+            format!("(() => {{ {script}\n; return {{ installed: {name:?} }}; }})()")
         };
         let evaluated = bus.evaluate(&expression, false).await?;
         steps.push(json!({
