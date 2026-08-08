@@ -74,5 +74,20 @@ describe("the release gate runs every ignored test it can", () => {
     // An excluded name that no longer exists is a stale exemption.
     const stale = Object.keys(EXCLUDED).filter((name) => !names.includes(name));
     assert.deepEqual(stale, [], `EXCLUDED lists tests that are gone: ${stale.join(", ")}`);
+
+    // A reason that points at an npm script has to point at one that exists.
+    // Otherwise deleting the script leaves the exemption reading as if the test
+    // is still runnable by hand, which is how a suite quietly becomes dead.
+    const broken: string[] = [];
+    for (const [name, reason] of Object.entries(EXCLUDED)) {
+      for (const [, script] of reason.matchAll(/npm run ([\w:-]+)/g)) {
+        if (!(script in scripts)) broken.push(`${name} -> npm run ${script}`);
+      }
+    }
+    assert.deepEqual(
+      broken,
+      [],
+      `EXCLUDED points at npm scripts that do not exist: ${broken.join(", ")}`,
+    );
   });
 });
