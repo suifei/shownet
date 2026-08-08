@@ -1653,16 +1653,14 @@ async fn handle_connect(
             }
         };
         let upstream_tls = verified.stream;
-        let outbound_tls = upstream_tls
-            .get_ref()
-            .1
-            .protocol_version()
-            .map(|version| format!("{version:?}"))
+        let handshake_alpn = verified.negotiated_alpn.clone();
+        let outbound_tls = verified
+            .protocol_version
+            .clone()
             .unwrap_or_else(|| "TLS".to_string());
-        let negotiated_alpn = upstream_tls
-            .get_ref()
-            .1
-            .alpn_protocol()
+        let negotiated_alpn = verified
+            .negotiated_alpn
+            .as_deref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map(str::to_string);
         fingerprint.outbound.negotiated_alpn = negotiated_alpn.clone();
@@ -1703,13 +1701,16 @@ async fn handle_connect(
         let dedicated_sender_factory =
             dedicated_request_sender_factory(upstream.clone(), outbound_profile);
         let prefer_origin_h2 = !force_http11;
-        let sender = match handshake_origin_https(upstream_tls, prefer_origin_h2).await {
-            Ok(sender) => sender,
-            Err(error) => {
-                error_sink(format!("目标 HTTPS 应用层握手失败: {error}"));
-                return;
-            }
-        };
+        let sender =
+            match handshake_origin_https(upstream_tls, handshake_alpn.as_deref(), prefer_origin_h2)
+                .await
+            {
+                Ok(sender) => sender,
+                Err(error) => {
+                    error_sink(format!("目标 HTTPS 应用层握手失败: {error}"));
+                    return;
+                }
+            };
         let origin_http2 = sender.is_http2();
 
         queue_mirror_trace_or_report(
@@ -2027,8 +2028,17 @@ fn capture_connect_record(
     });
 }
 
+/// The result of an origin TLS handshake, with the stream boxed so it does not
+/// name the engine that produced it. rustls returns a `TlsStream`, a linked
+/// impersonate connector returns something else, and both satisfy `AsyncStream`;
+/// keeping this type engine-agnostic is what lets a second engine be added
+/// without touching the request path that consumes it. The ALPN and protocol
+/// version are lifted out here for the same reason — the caller used to read
+/// them off the rustls connection directly.
 struct VerifiedTlsConnect {
-    stream: tokio_rustls::client::TlsStream<BoxedIo>,
+    stream: BoxedIo,
+    negotiated_alpn: Option<Vec<u8>>,
+    protocol_version: Option<String>,
     measured_ja3: Option<String>,
     measured_ja4: Option<String>,
 }
@@ -2037,7 +2047,7 @@ async fn connect_verified_tls(
     stream: BoxedIo,
     host: &str,
     profile: OutboundTlsProfile,
-) -> Result<tokio_rustls::client::TlsStream<BoxedIo>, String> {
+) -> Result<BoxedIo, String> {
     Ok(connect_verified_tls_measured(stream, host, profile, false)
         .await?
         .stream)
@@ -2049,6 +2059,15 @@ async fn connect_verified_tls_measured(
     profile: OutboundTlsProfile,
     force_http11: bool,
 ) -> Result<VerifiedTlsConnect, String> {
+    // The impersonate engine only becomes active when a real connector is
+    // linked (the feature) and the user asked for it — active_engine() already
+    // enforces both, so a false parity claim is impossible here.
+    if tls_outbound::active_engine() == tls_outbound::OutboundTlsEngine::Impersonate {
+        #[cfg(feature = "impersonate-boring")]
+        {
+            return connect_verified_tls_boring(stream, host, profile, force_http11).await;
+        }
+    }
     let config = if force_http11 {
         tls_outbound::build_client_config_http11_only(profile)
     } else {
@@ -2070,8 +2089,106 @@ async fn connect_verified_tls_measured(
             .ok()
             .map(|fp| (fp.ja3, fp.ja4))
     });
+    // Read the rustls-specific handshake facts here, while the concrete type is
+    // still in hand, so the boxed stream that leaves this function names no engine.
+    let connection = tls.get_ref().1;
+    let negotiated_alpn = connection.alpn_protocol().map(<[u8]>::to_vec);
+    let protocol_version = connection
+        .protocol_version()
+        .map(|version| format!("{version:?}"));
     Ok(VerifiedTlsConnect {
-        stream: tls,
+        stream: BoxedIo(Box::new(tls)),
+        negotiated_alpn,
+        protocol_version,
+        measured_ja3: measured.as_ref().map(|(j, _)| j.clone()),
+        measured_ja4: measured.map(|(_, j4)| j4),
+    })
+}
+
+/// Origin TLS via a real BoringSSL handshake — the library Chrome ships — so the
+/// ClientHello is browser-family rather than rustls's. The ClientHello is
+/// measured the same way as the rustls path (CapturingIo over the wire, parsed
+/// by fingerprint_client_hello_wire), so parity is judged from what actually
+/// went out, never from the fact that boring was used.
+///
+/// This is the Phase-1 MVP of docs/plan-real-browser-ja3-impersonate.md: a real
+/// stack that measures its own JA3. Byte-exact alignment to a specific Chrome
+/// golden is Phase 2 — until a measured handshake matches a golden, the parity
+/// gate downstream reports parity=false even though the stack is real.
+#[cfg(feature = "impersonate-boring")]
+async fn connect_verified_tls_boring(
+    stream: BoxedIo,
+    host: &str,
+    // One Chrome-family ClientHello for now, regardless of profile. Mapping the
+    // profile enum to per-browser boring configs (Firefox, Safari) is Phase 2,
+    // alongside the goldens each would be matched against.
+    _profile: OutboundTlsProfile,
+    force_http11: bool,
+) -> Result<VerifiedTlsConnect, String> {
+    use boring::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
+
+    let sni = host.trim_matches(['[', ']']).to_string();
+    let mut builder = SslConnector::builder(SslMethod::tls())
+        .map_err(|error| format!("boring 连接器构造失败: {error}"))?;
+    builder
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .and_then(|_| builder.set_max_proto_version(Some(SslVersion::TLS1_3)))
+        .map_err(|error| format!("boring 协议版本设置失败: {error}"))?;
+    // GREASE and a Chrome-family cipher order are what make the handshake read
+    // as a browser rather than a generic TLS client. The exact set is the knob
+    // Phase 2 tunes against a golden.
+    builder.set_grease_enabled(true);
+    builder
+        .set_cipher_list(
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
+             ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+             ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
+             ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
+             ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:\
+             AES256-GCM-SHA384:AES128-SHA:AES256-SHA",
+        )
+        .map_err(|error| format!("boring cipher 设置失败: {error}"))?;
+    let alpn: &[u8] = if force_http11 {
+        b"\x08http/1.1"
+    } else {
+        b"\x02h2\x08http/1.1"
+    };
+    builder
+        .set_alpn_protos(alpn)
+        .map_err(|error| format!("boring ALPN 设置失败: {error}"))?;
+
+    let mut config = builder
+        .build()
+        .configure()
+        .map_err(|error| format!("boring 配置失败: {error}"))?;
+    config.set_use_server_name_indication(true);
+    // Certificate verification stays on: an impersonate egress must not become a
+    // quiet downgrade of trust. A caller that wants MITM-of-MITM configures the
+    // upstream, not this.
+    config.set_verify(SslVerifyMode::PEER);
+
+    let (capturing, capture) = CapturingIo::new(stream);
+    let boxed = BoxedIo(Box::new(capturing));
+    let tls = timeout(
+        Duration::from_secs(15),
+        tokio_boring::connect(config, &sni, boxed),
+    )
+    .await
+    .map_err(|_| format!("目标 TLS 握手超时: {host}"))?
+    .map_err(|error| format!("目标 TLS(boring) 握手失败 {host}: {error}"))?;
+
+    let measured = capture.lock().ok().and_then(|bytes| {
+        crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
+            .ok()
+            .map(|fp| (fp.ja3, fp.ja4))
+    });
+    let negotiated_alpn = tls.ssl().selected_alpn_protocol().map(<[u8]>::to_vec);
+    let protocol_version = tls.ssl().version_str().to_string();
+
+    Ok(VerifiedTlsConnect {
+        stream: BoxedIo(Box::new(tls)),
+        negotiated_alpn,
+        protocol_version: Some(protocol_version),
         measured_ja3: measured.as_ref().map(|(j, _)| j.clone()),
         measured_ja4: measured.map(|(_, j4)| j4),
     })
@@ -2079,15 +2196,11 @@ async fn connect_verified_tls_measured(
 
 /// Handshake origin HTTP after TLS using negotiated ALPN (h2 preferred when allowed).
 async fn handshake_origin_https(
-    upstream_tls: tokio_rustls::client::TlsStream<BoxedIo>,
+    upstream_tls: BoxedIo,
+    negotiated_alpn: Option<&[u8]>,
     prefer_http2: bool,
 ) -> Result<HttpsRequestSender, String> {
-    let alpn = upstream_tls
-        .get_ref()
-        .1
-        .alpn_protocol()
-        .map(|bytes| bytes.to_vec());
-    let use_h2 = origin_prefers_http2(prefer_http2, alpn.as_deref());
+    let use_h2 = origin_prefers_http2(prefer_http2, negotiated_alpn);
     let io = TokioIo::new(upstream_tls);
     if use_h2 {
         let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
@@ -2128,17 +2241,16 @@ fn dedicated_request_sender_factory(
             let _ = default_profile;
             let stream = connect_destination(&upstream, &route.connection_host, route.port).await?;
             let stream = if route.scheme == "https" {
-                // ALPN must agree with the HTTP handshake chosen below.
-                BoxedIo(Box::new(
-                    connect_verified_tls_measured(
-                        stream,
-                        &route.tls_identity_host,
-                        profile,
-                        !route.prefer_http2,
-                    )
-                    .await?
-                    .stream,
-                ))
+                // ALPN must agree with the HTTP handshake chosen below. The
+                // stream is already boxed by connect_verified_tls_measured.
+                connect_verified_tls_measured(
+                    stream,
+                    &route.tls_identity_host,
+                    profile,
+                    !route.prefer_http2,
+                )
+                .await?
+                .stream
             } else {
                 stream
             };
@@ -2185,9 +2297,8 @@ fn dedicated_request_sender_factory(
                         let stream =
                             connect_destination(&upstream, &route.connection_host, route.port)
                                 .await?;
-                        let stream = BoxedIo(Box::new(
-                            connect_verified_tls(stream, &route.tls_identity_host, profile).await?,
-                        ));
+                        let stream =
+                            connect_verified_tls(stream, &route.tls_identity_host, profile).await?;
                         let (sender, connection) = hyper::client::conn::http1::handshake::<
                             _,
                             TapBody<ProxyBody>,
@@ -4586,10 +4697,15 @@ async fn forward_http(
     let mut sender = if scheme == "https" {
         let force_http11 = tls_outbound::origin_force_http11_for_host(tls_identity_host);
         let profile = tls_outbound::global_profile();
-        let tls = connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11)
-            .await?
-            .stream;
-        handshake_origin_https(tls, !websocket && !force_http11).await?
+        let verified =
+            connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11).await?;
+        let alpn = verified.negotiated_alpn.clone();
+        handshake_origin_https(
+            verified.stream,
+            alpn.as_deref(),
+            !websocket && !force_http11,
+        )
+        .await?
     } else {
         let (http1_sender, connection) =
             hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
@@ -8259,8 +8375,12 @@ mod tests {
     async fn connect_verified_tls_measures_outbound_client_hello_ja3() {
         let ja3 = measure_profile_ja3(OutboundTlsProfile::ChromeLike, "ja3.measure.test").await;
         assert_eq!(ja3.len(), 32);
-        // No real browser stack: must not claim browser parity.
-        assert!(!tls_outbound::real_impersonate_stack_available());
+        // The stack is linked exactly when the feature is compiled in; parity is
+        // a separate, per-measurement decision made against a golden.
+        assert_eq!(
+            tls_outbound::real_impersonate_stack_available(),
+            cfg!(feature = "impersonate-boring")
+        );
         assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
     }
 
@@ -8342,7 +8462,10 @@ mod tests {
         drop(verified.stream);
         let _ = server_task.await;
         let _ = std::fs::remove_file(pem_path);
-        assert!(!tls_outbound::real_impersonate_stack_available());
+        assert_eq!(
+            tls_outbound::real_impersonate_stack_available(),
+            cfg!(feature = "impersonate-boring")
+        );
         assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
         ja3
     }

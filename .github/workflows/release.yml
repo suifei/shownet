@@ -70,7 +70,14 @@ jobs:
           retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
+      # The impersonate feature now links a real BoringSSL connector, so this
+      # step compiles boring-sys (vendored BoringSSL). macOS only for now:
+      # boring-sys needs NASM to build BoringSSL's assembly on Windows, which
+      # this runner does not have, and adding an untested Windows C build to the
+      # release gate would risk red CI on a path nothing ships by default.
+      # Windows boring support is a follow-up (install nasm, then drop this if).
+      - if: runner.os == 'macOS'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
       # Its own crate, so the line above never reached it: the portable
       # launcher's test had never run in CI. It is what a Windows user
       # double-clicks, and its one test covers the layout decision that keeps

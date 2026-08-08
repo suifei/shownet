@@ -1,7 +1,9 @@
 //! Outbound (MITM → origin) TLS profile selection.
 //!
 //! Full browser JA3 parity needs BoringSSL / curl-impersonate (or equivalent).
-//! This module never claims that stack exists unless a real one is detected.
+//! With the `impersonate-boring` feature that stack is linked (see proxy::
+//! connect_verified_tls_boring); the default build has none and this module
+//! reports so honestly rather than claiming a stack it does not have.
 //!
 //! Profiles customize **real rustls** ClientConfig material (cipher suite order,
 //! key-exchange group order, ALPN) so inbound→outbound selection changes the wire
@@ -122,7 +124,8 @@ impl OutboundTlsEngine {
 
 /// Detect a real JA3-capable outbound stack usable for MITM origin TLS.
 ///
-/// This build does **not** link BoringSSL/curl-impersonate. Detection probes:
+/// True only with the `impersonate-boring` feature, which links a BoringSSL
+/// connector. The default build links none. Detection probes:
 /// 1. Compile-time feature is not present (always off here).
 /// 2. Optional env `SHOWNET_IMPERSONATE_LIB` pointing at an existing loadable library file
 ///    **and** `SHOWNET_IMPERSONATE_ENABLE=1` — still does not wire MITM through that library
@@ -130,8 +133,8 @@ impl OutboundTlsEngine {
 /// 3. Optional `curl-impersonate` / `curl_chrome*` on PATH — binary presence alone does not
 ///    make MITM use that binary; returns false with reason until subprocess/FFI path exists.
 ///
-/// Always false in the rustls-only product path so `supportsFullBrowserJa3` cannot go true
-/// without a real integrated stack.
+/// False in the default (rustls-only) build so `supportsFullBrowserJa3` cannot
+/// go true without a real integrated stack.
 pub fn real_impersonate_stack_available() -> bool {
     // Two independent conditions, deliberately. The cargo feature only compiles the
     // impersonate lane in; it links nothing. Treating the flag alone as "a real
@@ -144,11 +147,15 @@ pub fn real_impersonate_stack_available() -> bool {
 /// Whether a real BoringSSL / curl-impersonate-class origin connector is linked
 /// and usable for MITM egress.
 ///
-/// No build registers one yet. Phase 1 flips this by wiring an actual connector;
-/// until then the feature lane compiles and tests without claiming a stack.
+/// Linked when the `impersonate-boring` feature is on: the boring connector
+/// lives at proxy::connect_verified_tls_boring. The default build keeps the
+/// other arm and stays pure rustls.
 #[cfg(feature = "impersonate-boring")]
 fn impersonate_connector_linked() -> bool {
-    false
+    // A real BoringSSL origin connector is compiled and wired into the proxy's
+    // egress path (proxy::connect_verified_tls_boring). This flips true only in
+    // this build configuration; the default build keeps the other arm.
+    true
 }
 
 #[cfg(not(feature = "impersonate-boring"))]
@@ -910,7 +917,12 @@ mod tests {
     #[test]
     fn never_claims_full_browser_ja3_without_real_stack() {
         let _guard = preset_lock();
-        assert!(!real_impersonate_stack_available());
+        // Linked exactly when the feature is compiled in. Impersonate is not
+        // requested here, so the active engine stays rustls either way.
+        assert_eq!(
+            real_impersonate_stack_available(),
+            cfg!(feature = "impersonate-boring")
+        );
         assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
         assert!(!active_engine().supports_full_browser_ja3());
         let status = status_json();
@@ -1196,6 +1208,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "impersonate-boring"))]
     fn impersonate_engine_stays_rustls_without_linked_stack() {
         let _guard = preset_lock();
         crate::tls_impersonate::set_impersonate_requested(true);
@@ -1210,5 +1223,20 @@ mod tests {
             .unwrap()
             .contains("no linked"));
         crate::tls_impersonate::set_impersonate_requested(false);
+    }
+
+    #[test]
+    #[cfg(feature = "impersonate-boring")]
+    fn impersonate_engine_activates_when_linked_and_requested() {
+        // The mirror of the test above: with a connector linked and impersonate
+        // requested, the engine switches. Whether a given handshake earns
+        // browser parity is still decided per-measurement against a golden.
+        let _guard = preset_lock();
+        crate::tls_impersonate::set_impersonate_requested(true);
+        assert!(real_impersonate_stack_available());
+        assert_eq!(active_engine(), OutboundTlsEngine::Impersonate);
+        crate::tls_impersonate::set_impersonate_requested(false);
+        // And it falls back the moment the request is withdrawn.
+        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
     }
 }
