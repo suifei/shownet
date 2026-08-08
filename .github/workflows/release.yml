@@ -410,7 +410,20 @@ jobs:
             $report | ConvertTo-Json -Depth 3 | Set-Content -Path $reportPath -Encoding utf8
             Get-Content $reportPath
           } catch {
-            Write-Host "release-verification-windows.json skipped: $_"
+            # Still write the file. The release notes tell users both platforms
+            # ship one, and macOS always does — its failure path records
+            # "unknown" rather than writing nothing. Skipping here would leave
+            # the notes promising an attachment that is not there, and an absent
+            # file says less than one that admits it could not tell.
+            Write-Host "reading Authenticode failed, recording unknown: $_"
+            $fallback = [ordered]@{
+              mode = "unknown"
+              architecture = "x86_64"
+              executables = @{}
+              note = "Get-AuthenticodeSignature failed: $_"
+            }
+            $fallbackPath = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/release-verification-windows.json"
+            $fallback | ConvertTo-Json -Depth 3 | Set-Content -Path $fallbackPath -Encoding utf8
           }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $archive = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable_${version}_windows_x86_64.zip"
