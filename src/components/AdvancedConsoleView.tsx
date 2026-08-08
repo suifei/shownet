@@ -232,6 +232,25 @@ export function AdvancedConsoleView({
     }
   };
 
+  const setImpersonate = async (enabled: boolean) => {
+    if (!isTauri()) return;
+    try {
+      const status = await invoke<OutboundTlsProfileStatus>("set_outbound_impersonate", { enabled });
+      setOutboundTls(status);
+      // Report what actually armed, not what was asked: the flag only takes
+      // hold when a real stack is linked, and the status is the source of truth.
+      onNotify(
+        status.impersonateRequested
+          ? "出站已切到真实 BoringSSL 引擎"
+          : enabled
+            ? "已记录，但当前构建未链接真实栈，仍走 rustls"
+            : "出站已切回 rustls",
+      );
+    } catch (error) {
+      onNotify(String(error));
+    }
+  };
+
   const goPhase = (phase: WorkflowPhaseId) => {
     const map: Record<WorkflowPhaseId, ConsoleTabId> = {
       capture: "capture",
@@ -737,6 +756,20 @@ export function AdvancedConsoleView({
                   />
                   根据入站 JA3/JA4 自动选择出站预置（真实变更 rustls 套件顺序）
                 </label>
+                {/* Only shown when a real BoringSSL connector is linked. In the
+                    default rustls build there is nothing to turn on, so a toggle
+                    would be a dead control that implies a capability the build
+                    does not have. */}
+                {outboundTls?.realImpersonateStackAvailable ? (
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(outboundTls?.impersonateRequested)}
+                      onChange={(e) => void setImpersonate(e.target.checked)}
+                    />
+                    用真实 BoringSSL 出站（Chrome 系 ClientHello，绕过按 JA3 判定的风控）
+                  </label>
+                ) : null}
                 <p className="hint">
                   浏览器 JA3 全量对齐需要 BoringSSL/curl-impersonate 级栈（当前 engine=
                   {outboundTls?.engine ?? "rustls"}，supportsFullBrowserJa3=

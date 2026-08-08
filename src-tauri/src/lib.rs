@@ -2253,6 +2253,30 @@ fn set_outbound_tls_auto_from_inbound(
 }
 
 #[tauri::command]
+fn set_outbound_impersonate(enabled: bool, state: State<'_, AppState>) -> Result<Value, String> {
+    // The request only takes hold when a real connector is linked; without one
+    // the flag is inert (active_engine gates on the stack) and setting it would
+    // be a lie the status page would then have to walk back. Persist the user's
+    // intent regardless, so a later feature build honors it, but only arm the
+    // runtime flag when the stack is actually present.
+    let armed = enabled && tls_outbound::real_impersonate_stack_available();
+    tls_impersonate::set_impersonate_requested(armed);
+    let mut payload = state
+        .storage
+        .load_app_setting_json("outbound_tls")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("impersonate".into(), json!(enabled));
+    }
+    state
+        .storage
+        .save_app_setting_json("outbound_tls", &payload)?;
+    Ok(tls_outbound::status_json())
+}
+
+#[tauri::command]
 fn get_px_settings() -> Result<Value, String> {
     Ok(px_analysis::settings_json())
 }
@@ -3716,6 +3740,7 @@ pub fn run() {
             get_outbound_tls_profile,
             set_outbound_tls_profile,
             set_outbound_tls_auto_from_inbound,
+            set_outbound_impersonate,
             get_px_settings,
             set_px_settings,
             list_px_evidence,
