@@ -19,6 +19,7 @@ mod client_access;
 mod crypto;
 mod crypto_code;
 mod diagnostics;
+mod endpoint_model;
 mod evaluation_export;
 mod external_mcp;
 mod grok_runtime;
