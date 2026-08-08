@@ -260,6 +260,31 @@ fn identifier_shape(value: &str) -> Option<&'static str> {
     None
 }
 
+/// The route a path belongs to, with identifier-shaped segments blanked out.
+/// Requests are grouped by this before anything else, so `/api/v1/users/1001`
+/// and `/api/v1/class/2fa` never meet: they are different routes that merely
+/// happen to have the same segment count, and grouping on the count alone
+/// produced one method taking a `v1_id` that meant nothing.
+///
+/// Grouping first also keeps one route's values out of another's: with the two
+/// mixed, the third position holds {1001, 1002, 2fa} and stops looking like an
+/// identifier at all, so even the real parameter would be lost.
+fn route_signature(path: &str) -> String {
+    let mut signature = String::new();
+    for segment in segments(path) {
+        signature.push('/');
+        if identifier_shape(segment).is_some() {
+            signature.push_str("{}");
+        } else {
+            signature.push_str(segment);
+        }
+    }
+    if signature.is_empty() {
+        signature.push('/');
+    }
+    signature
+}
+
 /// `users` -> `user`, so `/users/{id}` reads as `{userId}` rather than
 /// `{usersId}`. Only the plain trailing `s`; anything cleverer would need a
 /// word list this has no business carrying.
@@ -581,7 +606,7 @@ struct Group<'a> {
 }
 
 pub fn build_endpoint_model(bundle: &SessionBundle) -> EndpointModel {
-    let mut groups: BTreeMap<(String, String, usize), Group<'_>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, String), Group<'_>> = BTreeMap::new();
     let mut skipped = 0usize;
 
     for request in &bundle.requests {
@@ -591,9 +616,9 @@ pub fn build_endpoint_model(bundle: &SessionBundle) -> EndpointModel {
         }
         let server = origin(request);
         let method = request.method.to_ascii_uppercase();
-        let count = segments(&request.path).len();
+        let route = route_signature(&request.path);
         groups
-            .entry((server.clone(), method.clone(), count))
+            .entry((server.clone(), method.clone(), route))
             .or_insert_with(|| Group {
                 server,
                 method,
@@ -669,7 +694,13 @@ fn endpoints_from_group(group: &Group<'_>, gaps: &mut Vec<Gap>) -> Vec<Endpoint>
             .collect();
         let representative = paths[0].get(index).map(String::as_str).unwrap_or_default();
         let shape = identifier_shape(representative);
-        let is_param = varying[index] || shape.is_some();
+        // The shape alone decides, because route_signature already grouped on
+        // it: within a group a literal position holds one repeated value and a
+        // blanked position holds identifier-shaped ones. Adding `varying[index]`
+        // here was tried and is dead — every position it would catch already
+        // has a shape. It still decides the evidence below, which is a
+        // different question: whether the parameter was confirmed or guessed.
+        let is_param = shape.is_some();
         if is_param {
             let previous = (index > 0).then(|| paths[0][index - 1].as_str());
             let name = param_name(previous, index, &taken);
@@ -1005,6 +1036,63 @@ mod tests {
         );
         assert_eq!(endpoint.path_params.len(), 1);
         assert_eq!(endpoint.path_params[0].evidence, ParamEvidence::ShapeOnly);
+    }
+
+    #[test]
+    fn two_routes_of_the_same_shape_do_not_merge() {
+        // Found by reading a generated SDK, not by a failing test. Grouping on
+        // segment count alone put /api/v1/users/1001 and /api/v1/class/2fa in
+        // one group, so the third position "varied" and became a parameter:
+        // one method named for a route nobody has, taking a v1Id that means
+        // nothing. Word-shaped segments are the route.
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/api/v1/users/1001"),
+            request("GET", "/api/v1/users/1002"),
+            request("GET", "/api/v1/class/2fa"),
+        ]));
+
+        let templates: Vec<&str> = model
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.path_template.as_str())
+            .collect();
+        assert_eq!(
+            templates,
+            vec!["/api/v1/class/2fa", "/api/v1/users/{userId}"],
+            "the two routes stay apart and the real id still templates"
+        );
+
+        let users = model
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path_template.contains("userId"))
+            .expect("the users endpoint");
+        assert_eq!(users.sample_count, 2, "both user requests land on it");
+        assert_eq!(users.path_params[0].evidence, ParamEvidence::Observed);
+    }
+
+    #[test]
+    fn one_routes_values_do_not_poison_another() {
+        // The reason routes are separated before parameters are named: mixed
+        // together, the third position holds {1001, 1002, 2fa}, which is not
+        // uniformly identifier-shaped, and the genuine parameter would be lost
+        // along with the bogus one.
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/api/v1/users/1001"),
+            request("GET", "/api/v1/class/2fa"),
+        ]));
+        assert!(
+            model
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.path_template == "/api/v1/users/{userId}"),
+            "{:?}",
+            model
+                .endpoints
+                .iter()
+                .map(|endpoint| &endpoint.path_template)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

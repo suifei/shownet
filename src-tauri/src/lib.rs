@@ -36,6 +36,7 @@ mod real_capture_probe;
 mod request_collections;
 mod request_replay;
 mod scorecard;
+mod sdk_build;
 mod signature_adapter;
 mod skills;
 mod storage;
