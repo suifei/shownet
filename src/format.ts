@@ -63,34 +63,54 @@ export function formatClock(value: number | string | null | undefined, withMilli
  */
 export function formatReleaseNotes(notes: string | null | undefined): string {
   if (!notes) return "";
-  return notes
-    .split("\n")
+  const lines: string[] = [];
+  // A fenced block is quoted text, not prose. Every rule below is Markdown
+  // syntax only outside one: `# macOS` in a shell block is a comment, and
+  // stripping the # leaves a line that reads like a command to run. The same
+  // applies to -, *, ` and a row of dashes.
+  let fenced = false;
+  for (const line of notes.split("\n")) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      lines.push(line.trimEnd());
+      continue;
+    }
+    if (fenced) {
+      lines.push(line.trimEnd());
+      continue;
+    }
     // A table separator and a horizontal rule carry no text at all — they exist
     // to draw something this dialog cannot draw, so they are noise here. The
     // table's own rows read acceptably as pipe-separated columns and stay.
-    .filter((line) => !/^\s*\|?[\s:|-]*\|[\s:|-]*\|?\s*$/.test(line) || !line.includes("-"))
-    .filter((line) => !/^\s*([-*_])\s*(\1\s*){2,}$/.test(line))
-    .map((line) => {
-      const trimmed = line.trimEnd();
-      // Headings become plain lines; the text is the point, the level is not.
-      const heading = /^\s{0,3}#{1,6}\s+(.*)$/.exec(trimmed);
-      if (heading) return heading[1].trim();
-      // List markers become a bullet, so nesting still reads as a list.
-      const item = /^(\s*)[-*+]\s+(.*)$/.exec(trimmed);
-      const body = item ? `${item[1]}• ${item[2]}` : trimmed;
-      return (
-        body
-          // Bold and italic markers, innermost first so `**a**` does not leave `*a*`.
-          .replace(/\*\*([^*]+)\*\*/g, "$1")
-          .replace(/__([^_]+)__/g, "$1")
-          .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1$2")
-          // Inline code and links: keep the text, drop the punctuation.
-          .replace(/`([^`\n]+)`/g, "$1")
-          .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
-      );
-    })
-    .join("\n")
-    // Three or more blank lines is Markdown spacing, not intent.
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    if (/^\s*\|?[\s:|-]*\|[\s:|-]*\|?\s*$/.test(line) && line.includes("-")) continue;
+    if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(line)) continue;
+
+    const trimmed = line.trimEnd();
+    // Headings become plain lines; the text is the point, the level is not.
+    const heading = /^\s{0,3}#{1,6}\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      lines.push(heading[1].trim());
+      continue;
+    }
+    // List markers become a bullet, so nesting still reads as a list.
+    const item = /^(\s*)[-*+]\s+(.*)$/.exec(trimmed);
+    const body = item ? `${item[1]}• ${item[2]}` : trimmed;
+    lines.push(
+      body
+        // Bold and italic markers, innermost first so `**a**` does not leave `*a*`.
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/__([^_]+)__/g, "$1")
+        .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1$2")
+        // Inline code and links: keep the text, drop the punctuation.
+        .replace(/`([^`\n]+)`/g, "$1")
+        .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "$1 ($2)"),
+    );
+  }
+  return (
+    lines
+      .join("\n")
+      // Three or more blank lines is Markdown spacing, not intent.
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
 }

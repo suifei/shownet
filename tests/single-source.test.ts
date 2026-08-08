@@ -448,6 +448,22 @@ describe("release notes", () => {
     const plain = "ShowNet 0.1.0 desktop builds (macOS aarch64 + Windows x86_64).";
     assert.equal(formatReleaseNotes(plain), plain);
   });
+
+  it("does not read a fenced block as Markdown", () => {
+    // The body ships shell commands with # comments. Treated as headings the #
+    // vanishes, and the dialog then shows a comment as though it were the next
+    // command to run — which is how this was found: by rendering body.md rather
+    // than by any assertion.
+    const body = ["```bash", "# macOS", "shasum -a 256 -c -", "```"].join("\n");
+    assert.equal(formatReleaseNotes(body), body);
+
+    // Everything else the flattener rewrites outside a fence stays literal too.
+    const rich = ["```", "- not a bullet", "**not bold**", "`not code`", "---", "```"].join("\n");
+    assert.equal(formatReleaseNotes(rich), rich);
+
+    // And it still flattens once the fence closes.
+    assert.equal(formatReleaseNotes(["```", "# kept", "```", "# dropped"].join("\n")), ["```", "# kept", "```", "dropped"].join("\n"));
+  });
 });
 
 describe("IPC surface", () => {
