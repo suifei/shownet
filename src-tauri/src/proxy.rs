@@ -6545,10 +6545,13 @@ mod tests {
             Some(chrome.header_table_size),
             "HEADER_TABLE_SIZE"
         );
+        // Chrome does not send this one, so neither do we. Captured from
+        // Chromium 151 through a TLS listener with ALPN h2:
+        //   SETTINGS 1:65536 2:0 4:6291456 6:262144, WINDOW_UPDATE +15663105
         assert_eq!(
             value_of(0x3),
-            Some(chrome.max_concurrent_streams),
-            "MAX_CONCURRENT_STREAMS"
+            None,
+            "MAX_CONCURRENT_STREAMS is not Chrome's"
         );
         assert_eq!(
             value_of(0x4),
@@ -6584,12 +6587,12 @@ mod tests {
         // frame is emitted where Chrome sends a priority tree. The *set* is as
         // much a fingerprint as the values, so matching Chrome's numbers is not
         // by itself enough to look like Chrome.
+        // Chrome sends four: 1, 2, 4, 6. We send those plus 5, because h2 emits
+        // MAX_FRAME_SIZE unconditionally — the builder has no way to suppress
+        // it. That single extra entry is what remains between this handshake and
+        // Chrome's, and removing it is what changing the h2 stack would buy.
         let ids: Vec<u16> = observed.settings.iter().map(|s| s.id).collect();
-        assert_eq!(
-            ids,
-            vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6],
-            "SETTINGS set and order"
-        );
+        assert_eq!(ids, vec![0x1, 0x2, 0x4, 0x5, 0x6], "SETTINGS set and order");
         assert!(
             observed.priority_frames.is_empty(),
             "h2 emitted priority frames after all: {:?}",

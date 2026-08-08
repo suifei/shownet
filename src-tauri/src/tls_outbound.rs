@@ -197,9 +197,15 @@ pub fn apply_http2_recipe_to_builder<E>(
         .initial_connection_window_size(recipe.connection_window_size)
         .max_frame_size(recipe.max_frame_size)
         .max_header_list_size(recipe.max_header_list_size);
-    if recipe.max_concurrent_streams > 0 {
-        builder.max_concurrent_streams(recipe.max_concurrent_streams);
-    }
+    // Deliberately not applied. A real Chrome 151 handshake, captured through a
+    // TLS listener with ALPN h2, sends exactly four SETTINGS — HEADER_TABLE_SIZE,
+    // ENABLE_PUSH, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE — and no
+    // MAX_CONCURRENT_STREAMS. Setting it made us send a fifth entry Chrome never
+    // sends, and the *set* of SETTINGS is as much a fingerprint as the values.
+    // Omitting it costs nothing here: this limit governs streams a server may
+    // push to us, and ENABLE_PUSH is 0. The recipe keeps the field because the
+    // fingerprint string still reports it.
+    let _ = recipe.max_concurrent_streams;
 }
 
 /// Active preset H2 recipe (product path).
