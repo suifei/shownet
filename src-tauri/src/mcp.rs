@@ -1004,6 +1004,16 @@ mod tests {
         assert!(constant_time_eq(b"shownet_mcp_abc", b"shownet_mcp_abc"));
         assert!(!constant_time_eq(b"shownet_mcp_abc", b"shownet_mcp_abd"));
         assert!(!constant_time_eq(b"short", b"longer"));
+
+        // The three above all pass without the length guard: zip stops at the
+        // shorter side, and "short" already differs from "longer" at the first
+        // byte. A prefix is what separates them — drop the guard and a client
+        // sending any leading slice of the real token authenticates, an empty
+        // one included.
+        assert!(!constant_time_eq(b"shownet_mcp", b"shownet_mcp_abc"));
+        assert!(!constant_time_eq(b"shownet_mcp_abc", b"shownet_mcp"));
+        assert!(!constant_time_eq(b"", b"shownet_mcp_abc"));
+        assert!(!constant_time_eq(b"shownet_mcp_abc", b""));
     }
 
     #[test]
