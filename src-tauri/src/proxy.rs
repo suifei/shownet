@@ -6490,6 +6490,162 @@ mod tests {
         );
     }
 
+    /// What our own outbound h2 handshake actually puts on the wire.
+    ///
+    /// Read back through the same collector the MITM listener uses for inbound
+    /// clients, so the answer is measured rather than reasoned from the crate
+    /// source. Whether shaping the h2 fingerprint is worth the work rests on it.
+    ///
+    /// Measures the *default* recipe deliberately: activating a preset mutates
+    /// process-global state that other tests read, and the facts that matter
+    /// here — how many SETTINGS go out, in what order, and whether any PRIORITY
+    /// frame is emitted — are properties of h2 rather than of the values.
+    ///
+    /// What it does not establish: how a real Chrome differs. The catalog's
+    /// Chrome entries are the claim; comparing against an actual capture is the
+    /// next step, and this is the baseline half of that comparison.
+    #[tokio::test]
+    async fn our_outbound_h2_handshake_is_measured_not_assumed() {
+        use crate::http2_fingerprint::Http2FingerprintCollector;
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let collector = std::sync::Arc::new(Http2FingerprintCollector::default());
+        let observer = collector.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 16 * 1024];
+            // Read whatever the client volunteers before it gives up on us.
+            for _ in 0..8 {
+                match timeout(Duration::from_millis(300), stream.read(&mut buffer)).await {
+                    Ok(Ok(0)) | Err(_) => break,
+                    Ok(Ok(read)) => observer.observe(&buffer[..read]),
+                    Ok(Err(_)) => break,
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+        tls_outbound::apply_http2_recipe_to_builder(
+            &mut builder,
+            tls_outbound::active_http2_recipe(),
+        );
+        if let Ok((mut sender, connection)) = builder
+            .handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
+            .await
+        {
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("https://measured.test/probe")
+                .body(TapBody::new(empty_body(), 0, |_| {}))
+                .unwrap();
+            let _ = timeout(Duration::from_millis(400), sender.send_request(request)).await;
+        }
+        let _ = timeout(Duration::from_secs(2), server).await;
+
+        let observed = collector
+            .snapshot()
+            .expect("the client sent a preface and SETTINGS");
+
+        // 1. The configured SETTINGS values do reach the wire.
+        let recipe = tls_outbound::active_http2_recipe();
+        let value_of = |id: u16| {
+            observed
+                .settings
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.value)
+        };
+        assert_eq!(
+            value_of(0x1),
+            Some(recipe.header_table_size),
+            "HEADER_TABLE_SIZE"
+        );
+        assert_eq!(
+            value_of(0x4),
+            Some(recipe.initial_window_size),
+            "INITIAL_WINDOW_SIZE"
+        );
+        assert_eq!(value_of(0x5), Some(recipe.max_frame_size), "MAX_FRAME_SIZE");
+        assert_eq!(
+            value_of(0x6),
+            Some(recipe.max_header_list_size),
+            "MAX_HEADER_LIST_SIZE"
+        );
+
+        // 2. ENABLE_PUSH matches Chrome's 0 — not because we set it, since the
+        //    builder has no knob, but because h2's own default happens to agree.
+        //    Recorded so a change in that default is not mistaken for our doing.
+        assert_eq!(value_of(0x2), Some(recipe.enable_push), "ENABLE_PUSH");
+
+        eprintln!("OUR OUTBOUND H2 => {}", observed.canonical);
+        eprintln!(
+            "  settings in wire order: {:?}",
+            observed
+                .settings
+                .iter()
+                .map(|s| (s.id, s.value))
+                .collect::<Vec<_>>()
+        );
+        eprintln!("  window updates: {:?}", observed.connection_window_updates);
+        eprintln!("  priority frames: {}", observed.priority_frames.len());
+        eprintln!("  pseudo order: {:?}", observed.pseudo_header_order);
+
+        // 5. Six SETTINGS go out, in ascending id — h2's own order, which the
+        //    builder cannot influence. The count is part of a fingerprint too:
+        //    a peer that sends a different *set* is distinguishable regardless
+        //    of the values, so the catalog matching Chrome's numbers is not by
+        //    itself enough to look like Chrome.
+        let ids: Vec<u16> = observed.settings.iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6],
+            "SETTINGS set and order"
+        );
+
+        // 6. A connection WINDOW_UPDATE is sent, so the connection window is
+        //    reachable even though the frame itself is not ours to shape.
+        assert!(
+            !observed.connection_window_updates.is_empty(),
+            "expected a connection WINDOW_UPDATE"
+        );
+
+        // 3. Chrome sends PRIORITY frames. h2 sends none, and no amount of
+        //    builder configuration changes that.
+        assert!(
+            observed.priority_frames.is_empty(),
+            "h2 emitted priority frames after all: {:?}",
+            observed.priority_frames
+        );
+
+        // 4. The pseudo-header order the catalog records for Chrome is
+        //    method,authority,scheme,path. h2 hardcodes method,scheme,authority,
+        //    path in frame::headers::Iter, so the recorded order is descriptive
+        //    only — it never reaches the wire.
+        if let Some(order) = observed.pseudo_header_order.as_ref() {
+            assert_eq!(
+                order,
+                &vec![
+                    "method".to_string(),
+                    "scheme".to_string(),
+                    "authority".to_string(),
+                    "path".to_string()
+                ],
+                "h2 changed its pseudo-header order; the shaping work may have moved"
+            );
+            assert_ne!(
+                order.as_slice(),
+                recipe.pseudo_header_order,
+                "we do not emit the order the catalog claims for Chrome"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_goaway_carrying_an_error_code_still_counts_as_a_refusal() {
         // The property the whole downgrade rests on. It has been wrong in both
