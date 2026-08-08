@@ -43,4 +43,34 @@ describe("the published checksum file", () => {
       );
     }
   });
+
+  // Same failure, different mechanism: v0.4.11's zip sidecar was written by
+  // PowerShell's Set-Content, whose line terminator on Windows is CRLF. Read by
+  // `shasum -a 256 -c` on macOS the trailing CR joins the filename, so the file
+  // reported "No such file or directory" for the archive beside it. The digest
+  // was correct — again only the name was unusable.
+  it("is written with LF when PowerShell produces it", async () => {
+    const source = await readFile(
+      fileURLToPath(new URL("../.github/workflows/release.yml", import.meta.url)),
+      "utf8",
+    );
+
+    const writers = source
+      .split("\n")
+      .filter((line) => line.includes("Set-Content") && line.includes(".sha256"));
+    assert.equal(writers.length, 1, `expected one sidecar writer, found ${writers.length}`);
+
+    for (const line of writers) {
+      assert.ok(
+        line.includes("-NoNewline"),
+        "the sidecar writer lets Set-Content append its own terminator, which is CRLF on Windows",
+      );
+      assert.match(
+        line,
+        /`n"/,
+        "the sidecar writer suppresses the terminator without supplying an explicit LF, " +
+          "so the file would have no trailing newline at all",
+      );
+    }
+  });
 });

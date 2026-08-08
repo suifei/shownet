@@ -451,7 +451,12 @@ jobs:
           $archive = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable_${version}_windows_x86_64.zip"
           Compress-Archive -Path $portableRoot -DestinationPath $archive -CompressionLevel Optimal -Force
           $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$digest  $([IO.Path]::GetFileName($archive))" | Set-Content -Path "$archive.sha256" -Encoding ascii
+          # -NoNewline plus an explicit `n, because Set-Content's own terminator
+          # is CRLF on Windows and this file is read by `shasum -a 256 -c` on
+          # macOS and Linux, where the trailing CR becomes part of the filename:
+          # v0.4.11 shipped a sidecar that answered "No such file or directory"
+          # for the archive sitting right next to it.
+          "$digest  $([IO.Path]::GetFileName($archive))`n" | Set-Content -Path "$archive.sha256" -Encoding ascii -NoNewline
       - uses: actions/upload-artifact@v4
         with:
           name: shownet-windows-x86_64
