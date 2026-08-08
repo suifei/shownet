@@ -290,9 +290,24 @@ Android 上「接近浏览器 JA3」至少分三类：
   的传递依赖),意味着长期自行跟进其安全更新(h2 有过 Rapid Reset 类
   CVE)。
 
-  **为一项差异接管一个 HTTP/2 实现,当前判断是不划算** —— 但这是取舍,
-  不是技术障碍。若要做,验收标准已经就位:用本节的探针重抓一次,伪头顺序
-  应变为 `method,authority,scheme,path`。
+  **实测:引发 issue #4 的站点已不再拒绝我们的 h2。** 用当前 SETTINGS
+  (即上表四项)向 `www.lionairthai.com` 开一条 TLS+ALPN h2 连接,并按我方
+  伪头顺序(`method,scheme,authority,path`,即与 Chrome 不同的那个)发出
+  一个 GET,源站返回 SETTINGS / WINDOW_UPDATE / HEADERS / DATA —— **无
+  GOAWAY、无 RST_STREAM**。
+
+  也就是说:**当初触发 h1 降级的 h2 拒绝,是 SETTINGS 造成的,不是伪头
+  顺序**;剩下这一项差异在该站点上不足以被拒。
+
+  两个必须说明的边界:一,这是单站点、单次请求的观测,风控可能随负载或
+  会话状态变化;二,探针用的是 Node 的 TLS ClientHello,不是 ShowNet 的
+  rustls —— 因此它证明的是 **h2 层不再被拒**,不等于 ShowNet 端到端可用
+  (那需要跑起应用来验)。
+
+  **结论:为剩下这一项差异接管一个 HTTP/2 实现,当前判断是不划算** ——
+  收益已被实测压到很小,而代价是长期维护 3 万行带 CVE 史的协议实现。这是
+  取舍不是技术障碍;若要做,验收标准已就位:重跑本节探针,伪头顺序应变为
+  `method,authority,scheme,path`。
 
   另注:`impersonate-boring` 目前是空 feature,不链接任何 BoringSSL 栈,
   因此没有现成的 impersonation 依赖可顺带提供已打补丁的 h2。
