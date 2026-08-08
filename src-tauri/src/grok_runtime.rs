@@ -493,7 +493,15 @@ fn executable_suffix() -> &'static str {
 }
 
 fn toml_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+    // JSON escaping covers TOML's basic string for every character but one.
+    // TOML forbids U+0000—U+0008, U+000A—U+001F and U+007F literally; serde_json
+    // escapes the first two ranges and leaves U+007F raw, because JSON permits
+    // it. A model name carrying a DEL therefore produced a config the agent
+    // runtime refuses to parse, and the error names this generated file rather
+    // than the setting the character came from.
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('\u{7f}', "\\u007F")
 }
 
 fn yaml_scalar(value: &str) -> String {
@@ -716,6 +724,29 @@ mod tests {
             "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 },
         });
         format!("data: {chunk}\n\ndata: {usage}\n\ndata: [DONE]\n\n").into_bytes()
+    }
+
+    #[test]
+    fn toml_strings_escape_every_character_toml_forbids() {
+        // Not the same set JSON escapes: TOML allows a literal tab and the C1
+        // range, and forbids U+007F, which JSON does not escape. Checked against
+        // a real TOML parser while investigating; asserted here by character so
+        // the test needs no parser of its own.
+        let forbidden = |c: char| matches!(c, '\u{0}'..='\u{8}' | '\u{a}'..='\u{1f}' | '\u{7f}');
+        for value in [
+            "gpt\u{7f}x",
+            "a\"b",
+            "a\\b",
+            "line\nbreak",
+            "bell\u{7}",
+            "模型-测试",
+        ] {
+            let quoted = toml_string(value);
+            assert!(
+                !quoted.chars().any(forbidden),
+                "{value:?} left a character TOML forbids inside {quoted:?}"
+            );
+        }
     }
 
     #[test]
