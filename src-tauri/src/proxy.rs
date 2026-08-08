@@ -193,11 +193,26 @@ type BodyChunkCallback = Box<dyn FnMut(&[u8]) + Send>;
 enum HttpsRequestSender {
     Http1(hyper::client::conn::http1::SendRequest<TapBody<ProxyBody>>),
     Http2(hyper::client::conn::http2::SendRequest<TapBody<ProxyBody>>),
+    /// Byte-exact Chrome egress via wreq. Holds the client and the origin base
+    /// (`https://host:port`), and does a full request per call — which fits the
+    /// existing "one shared sender per CONNECT tunnel" model exactly, since a
+    /// wreq client pools its own connections.
+    #[cfg(feature = "impersonate-boring")]
+    Impersonate {
+        client: wreq::Client,
+        base: String,
+    },
 }
 
 impl HttpsRequestSender {
     fn is_http2(&self) -> bool {
-        matches!(self, Self::Http2(_))
+        match self {
+            Self::Http2(_) => true,
+            // wreq presents Chrome, which is h2 for any modern origin.
+            #[cfg(feature = "impersonate-boring")]
+            Self::Impersonate { .. } => true,
+            Self::Http1(_) => false,
+        }
     }
 
     /// Whether this connection can still carry a request.
@@ -212,29 +227,90 @@ impl HttpsRequestSender {
         match self {
             Self::Http1(sender) => sender.is_closed(),
             Self::Http2(sender) => sender.is_closed(),
+            // wreq pools its own connections; a single logical sender never
+            // retires the way a shared h2 stream does.
+            #[cfg(feature = "impersonate-boring")]
+            Self::Impersonate { .. } => false,
         }
     }
 
     /// Returns the response with its body already boxed into `ProxyBody`. The
-    /// hyper variants carry an `Incoming`; a future impersonate variant carries
-    /// a buffered body — both box to the same type, and every consumer boxed it
-    /// immediately anyway, so unifying here costs nothing and lets a non-hyper
-    /// engine return through the same seam.
+    /// hyper variants carry an `Incoming`; the impersonate variant carries a
+    /// buffered body from wreq — both box to the same type, and every consumer
+    /// boxed it immediately anyway, so unifying here lets a non-hyper engine
+    /// return through the same seam. The error is `BoxError` rather than
+    /// `hyper::Error` because a wreq failure cannot be a hyper one.
     async fn send_request(
         &mut self,
         request: Request<TapBody<ProxyBody>>,
-    ) -> Result<Response<ProxyBody>, hyper::Error> {
+    ) -> Result<Response<ProxyBody>, BoxError> {
         match self {
             Self::Http1(sender) => sender
                 .send_request(request)
                 .await
-                .map(|response| response.map(boxed_incoming_body)),
+                .map(|response| response.map(boxed_incoming_body))
+                .map_err(|error| Box::new(error) as BoxError),
             Self::Http2(sender) => sender
                 .send_request(request)
                 .await
-                .map(|response| response.map(boxed_incoming_body)),
+                .map(|response| response.map(boxed_incoming_body))
+                .map_err(|error| Box::new(error) as BoxError),
+            #[cfg(feature = "impersonate-boring")]
+            Self::Impersonate { client, base } => send_via_impersonate(client, base, request).await,
         }
     }
+}
+
+/// Translates one MITM request into a wreq round-trip and back into the boxed
+/// response the rest of the path expects.
+#[cfg(feature = "impersonate-boring")]
+async fn send_via_impersonate(
+    client: &wreq::Client,
+    base: &str,
+    request: Request<TapBody<ProxyBody>>,
+) -> Result<Response<ProxyBody>, BoxError> {
+    let (parts, body) = request.into_parts();
+    let method = parts.method.as_str().to_string();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let url = format!("{base}{path}");
+    let headers: Vec<(String, Vec<u8>)> = parts
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+        .collect();
+    // Bounded: the reconstructed origin request is buffered anyway on this path.
+    let collected = body.collect().await.map_err(|error| error as BoxError)?;
+    let bytes = collected.to_bytes();
+    let request_body = if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes.to_vec())
+    };
+
+    let response =
+        crate::impersonate_egress::send(client, &method, &url, &headers, request_body).await?;
+
+    let mut builder = Response::builder().status(response.status);
+    for (name, value) in &response.headers {
+        // Content-Length is recomputed by the framing below; a copied one from
+        // a chunked upstream would contradict the buffered body.
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            continue;
+        }
+        builder = builder.header(name.as_str(), value.as_slice());
+    }
+    let body = Full::new(Bytes::from(response.body))
+        .map_err(|never| match never {})
+        .boxed_unsync();
+    builder
+        .body(body)
+        .map_err(|error| Box::new(error) as BoxError)
 }
 
 #[derive(Clone, Debug)]
@@ -1621,100 +1697,153 @@ async fn handle_connect(
             .unwrap_or_else(|| host.clone());
         // Strict static CDNs often 400 under rustls H2 MITM; force HTTP/1.1 ALPN when still decrypting.
         let force_http11 = tls_outbound::origin_force_http11_for_host(&tls_identity_host);
-        let verified = match connect_verified_tls_measured(
-            upstream_stream,
-            &tls_identity_host,
-            outbound_profile,
-            force_http11,
-        )
-        .await
-        {
-            Ok(verified) => verified,
-            Err(error) => {
-                if mirror_route.is_some() {
-                    queue_mirror_trace_or_report(
-                        &rule_engine,
-                        &mirror_route,
-                        &connect_request_id,
-                        "https-mitm",
-                        &error_sink,
-                    );
-                    let detail = format!(
-                        "{}；{error}",
-                        mirror_route_detail(mirror_route.as_ref().expect("mirror route"), false)
-                    );
-                    capture_connect_record(
-                        &capture_sink,
-                        &connect_request_id,
-                        &session_id,
-                        &source,
-                        peer,
-                        &host,
-                        port,
-                        start.elapsed().as_millis() as i64,
-                        request_headers,
-                        Some(fingerprint),
-                        format!("{inbound_tls} · 上游 TLS 未建立"),
-                        Some(detail),
-                        502,
-                    );
-                }
-                error_sink(error);
-                return;
-            }
-        };
-        let upstream_tls = verified.stream;
-        let handshake_alpn = verified.negotiated_alpn.clone();
-        let outbound_tls = verified
-            .protocol_version
-            .clone()
-            .unwrap_or_else(|| "TLS".to_string());
-        let negotiated_alpn = verified
-            .negotiated_alpn
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .map(str::to_string);
-        fingerprint.outbound.negotiated_alpn = negotiated_alpn.clone();
-        fingerprint.outbound.application_protocol = Some(
-            negotiated_http_protocol(negotiated_alpn.as_ref().map(|value| value.as_bytes()))
-                .to_string(),
-        );
-        if let Some(measured) = verified.measured_ja3 {
-            // Parity needs both halves: a real impersonate stack must be active, and
-            // the measured ClientHello must match a golden captured from the target
-            // client. Match JA3 when stable; fall back to JA4 because modern Chrome
-            // permutes extension order (JA3 drifts, JA4 stays stable).
-            let preset_id = crate::tls_outbound::preset_id_for_profile(outbound_profile);
-            let measured_ja4 = verified.measured_ja4.as_deref();
-            let alignment =
-                crate::tls_golden::evaluate_measured(&preset_id, &measured, measured_ja4);
-            let parity =
-                crate::tls_outbound::real_impersonate_stack_available() && alignment.is_matched();
-            fingerprint.outbound.ja3 = Some(measured.clone());
-            fingerprint.outbound.ja3_parity = Some(parity);
-            fingerprint.outbound.engine =
-                Some(crate::tls_outbound::active_engine().as_str().into());
-            fingerprint.outbound.note = format!(
-                "{} measuredJa3={measured} measuredJa4={} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
-                fingerprint.outbound.note,
-                measured_ja4.unwrap_or("-"),
-                outbound_profile.as_str(),
-                alignment.as_str(),
-                parity
-            );
-        } else {
-            fingerprint.outbound.ja3_parity = Some(false);
-            fingerprint.outbound.note = format!(
-                "{} (outbound ClientHello measure unavailable)",
-                fingerprint.outbound.note
-            );
-        }
         let dedicated_sender_factory =
             dedicated_request_sender_factory(upstream.clone(), outbound_profile);
         let prefer_origin_h2 = !force_http11;
-        let sender =
-            match handshake_origin_https(upstream_tls, handshake_alpn.as_deref(), prefer_origin_h2)
-                .await
+        // active_engine() is Impersonate only in a feature build with a linked
+        // stack and the user's request; false everywhere else, so the branch is
+        // dead in the default build and the wreq references never compile there.
+        #[cfg(feature = "impersonate-boring")]
+        let impersonate_active =
+            tls_outbound::active_engine() == tls_outbound::OutboundTlsEngine::Impersonate;
+        #[cfg(not(feature = "impersonate-boring"))]
+        let impersonate_active = false;
+
+        let (sender, outbound_tls, negotiated_alpn) = if impersonate_active {
+            // wreq owns the whole origin round-trip and its own connection, so
+            // the tunnel ShowNet opened is not used here.
+            #[cfg(feature = "impersonate-boring")]
+            {
+                drop(upstream_stream);
+                let client = match crate::impersonate_egress::build_client(&upstream) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        error_sink(format!("构建 wreq 出站失败: {error}"));
+                        return;
+                    }
+                };
+                let base = if port == 443 {
+                    format!("https://{tls_identity_host}")
+                } else {
+                    format!("https://{tls_identity_host}:{port}")
+                };
+                // wreq is byte-exact Chrome by construction (JA4 t13d1516h2,
+                // pseudo m,a,s,p), verified by wreq_egress_is_byte_exact_chrome,
+                // so parity is true rather than measured per handshake.
+                fingerprint.outbound.negotiated_alpn = Some("h2".to_string());
+                fingerprint.outbound.application_protocol = Some("h2".to_string());
+                fingerprint.outbound.engine = Some("impersonate".into());
+                fingerprint.outbound.ja3_parity = Some(true);
+                fingerprint.outbound.note = format!(
+                    "{} wreq byte-exact Chrome egress (JA4 t13d1516h2, h2 pseudo m,a,s,p)",
+                    fingerprint.outbound.note
+                );
+                (
+                    HttpsRequestSender::Impersonate { client, base },
+                    "TLS 1.3 (wreq/Chrome)".to_string(),
+                    Some("h2".to_string()),
+                )
+            }
+            #[cfg(not(feature = "impersonate-boring"))]
+            unreachable!("impersonate active without the feature")
+        } else {
+            let verified = match connect_verified_tls_measured(
+                upstream_stream,
+                &tls_identity_host,
+                outbound_profile,
+                force_http11,
+            )
+            .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    if mirror_route.is_some() {
+                        queue_mirror_trace_or_report(
+                            &rule_engine,
+                            &mirror_route,
+                            &connect_request_id,
+                            "https-mitm",
+                            &error_sink,
+                        );
+                        let detail = format!(
+                            "{}；{error}",
+                            mirror_route_detail(
+                                mirror_route.as_ref().expect("mirror route"),
+                                false
+                            )
+                        );
+                        capture_connect_record(
+                            &capture_sink,
+                            &connect_request_id,
+                            &session_id,
+                            &source,
+                            peer,
+                            &host,
+                            port,
+                            start.elapsed().as_millis() as i64,
+                            request_headers,
+                            Some(fingerprint),
+                            format!("{inbound_tls} · 上游 TLS 未建立"),
+                            Some(detail),
+                            502,
+                        );
+                    }
+                    error_sink(error);
+                    return;
+                }
+            };
+            let upstream_tls = verified.stream;
+            let handshake_alpn = verified.negotiated_alpn.clone();
+            let outbound_tls = verified
+                .protocol_version
+                .clone()
+                .unwrap_or_else(|| "TLS".to_string());
+            let negotiated_alpn = verified
+                .negotiated_alpn
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::to_string);
+            fingerprint.outbound.negotiated_alpn = negotiated_alpn.clone();
+            fingerprint.outbound.application_protocol = Some(
+                negotiated_http_protocol(negotiated_alpn.as_ref().map(|value| value.as_bytes()))
+                    .to_string(),
+            );
+            if let Some(measured) = verified.measured_ja3 {
+                // Parity needs both halves: a real impersonate stack must be active, and
+                // the measured ClientHello must match a golden captured from the target
+                // client. Match JA3 when stable; fall back to JA4 because modern Chrome
+                // permutes extension order (JA3 drifts, JA4 stays stable).
+                let preset_id = crate::tls_outbound::preset_id_for_profile(outbound_profile);
+                let measured_ja4 = verified.measured_ja4.as_deref();
+                let alignment =
+                    crate::tls_golden::evaluate_measured(&preset_id, &measured, measured_ja4);
+                let parity = crate::tls_outbound::real_impersonate_stack_available()
+                    && alignment.is_matched();
+                fingerprint.outbound.ja3 = Some(measured.clone());
+                fingerprint.outbound.ja3_parity = Some(parity);
+                fingerprint.outbound.engine =
+                    Some(crate::tls_outbound::active_engine().as_str().into());
+                fingerprint.outbound.note = format!(
+                    "{} measuredJa3={measured} measuredJa4={} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
+                    fingerprint.outbound.note,
+                    measured_ja4.unwrap_or("-"),
+                    outbound_profile.as_str(),
+                    alignment.as_str(),
+                    parity
+                );
+            } else {
+                fingerprint.outbound.ja3_parity = Some(false);
+                fingerprint.outbound.note = format!(
+                    "{} (outbound ClientHello measure unavailable)",
+                    fingerprint.outbound.note
+                );
+            }
+            let sender = match handshake_origin_https(
+                upstream_tls,
+                handshake_alpn.as_deref(),
+                prefer_origin_h2,
+            )
+            .await
             {
                 Ok(sender) => sender,
                 Err(error) => {
@@ -1722,6 +1851,8 @@ async fn handle_connect(
                     return;
                 }
             };
+            (sender, outbound_tls, negotiated_alpn)
+        };
         let origin_http2 = sender.is_http2();
 
         queue_mirror_trace_or_report(
@@ -1968,8 +2099,12 @@ fn is_benign_connection_end(error: &hyper::Error) -> bool {
 /// instead. What it is *not* is a client walking away: an end-to-end test
 /// showed a departing client drops the whole future, so `send_request` never
 /// resolves and this is never reached by that case.
-fn is_benign_forward_end(error: &hyper::Error) -> bool {
-    is_benign_connection_end(error)
+fn is_benign_forward_end(error: &BoxError) -> bool {
+    // Only hyper errors carry the connection-end shape this inspects. A wreq
+    // error (impersonate path) is not one, so it is not a benign hyper end.
+    error
+        .downcast_ref::<hyper::Error>()
+        .is_some_and(is_benign_connection_end)
 }
 
 /// Whether hyper is wrapping an I/O failure that just means the peer went away.
@@ -5271,7 +5406,12 @@ fn ensure_host_header(
 /// So a close, an incomplete message, a cancellation, a user error and plain I/O
 /// (a dropped Wi-Fi link, a VPN toggle, sleep/wake) are all excluded. What
 /// remains is a protocol-level complaint, and even then it takes more than one.
-fn looks_like_origin_http2_refusal(error: &hyper::Error) -> bool {
+fn looks_like_origin_http2_refusal(error: &BoxError) -> bool {
+    // Only a hyper error can be an origin h2 refusal; a wreq error is not, and
+    // wreq manages its own protocol negotiation anyway.
+    let Some(error) = error.downcast_ref::<hyper::Error>() else {
+        return false;
+    };
     // hyper exposes no `is_io()`, and a plain I/O failure — a dropped link, a
     // VPN toggle, sleep/wake — answers false to every predicate it does expose,
     // so it would otherwise read as the origin's verdict. Walk the source chain
@@ -6689,7 +6829,10 @@ mod tests {
         }
         server.abort();
 
-        let error = refusal.expect("the origin never refused; this test would prove nothing");
+        // The classifiers now take the unified BoxError that send_request
+        // returns; box the hyper error the way that path does.
+        let error: BoxError =
+            Box::new(refusal.expect("the origin never refused; this test would prove nothing"));
         assert!(
             looks_like_origin_http2_refusal(&error),
             "a GOAWAY carrying ENHANCE_YOUR_CALM must count as a refusal: {error:?}"
