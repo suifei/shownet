@@ -215,13 +215,24 @@ impl HttpsRequestSender {
         }
     }
 
+    /// Returns the response with its body already boxed into `ProxyBody`. The
+    /// hyper variants carry an `Incoming`; a future impersonate variant carries
+    /// a buffered body — both box to the same type, and every consumer boxed it
+    /// immediately anyway, so unifying here costs nothing and lets a non-hyper
+    /// engine return through the same seam.
     async fn send_request(
         &mut self,
         request: Request<TapBody<ProxyBody>>,
-    ) -> Result<Response<Incoming>, hyper::Error> {
+    ) -> Result<Response<ProxyBody>, hyper::Error> {
         match self {
-            Self::Http1(sender) => sender.send_request(request).await,
-            Self::Http2(sender) => sender.send_request(request).await,
+            Self::Http1(sender) => sender
+                .send_request(request)
+                .await
+                .map(|response| response.map(boxed_incoming_body)),
+            Self::Http2(sender) => sender
+                .send_request(request)
+                .await
+                .map(|response| response.map(boxed_incoming_body)),
         }
     }
 }
@@ -2925,14 +2936,14 @@ async fn forward_mitm_https(
 }
 
 async fn prepare_runtime_response(
-    response: Response<Incoming>,
+    response: Response<ProxyBody>,
     rule_engine: Option<&RuleEngine>,
     request: RuntimeRuleRequest,
     session_id: &str,
     resource_type: &str,
 ) -> Result<Response<ProxyBody>, String> {
-    let (parts, body) = response.into_parts();
-    let mut response = Response::from_parts(parts, boxed_incoming_body(body));
+    // The body already arrives boxed from HttpsRequestSender::send_request.
+    let mut response = response;
     let Some(rule_engine) = rule_engine else {
         return Ok(response);
     };
