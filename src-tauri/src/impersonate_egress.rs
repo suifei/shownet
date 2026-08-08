@@ -18,9 +18,18 @@ use crate::models::EffectiveUpstreamProxy;
 use wreq::Client;
 use wreq_util::Emulation;
 
-/// The Chrome build wreq emulates. One place, so the target the package
-/// advertises and the client that produces it cannot drift.
-pub const EMULATION: Emulation = Emulation::Chrome131;
+/// The Chrome build wreq emulates — the newest wreq-util 2.x offers.
+///
+/// KNOWN LIMITATION, and the reason a Cloudflare managed challenge can still
+/// loop even with this engine: the embedded browser auto-updates to the latest
+/// Chrome (151 at time of writing, inbound JA4 t13d1517h2, 17 extensions, and
+/// sec-ch-ua v=151), while wreq-util trails — Chrome137 here, JA4 t13d1516h2,
+/// 16 extensions. The forwarded request carries the browser's v=151 UA and its
+/// JS attests 151, but the wire TLS is 137-shaped, and a managed challenge that
+/// cross-checks the two sees the mismatch. Byte-exact parity needs wreq-util to
+/// ship the browser's exact version, or the embedded browser pinned to one wreq
+/// can match. Verified against a reflector by wreq_egress_is_byte_exact_chrome.
+pub const EMULATION: Emulation = Emulation::Chrome137;
 
 /// A gathered response: everything the MITM path needs to relay it back to the
 /// calling browser.
