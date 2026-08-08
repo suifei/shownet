@@ -150,8 +150,12 @@ test("floating surfaces read as glass with thickness", async ({ page }) => {
   // which measured as "applied" and looked like nothing at all.
   const brightest = Math.max(
     ...[...shadow.matchAll(/rgba?\(([^)]+)\)/g)].map((match) => {
-      const [r, g, b, a = "1"] = match[1].split(",").map((v) => parseFloat(v));
-      return Math.max(r, g, b) > 200 ? parseFloat(a) : 0;
+      // The default has to be a number like its siblings: `.map(parseFloat)`
+      // yields numbers, so a string default only survives because parseFloat
+      // coerces it back. Drop the outer parseFloat and it silently compares a
+      // string instead.
+      const [r, g, b, a = 1] = match[1].split(",").map((v) => parseFloat(v));
+      return Math.max(r, g, b) > 200 ? a : 0;
     }),
   );
   expect(brightest, `rim highlight is too faint to notice: ${shadow}`).toBeGreaterThan(0.1);
