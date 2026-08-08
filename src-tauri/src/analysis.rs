@@ -2748,10 +2748,14 @@ fn models_endpoint(base_url: &str) -> Result<reqwest::Url, String> {
     }
     let current_path = endpoint.path().trim_end_matches('/');
     if !current_path.ends_with("/models") {
-        let next_path = if current_path.is_empty() {
+        let api_root = ["/chat/completions", "/responses", "/completions"]
+            .into_iter()
+            .find_map(|suffix| current_path.strip_suffix(suffix))
+            .unwrap_or(current_path);
+        let next_path = if api_root.is_empty() {
             "/models".to_string()
         } else {
-            format!("{current_path}/models")
+            format!("{api_root}/models")
         };
         endpoint.set_path(&next_path);
     }
@@ -3290,6 +3294,18 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "http://127.0.0.1:11434/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("https://api.x.ai/v1/chat/completions")
+                .unwrap()
+                .as_str(),
+            "https://api.x.ai/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("https://api.x.ai/v1/responses")
+                .unwrap()
+                .as_str(),
+            "https://api.x.ai/v1/models"
         );
     }
 

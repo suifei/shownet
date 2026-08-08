@@ -37,19 +37,20 @@ const SAVED_MODEL = "internal-llm-v3";
 const SAVED_CONTEXT = 128_000;
 
 /** Answers only the commands this screen needs; the rest resolve to undefined. */
-function stubBackend() {
+function stubBackend(discoveredModels = DISCOVERED, savedModel = SAVED_MODEL, discoveryError = "") {
   vi.mocked(invoke).mockImplementation(async (command: string, args?: unknown) => {
     switch (command) {
       case "get_ai_provider_settings":
         return {
           provider: "compatible",
           baseUrl: "https://api.example.com/v1",
-          model: SAVED_MODEL,
+          model: savedModel,
           contextTokens: SAVED_CONTEXT,
           hasApiKey: true,
         };
       case "list_ai_models":
-        return DISCOVERED;
+        if (discoveryError) throw new Error(discoveryError);
+        return discoveredModels;
       case "save_ai_provider_settings": {
         const settings = (args as { settings: Record<string, unknown> }).settings;
         return { ...settings, hasApiKey: true };
@@ -119,6 +120,38 @@ describe("model selection stays typable after discovery", () => {
     await userEvent.type(modelField(), "qwen3-max");
 
     expect(modelField().value).toBe("qwen3-max");
+  });
+
+  it("replaces the previous provider default after syncing a Grok endpoint", async () => {
+    const grokModels = ["grok-4", "grok-3-mini"];
+    stubBackend(grokModels);
+    renderAiSettings();
+    await waitFor(() => expect(modelField().value).toBe(SAVED_MODEL));
+
+    await userEvent.click(screen.getByRole("button", { name: /ClaudeGPT API/ }));
+    await userEvent.click(screen.getByRole("button", { name: /其他兼容厂商/ }));
+    expect(modelField().value).toBe("");
+
+    const endpointField = screen.getByRole("textbox", { name: /API Base URL/ });
+    await userEvent.type(endpointField, "https://api.x.ai/v1/chat/completions");
+
+    await waitFor(() => expect(screen.getByText(/已同步 2 个模型/)).toBeInTheDocument());
+    expect(modelField().value).toBe("grok-4");
+  });
+
+  it("replaces the retired built-in default with the Grok alias advertised by ClaudeGPT", async () => {
+    stubBackend(["composer-2.5", "grok", "grok-latest"], "gpt-5.5");
+    renderAiSettings();
+
+    await waitFor(() => expect(screen.getByText(/已同步 3 个模型/)).toBeInTheDocument());
+    expect(modelField().value).toBe("grok");
+  });
+
+  it("labels an unavailable catalogue as a model sync action", async () => {
+    stubBackend(DISCOVERED, SAVED_MODEL, "catalogue unavailable");
+    renderAiSettings();
+
+    await waitFor(() => expect(screen.getByText("同步模型")).toBeInTheDocument());
   });
 });
 

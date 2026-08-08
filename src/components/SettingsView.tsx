@@ -316,14 +316,14 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setAvailableModels([]);
       setModelDiscoveryStatus("fallback");
       setModelDiscoveryError("请先填写 API Base URL");
-      setModel((current) => current.trim() || DEFAULT_AI_MODEL);
+      setModel((current) => current.trim() || (provider === "claudegpt" ? DEFAULT_AI_MODEL : ""));
       return;
     }
     if (!isTauri()) {
       setAvailableModels([]);
       setModelDiscoveryStatus("fallback");
       setModelDiscoveryError("桌面版可读取远程模型列表");
-      setModel((current) => current.trim() || DEFAULT_AI_MODEL);
+      setModel((current) => current.trim() || (provider === "claudegpt" ? DEFAULT_AI_MODEL : ""));
       return;
     }
     setModelDiscoveryStatus("loading");
@@ -337,12 +337,15 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       });
       if (requestId !== modelDiscoveryRequestId.current) return;
       setAvailableModels(discovered);
-      // Discovery only fills an empty field. A model the user typed is kept even when the
-      // endpoint does not advertise it — /models is frequently an incomplete catalogue.
+      // Keep explicit/saved custom models because /models is often incomplete, but replace
+      // the retired built-in default when the provider no longer advertises it.
       setModel((current) => {
         const selected = current.trim();
-        if (selected) return selected;
-        return discovered.includes(DEFAULT_AI_MODEL) ? DEFAULT_AI_MODEL : (discovered[0] ?? "");
+        if (selected && (selected !== DEFAULT_AI_MODEL || discovered.includes(selected))) return selected;
+        return discovered.find((candidate) => candidate === "grok")
+          ?? discovered.find((candidate) => candidate === "grok-latest")
+          ?? discovered[0]
+          ?? "";
       });
       setModelDiscoveryStatus("ready");
       if (notifyResult) onNotify(`已读取 ${discovered.length} 个模型`);
@@ -351,7 +354,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setAvailableModels([]);
       setModelDiscoveryStatus("fallback");
       setModelDiscoveryError(String(error));
-      setModel((current) => current.trim() || DEFAULT_AI_MODEL);
+      setModel((current) => current.trim() || (provider === "claudegpt" ? DEFAULT_AI_MODEL : ""));
       if (notifyResult) onNotify("模型列表不可用，已切换为手动输入");
     }
   };
@@ -541,7 +544,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setAvailableModels([]);
       setModelDiscoveryStatus("fallback");
       setModelDiscoveryError("请先填写 API Base URL");
-      setModel((current) => current.trim() || DEFAULT_AI_MODEL);
+      setModel((current) => current.trim() || (provider === "claudegpt" ? DEFAULT_AI_MODEL : ""));
       return;
     }
     setAvailableModels([]);
@@ -1110,7 +1113,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       setEndpoint("");
     }
     setApiKey("");
-    setModel(DEFAULT_AI_MODEL);
+    setModel(nextProvider === "claudegpt" ? DEFAULT_AI_MODEL : "");
     setContextTokens(DEFAULT_AI_CONTEXT_TOKENS);
     setAvailableModels([]);
     setModelDiscoveryStatus("fallback");
@@ -1921,11 +1924,11 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   <span className="recommended-endpoint__actions"><button onClick={() => void copyText("https://claudegpt.org/v1", "API 端点")} title="复制端点"><Copy size={14} /></button><a href="https://claudegpt.org/" target="_blank" rel="noreferrer" title="访问服务站"><ExternalLink size={14} /></a></span>
                 </div>
               )}
-              <label className="settings-text-field"><span>API Base URL</span><div className="secret-input"><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://api.example.com/v1" /><button onClick={() => void copyText(endpoint, "API 端点")} title="复制端点"><Copy size={15} /></button></div></label>
-              <label className="settings-text-field"><span>API Key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} onBlur={() => { if (apiKey.trim()) void refreshAiModels(); }} placeholder={hasSavedApiKey ? "已加密保存；留空表示不更改" : provider === "local" ? "本地服务通常无需填写" : provider === "claudegpt" ? "领取额度后粘贴 API Key" : "sk-..."} autoComplete="off" /><button onClick={() => setShowKey((show) => !show)} title={showKey ? "隐藏 API Key" : "显示 API Key"}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button>{hasSavedApiKey && <button onClick={clearAiKey} title="清除已保存 API Key"><Trash2 size={14} /></button>}</div></label>
+              <label className="settings-text-field"><span>API Base URL</span><div className="secret-input"><input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setModel(""); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} placeholder="https://api.example.com/v1" /><button onClick={() => void copyText(endpoint, "API 端点")} title="复制端点"><Copy size={15} /></button></div></label>
+              <label className="settings-text-field"><span>API Key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} onBlur={(event) => { if (event.currentTarget.value.trim()) void refreshAiModels(false, { apiKey: event.currentTarget.value }); }} placeholder={hasSavedApiKey ? "已加密保存；留空表示不更改" : provider === "local" ? "本地服务通常无需填写" : provider === "claudegpt" ? "领取额度后粘贴 API Key" : "sk-..."} autoComplete="off" /><button onClick={() => setShowKey((show) => !show)} title={showKey ? "隐藏 API Key" : "显示 API Key"}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button>{hasSavedApiKey && <button onClick={clearAiKey} title="清除已保存 API Key"><Trash2 size={14} /></button>}</div></label>
               <div className="settings-field-row">
                 <label className="model-discovery-field">
-                  <span>模型 <em className={`model-discovery-state is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined}>{modelDiscoveryStatus === "ready" ? `${availableModels.length} 个可用` : modelDiscoveryStatus === "loading" ? "读取中" : modelDiscoveryStatus === "fallback" ? "手动输入" : "待读取"}</em></span>
+                  <span>模型 <em className={`model-discovery-state is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined}>{modelDiscoveryStatus === "ready" ? `${availableModels.length} 个可用` : modelDiscoveryStatus === "loading" ? "读取中" : modelDiscoveryStatus === "fallback" ? "同步模型" : "待读取"}</em></span>
                   <div className="model-discovery-control">
                     <input list="ai-model-options" value={model} onChange={(event) => setModel(event.target.value)} placeholder={DEFAULT_AI_MODEL} autoComplete="off" spellCheck={false} />
                     <datalist id="ai-model-options">{availableModels.map((item) => <option key={item} value={item} />)}</datalist>
