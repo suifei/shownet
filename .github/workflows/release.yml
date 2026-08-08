@@ -284,8 +284,9 @@ jobs:
       # Signing has to land here, between compiling the executables and building
       # the package. The portable package records a checksum of every file it
       # contains, so signing afterwards would leave those checksums describing
-      # bytes that no longer exist and the package would fail its own integrity
-      # check on the user's machine.
+      # bytes that no longer exist. verifyPortableChecksums re-hashes every file
+      # during packaging and would fail this job — the guard is here in CI, not
+      # on the user's machine, where the launcher checks nothing.
       - name: Collect executables for signing
         if: steps.mode.outputs.signed == 'true'
         shell: pwsh
