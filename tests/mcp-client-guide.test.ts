@@ -48,4 +48,22 @@ describe("MCP client guide", () => {
     assert.equal(vscode.servers.shownet.type, "http");
     assert.equal(vscode.inputs[0].password, true);
   });
+
+  it("quotes the Codex config so TOML can read it", () => {
+    // The three above are JSON.parsed, so they are checked. Codex takes TOML
+    // and there is no TOML parser here, which is how tomlString kept emitting
+    // JSON escaping: it differs from TOML on exactly one character, U+007F,
+    // which TOML forbids literally. Confirmed against a real TOML parser while
+    // investigating; asserted by character so the suite needs no new dependency.
+    // U+000A is left out of the set: the document itself is newline-separated.
+    const forbidden = /[\u0000-\u0008\u000b-\u001f\u007f]/;
+    for (const token of [undefined, "plain-token", `del${String.fromCharCode(127)}token`]) {
+      const config = buildMcpClientGuide("codex", endpoint, token).config;
+      assert.doesNotMatch(
+        config,
+        forbidden,
+        `a ${token === undefined ? "tokenless" : "token-bearing"} config kept a character TOML forbids`,
+      );
+    }
+  });
 });

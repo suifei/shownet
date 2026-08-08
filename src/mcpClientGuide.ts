@@ -13,7 +13,14 @@ export interface McpClientGuide {
 }
 
 function tomlString(value: string) {
-  return JSON.stringify(value);
+  // The twin of toml_string in src-tauri/src/grok_runtime.rs, and it had the
+  // same hole: JSON escaping covers TOML's basic string except for U+007F,
+  // which TOML forbids literally and JSON permits. Generating this guide with a
+  // token carrying a DEL produced a ~/.codex/config.toml that Codex cannot
+  // parse. Neither the endpoint nor the token is user-typed today — both come
+  // from ShowNet's own MCP server — so this is a latent hole rather than a
+  // reachable one, but the function is named for TOML and should emit it.
+  return JSON.stringify(value).replace(/\u007f/g, "\\u007F");
 }
 
 function jsonConfig(value: unknown) {
