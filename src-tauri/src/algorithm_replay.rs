@@ -1035,7 +1035,13 @@ public record Request(
     String body) {}
 "#;
 
-const CSHARP_REQUEST_TYPE: &str = r#"namespace ShowNetReplay;
+// Usings are declared rather than inherited: Replay.cs already declares its
+// own, and these files are meant to be dropped into a project whose settings
+// are not ours to assume. Without them the package builds only where
+// ImplicitUsings is on — the template default, but not a guarantee.
+const CSHARP_REQUEST_TYPE: &str = r#"using System.Collections.Generic;
+
+namespace ShowNetReplay;
 
 /// <summary>
 /// The shape every agent step was verified against. It must stay identical to
@@ -1051,7 +1057,10 @@ public sealed record Request(
     string? Body);
 "#;
 
-const AGENT_FILE_HEADER: &str = "// Written by the analysis agent, then compiled and run against values this\n     // capture recorded. Only steps that reproduced those values appear here.\n     // See VERIFICATION.json for the cases each one passed.\n";
+// The five spaces that used to precede the second and third comment lines were
+// Rust source indentation baked into the literal, and they reached the Go, Java
+// and C# packages verbatim.
+const AGENT_FILE_HEADER: &str = "// Written by the analysis agent, then compiled and run against values this\n// capture recorded. Only steps that reproduced those values appear here.\n// See VERIFICATION.json for the cases each one passed.\n";
 
 fn go_agent_steps(steps: &[(&str, &str, &str)]) -> String {
     let mut out = format!("package main\n\n{AGENT_FILE_HEADER}\n");
@@ -1086,7 +1095,7 @@ fn java_agent_registry(steps: &[(&str, &str, &str)]) -> String {
 
 fn csharp_agent_registry(steps: &[(&str, &str, &str)]) -> String {
     let mut out = format!(
-        "namespace ShowNetReplay;\n\n{AGENT_FILE_HEADER}\npublic static class AgentSteps\n{{\n    public static IReadOnlyDictionary<string, Func<Request, string>> All {{ get; }} =\n        new Dictionary<string, Func<Request, string>>\n        {{\n"
+        "using System;\nusing System.Collections.Generic;\n\nnamespace ShowNetReplay;\n\n{AGENT_FILE_HEADER}\npublic static class AgentSteps\n{{\n    public static IReadOnlyDictionary<string, Func<Request, string>> All {{ get; }} =\n        new Dictionary<string, Func<Request, string>>\n        {{\n"
     );
     for (name, _, entry_point) in steps {
         out.push_str(&format!(
@@ -2448,6 +2457,45 @@ const difficulty=1; const t="awswaf";
             !js_replay.content.contains("AgentStepInput"),
             "the untyped package picked up a TypeScript annotation"
         );
+    }
+
+    #[test]
+    fn generated_packages_carry_their_own_imports_and_unindented_comments() {
+        // Found by compiling the export rather than reading it. Request.cs and
+        // AgentSteps.cs declared no usings at all while Replay.cs declared five,
+        // so the package built only where ImplicitUsings is on — the template
+        // default, but not something we get to assume about the project a user
+        // drops these files into.
+        for line in AGENT_FILE_HEADER.lines() {
+            assert!(
+                !line.starts_with(char::is_whitespace),
+                "Rust source indentation reached the generated comment: {line:?}"
+            );
+        }
+
+        let storage = storage();
+        let session = storage.create_session(Some("imports".into())).unwrap();
+        let sid = session.id.clone();
+        let mut sensor = base(&sid, "www.example.com", "/_bm/sensor");
+        sensor.method = "POST".into();
+        sensor.request_body = Some(r#"{"sensor_data":"1"}"#.into());
+        storage.store_request(sensor).unwrap();
+
+        let package = build_algorithm_replay(&storage, &sid, "csharp").unwrap();
+        let content = |name: &str| {
+            package
+                .files
+                .iter()
+                .find(|file| file.name == name)
+                .unwrap_or_else(|| panic!("csharp package must carry {name}"))
+                .content
+                .clone()
+        };
+        // Each names the namespace it actually uses: Dictionary and
+        // IReadOnlyDictionary come from one, Func from the other.
+        assert!(content("Request.cs").contains("using System.Collections.Generic;"));
+        assert!(content("AgentSteps.cs").contains("using System.Collections.Generic;"));
+        assert!(content("AgentSteps.cs").contains("using System;"));
     }
 
     #[test]
