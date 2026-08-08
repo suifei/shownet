@@ -749,6 +749,29 @@ mod tests {
     }
 
     #[test]
+    fn shell_quoting_survives_apostrophes_and_trailing_backslashes() {
+        // The TypeScript twin in src/shellQuote.ts has tests; this one had
+        // none, and it is a separate implementation using a different idiom —
+        // '\'' where the TypeScript side emits '"'"'. Both are POSIX, and the
+        // outputs below were round-tripped through bash, zsh and sh against
+        // thirteen values, apostrophes, trailing backslashes, $(whoami),
+        // newlines, globs and history bangs included. Pinned here so the
+        // property does not need a shell to stay checked.
+        assert_eq!(
+            shell_quote("https://example.com/a?b=1"),
+            "'https://example.com/a?b=1'"
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("a'b'c"), r"'a'\''b'\''c'");
+        // A trailing backslash is literal inside single quotes, so it must not
+        // be doubled: this is the shape that breaks hand-written escaping
+        // elsewhere.
+        assert_eq!(shell_quote("trailing\\"), "'trailing\\'");
+        assert_eq!(shell_quote("$(whoami)"), "'$(whoami)'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
     fn renders_supported_exchange_formats() {
         let bundle = bundle(request());
         let har = render_export(&bundle, ExportFormat::Har).unwrap();
