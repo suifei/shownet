@@ -6,8 +6,8 @@ ShowNet release bundles include the following separately maintained component.
 
 - Purpose: isolated headless runtime for ShowNet's built-in Agent
 - Upstream: https://github.com/xai-org/grok-build
-- Version: 0.2.114
-- Pinned source commit: `500129c714ad1b10e6095481f4a8387a2ec52649`
+- Version: 1.0.0
+- Pinned source commit: `afbc0fb710320c7add294c2106d447ecc3e3af2e`
 - Copyright: 2023-2026 SpaceXAI
 - License: Apache License 2.0
 

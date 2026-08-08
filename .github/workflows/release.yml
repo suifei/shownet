@@ -100,7 +100,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin
       - name: Install pinned Agent Rust toolchain
-        run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-apple-darwin
+        run: rustup toolchain install 1.94.0 --profile minimal --target aarch64-apple-darwin
       # Real protoc on PATH — grok-build's vendored bin/protoc needs unavailable "dotslash"
       - uses: arduino/setup-protoc@v3
         with:
@@ -262,7 +262,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - name: Install pinned Agent Rust toolchain
-        run: rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+        run: rustup toolchain install 1.94.0 --profile minimal --target x86_64-pc-windows-msvc
       # Real Win32 protoc — vendored bin/protoc in grok-build is not a valid Win32 app
       - uses: arduino/setup-protoc@v3
         with:
