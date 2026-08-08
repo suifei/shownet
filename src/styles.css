@@ -3878,51 +3878,6 @@ kbd {
   .sse-event-detail dl { grid-template-columns: minmax(0, 1fr); }
 }
 
-.header-section + .header-section {
-  margin-top: 20px;
-}
-
-.header-section h3 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 0 8px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.header-section h3 span {
-  color: var(--text-subtle);
-  font-size: 12px;
-}
-
-.header-section dl {
-  margin: 0;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.header-section dl > div {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
-  gap: 8px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.header-section dt,
-.header-section dd {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-family: "DM Mono", monospace;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.header-section dt { color: var(--text-muted); }
-.header-section dd { color: var(--text-body); }
-
 .code-block {
   min-height: 48px;
   margin: 0;
