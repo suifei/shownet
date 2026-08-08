@@ -13,7 +13,23 @@ export interface GotoOptions {
 
 export async function gotoApp(page: Page, options: GotoOptions = {}) {
   await page.goto(options.largeList ? "/?fixture=request-window-100k" : "/");
-  await page.waitForSelector(".app-shell");
+  try {
+    await page.waitForSelector(".app-shell", { timeout: 20_000 });
+  } catch {
+    // Observed once on a Windows runner: goto resolved, then .app-shell never
+    // appeared inside 90s while sibling tests in the same project mounted in
+    // ~1.2s. The page arrived and React did not mount — in dev Vite serves the
+    // module graph unbundled, hundreds of requests per navigation, and one of
+    // them stalling looks exactly like this. A reload refetches what is missing.
+    //
+    // Deliberately narrow: this retries the navigation only. Assertions still
+    // get a single attempt, so a real layout regression cannot retry its way to
+    // green. Serving a production build instead would remove the problem at the
+    // root, but the 100k-row fixture is gated on import.meta.env.DEV, so the
+    // largeList tests would quietly fall back to the 15-row seed and still pass.
+    await page.reload();
+    await page.waitForSelector(".app-shell", { timeout: 30_000 });
+  }
   // The request list and its detail pane settle asynchronously.
   await page.waitForSelector(".request-grid-body");
 }

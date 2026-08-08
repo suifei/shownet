@@ -57,6 +57,17 @@ jobs:
       # one character per line. The config starts its own dev server.
       - run: npx playwright install chromium
       - run: npm run test:browser
+        id: browser-suite
+      # Playwright writes an error context and a screenshot per failure, and
+      # both were being thrown away with the runner. The one Windows failure so
+      # far had to be diagnosed from console text alone.
+      - if: failure() && steps.browser-suite.conclusion == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-${{ matrix.os }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
