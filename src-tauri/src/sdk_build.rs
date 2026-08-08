@@ -147,9 +147,15 @@ pub fn snake_case(value: &str) -> String {
     } else {
         trimmed
     };
-    if PY_KEYWORDS.contains(&base.as_str())
-        || base.chars().next().is_some_and(|c| c.is_ascii_digit())
-    {
+    if base.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        // Prefixed, not suffixed. `2fa_` is as invalid as `2fa` — a Python
+        // identifier cannot *start* with a digit, and a trailing underscore
+        // does nothing about that. Found by compiling a package generated from
+        // a real capture, where a Cloudflare challenge path put a digit-leading
+        // segment in a parameter position; every fixture until then had only
+        // ever put one mid-name, where it is legal.
+        format!("v{base}")
+    } else if PY_KEYWORDS.contains(&base.as_str()) {
         format!("{base}_")
     } else {
         base
@@ -1222,7 +1228,10 @@ mod tests {
         assert_eq!(snake_case("X-Trace-Id"), "x_trace_id");
         // A field named for a keyword must not generate `def class(...)`.
         assert_eq!(snake_case("class"), "class_");
-        assert_eq!(snake_case("2fa"), "2fa_");
+        // Not "2fa_": that is still not a legal identifier, and this assertion
+        // used to pin the bug rather than the behaviour.
+        assert_eq!(snake_case("2fa"), "v2fa");
+        assert_eq!(snake_case("0401346636"), "v0401346636");
         assert_eq!(snake_case("--"), "field");
     }
 

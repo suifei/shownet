@@ -186,14 +186,32 @@ pub struct EndpointModel {
     pub skipped_count: usize,
 }
 
-/// A request that carries no API surface: tunnels, and the streaming records
-/// whose "response" is a frame log rather than a body.
+/// Static assets a browser fetches to render the page. A real capture is
+/// mostly these — one session of a marketing homepage produced thirty methods
+/// named after JS bundles — and an SDK with a function per script tag buries
+/// the handful of calls that are the API.
+const ASSET_EXTENSIONS: &[&str] = &[
+    ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif",
+    ".ico", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp4", ".webm", ".pdf",
+];
+
+fn is_static_asset(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let tail = lower.rsplit('/').next().unwrap_or(&lower);
+    ASSET_EXTENSIONS
+        .iter()
+        .any(|extension| tail.ends_with(extension))
+}
+
+/// A request that carries no API surface: tunnels, the streaming records whose
+/// "response" is a frame log rather than a body, and static assets.
 fn is_api_request(request: &BundleRequest) -> bool {
     request.method != "CONNECT"
         && !matches!(
             request.resource_type.as_str(),
             "websocket" | "sse" | "eventsource"
         )
+        && !is_static_asset(&request.path)
 }
 
 fn authority(request: &BundleRequest) -> String {
@@ -1337,6 +1355,38 @@ mod tests {
             .map(|header| header.name.as_str())
             .collect();
         assert_eq!(names, vec!["authorization"]);
+    }
+
+    #[test]
+    fn static_assets_are_not_api_endpoints() {
+        // A real capture of one marketing homepage produced thirty methods
+        // named after JS bundles, which buried the four calls that were the
+        // API. Found by generating an SDK from a live site, not by a fixture.
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/assets/index-Bqwru92u.js"),
+            request("GET", "/assets/app.css"),
+            request("GET", "/static/logo.svg"),
+            request("GET", "/fonts/inter.woff2"),
+            request("GET", "/api/v1/flights"),
+        ]));
+        let templates: Vec<&str> = model
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.path_template.as_str())
+            .collect();
+        assert_eq!(templates, vec!["/api/v1/flights"], "{templates:?}");
+        assert_eq!(model.skipped_count, 4);
+    }
+
+    #[test]
+    fn a_path_that_only_looks_like_an_asset_is_kept() {
+        // The filter is on the last segment's extension, so an API path that
+        // merely contains the word is unaffected.
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/api/assets/list"),
+            request("GET", "/api/v1/js/config"),
+        ]));
+        assert_eq!(model.endpoints.len(), 2, "{:?}", model.endpoints);
     }
 
     #[test]
