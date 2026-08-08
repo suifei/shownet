@@ -403,7 +403,7 @@ fn harvest_call_site_keys(source: &str, decoder_name: &str) -> Vec<String> {
     let mut search = 0usize;
     while let Some(rel) = source[search..].find(&pattern) {
         let start = search + rel + pattern.len();
-        let window = &source[start..source.len().min(start + 120)];
+        let window = &source[start..floor_char_boundary(source, start + 120)];
         // index, 'key'  or index,"key"
         if let Some(comma) = window.find(',') {
             let after = window[comma + 1..].trim_start();
@@ -737,7 +737,10 @@ fn harvest_string_literals(source: &str) -> Vec<String> {
                         b'\\' => lit.push('\\'),
                         b'\'' => lit.push('\''),
                         b'"' => lit.push('"'),
-                        b'x' if i + 2 < bytes.len() => {
+                        // The two bytes after \x may be the middle of one
+                        // character rather than hex digits; slicing them then
+                        // panics instead of simply failing to parse.
+                        b'x' if i + 2 < bytes.len() && source.is_char_boundary(i + 3) => {
                             let hex = &source[i + 1..i + 3];
                             if let Ok(v) = u8::from_str_radix(hex, 16) {
                                 lit.push(v as char);
@@ -935,7 +938,7 @@ fn find_rotation_iife(source: &str, array_name: &str) -> Option<String> {
     let mut search = 0usize;
     while let Some(rel) = source[search..].find("(function") {
         let start = search + rel;
-        let window_end = source.len().min(start + 12_000);
+        let window_end = floor_char_boundary(source, start + 12_000);
         let window = &source[start..window_end];
         if window.contains(array_name)
             && window.contains("push")
@@ -944,7 +947,7 @@ fn find_rotation_iife(source: &str, array_name: &str) -> Option<String> {
             // Extract balanced paren group starting at start
             if let Some(end) = extract_balanced_from(source, start, '(', ')') {
                 // Often ends with )(arrayName, offset);
-                let extended_end = source.len().min(end + 120);
+                let extended_end = floor_char_boundary(source, end + 120);
                 let tail = &source[end..extended_end];
                 if tail.contains(array_name) {
                     if let Some(call_end) = find_call_end(source, end) {
@@ -1104,6 +1107,12 @@ fn find_slice(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Largest char boundary at or below `index`, clamped to the string.
+///
+/// Every window in this file is cut from JS lifted off the wire, which carries
+/// Chinese string literals as a matter of course. `source.len().min(x)` keeps a
+/// slice inside the string but says nothing about landing between characters,
+/// and the difference is a panic on the site being analysed.
 fn floor_char_boundary(value: &str, mut index: usize) -> usize {
     index = index.min(value.len());
     while index > 0 && !value.is_char_boundary(index) {
@@ -1151,6 +1160,43 @@ function a0_0x4f2e(index, key){
 }
 "#
         .to_string()
+    }
+
+    #[test]
+    fn scanning_windows_do_not_split_a_character() {
+        // floor_char_boundary was added for the entry point at the top of
+        // decode(), but three later windows clamped to source.len() only. The
+        // source here is obfuscated JS lifted from captured traffic, which
+        // routinely carries Chinese string literals, so a window edge landing
+        // mid-character panicked on the site being analysed.
+
+        // 1. harvest_call_site_keys: 120 bytes after the call site.
+        let decoder = "_0xabc";
+        let call = format!("{decoder}({}抓包", "0".repeat(119));
+        assert!(
+            !call.is_char_boundary(decoder.len() + 1 + 120),
+            "the edge must be mid-character or this proves nothing"
+        );
+        let _ = harvest_call_site_keys(&call, decoder);
+
+        // 2. find_rotation_iife: the 12_000-byte window. The window has to
+        //    match on array name, push and shift or the body is skipped before
+        //    it can be sliced.
+        let head = "(function _0xarr push shift ";
+        let wide = format!("{head}{}抓包", "0".repeat(11_999 - head.len()));
+        assert!(
+            !wide.is_char_boundary(12_000),
+            "the 12k edge must be mid-character"
+        );
+        let _ = find_rotation_iife(&wide, "_0xarr");
+
+        // 3. find_rotation_iife: the 120-byte tail past the balanced group.
+        let closed = "(function _0xarr push shift )";
+        let tailed = format!("{closed}{}抓包", "0".repeat(119));
+        let _ = find_rotation_iife(&tailed, "_0xarr");
+
+        // 4. An \x escape whose two following bytes are inside one character.
+        let _ = harvest_string_literals("'\\x抓包'");
     }
 
     #[test]
