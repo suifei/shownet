@@ -783,6 +783,100 @@ mod tests {
     }
 
     #[test]
+    fn har_export_carries_every_field_a_har_reader_requires() {
+        // The version marker the other test checks says nothing about whether
+        // Chrome DevTools will take the file: it refuses an entry that is
+        // missing a required member. Verified against the real export by
+        // walking HAR 1.2 rather than by matching on strings.
+        let har = render_har(&bundle(request()));
+        let mut missing: Vec<String> = Vec::new();
+        let mut require = |value: &Value, path: &str, keys: &[&str]| {
+            for key in keys {
+                if value.get(key).is_none() {
+                    missing.push(format!("{path}.{key}"));
+                }
+            }
+        };
+
+        require(&har["log"], "log", &["version", "creator", "entries"]);
+        require(&har["log"]["creator"], "log.creator", &["name", "version"]);
+        for (index, entry) in har["log"]["entries"]
+            .as_array()
+            .expect("entries must be an array")
+            .iter()
+            .enumerate()
+        {
+            let at = format!("entries[{index}]");
+            require(
+                entry,
+                &at,
+                &[
+                    "startedDateTime",
+                    "time",
+                    "request",
+                    "response",
+                    "cache",
+                    "timings",
+                ],
+            );
+            require(
+                &entry["request"],
+                &format!("{at}.request"),
+                &[
+                    "method",
+                    "url",
+                    "httpVersion",
+                    "cookies",
+                    "headers",
+                    "queryString",
+                    "headersSize",
+                    "bodySize",
+                ],
+            );
+            require(
+                &entry["response"],
+                &format!("{at}.response"),
+                &[
+                    "status",
+                    "statusText",
+                    "httpVersion",
+                    "cookies",
+                    "headers",
+                    "content",
+                    "redirectURL",
+                    "headersSize",
+                    "bodySize",
+                ],
+            );
+            require(
+                &entry["response"]["content"],
+                &format!("{at}.response.content"),
+                &["size", "mimeType"],
+            );
+            require(
+                &entry["timings"],
+                &format!("{at}.timings"),
+                &["send", "wait", "receive"],
+            );
+        }
+
+        assert!(
+            missing.is_empty(),
+            "HAR is missing required members: {missing:?}"
+        );
+
+        // Required to be ISO 8601 with a timezone, which is the part a reader
+        // silently gets wrong if the export ever formats it locally.
+        let started = har["log"]["entries"][0]["startedDateTime"]
+            .as_str()
+            .expect("startedDateTime must be a string");
+        assert!(
+            started.ends_with('Z') || started.contains('+'),
+            "startedDateTime carries no timezone: {started}"
+        );
+    }
+
+    #[test]
     fn har_exports_binary_response_with_standard_base64_encoding() {
         let mut request = request();
         request.response_body = "base64:AJ+Slg==".to_string();
