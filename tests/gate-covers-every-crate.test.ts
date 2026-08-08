@@ -15,9 +15,13 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-const root = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not .pathname: on Windows the latter yields "/C:/..." and
+// every join below would be wrong. The repository hygiene test forbids it, and
+// caught this exact slip.
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function walk(directory: string, out: string[] = []): Promise<string[]> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
