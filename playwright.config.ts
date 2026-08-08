@@ -15,6 +15,12 @@ export default defineConfig({
   testDir: "tests/browser",
   // Layout assertions are deterministic; a retry would only hide flakiness.
   retries: 0,
+  // Kept at zero for that reason. What did fail on a Windows runner was not an
+  // assertion but gotoApp waiting for .app-shell: the suite takes 6.6 minutes
+  // there against 2.9 locally, and a cold Vite compile on first navigation can
+  // outlast the 30s default. Raising the budget on CI addresses that without
+  // letting a genuine layout failure retry its way to green.
+  timeout: process.env.CI ? 90_000 : 30_000,
   reporter: [["list"]],
   use: {
     baseURL: "http://127.0.0.1:1420",
