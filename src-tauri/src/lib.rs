@@ -2827,10 +2827,9 @@ pub(crate) fn persist_captured_request(
             let list_item: RequestListItem = state.storage.get_request_list_item(&updated.id)?;
             let list_event = RequestListEvent {
                 session_id: request.session_id,
-                item: list_item.clone(),
+                item: list_item,
             };
             emit(app, "capture://request-updated", &list_event)?;
-            emit(app, "capture://request", &list_item)?;
             return Ok(updated);
         }
     }
@@ -2838,11 +2837,15 @@ pub(crate) fn persist_captured_request(
     let list_item: RequestListItem = state.storage.get_request_list_item(&request.id)?;
     let list_event = RequestListEvent {
         session_id: event.session_id.clone(),
-        item: list_item.clone(),
+        item: list_item,
     };
     emit(app, "capture://event", &event)?;
+    // No capture://request beside these two. It carried the very RequestListItem
+    // that capture://request-created already ships inside list_event, nothing has
+    // ever listened for it, and it is not in the event contract documented in
+    // docs/reqable-benchmark-ui-iteration-plan.md. Dropping it also lets the item
+    // move into list_event instead of being cloned once per captured request.
     emit(app, "capture://request-created", &list_event)?;
-    emit(app, "capture://request", &list_item)?;
     Ok(request)
 }
 
