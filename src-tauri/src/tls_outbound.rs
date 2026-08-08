@@ -1146,7 +1146,14 @@ mod tests {
         assert_eq!(st["supportsFullBrowserJa3"], false);
         assert_eq!(st["realImpersonateStackAvailable"], false);
         assert!(!st["h2Fingerprint"].as_str().unwrap_or("").is_empty());
-        assert!(st["h2Settings"].as_array().unwrap().len() >= 4);
+        // Five, not six: MAX_CONCURRENT_STREAMS is no longer announced, and the
+        // status page must not report an entry the connection does not send.
+        let announced = st["h2Settings"].as_array().unwrap();
+        assert_eq!(announced.len(), 5, "{announced:?}");
+        assert!(
+            !announced.iter().any(|s| s["id"] == 0x3),
+            "MAX_CONCURRENT_STREAMS must not appear: {announced:?}"
+        );
     }
 
     #[test]

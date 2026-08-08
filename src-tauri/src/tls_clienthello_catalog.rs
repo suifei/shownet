@@ -78,11 +78,17 @@ impl Http2Recipe {
     }
 
     /// SETTINGS pairs as (id, value) in Chrome-like send order for tests/status.
+    /// What the connection actually announces, which the status page reports.
+    ///
+    /// MAX_CONCURRENT_STREAMS is absent on purpose: a captured Chromium 151
+    /// handshake sends four SETTINGS and not that one, so `tls_outbound` stopped
+    /// applying it. Listing it here would have the status page describe an entry
+    /// the wire does not carry. The struct keeps the field because the recipe
+    /// still records Chrome's value; this is the send list, not the recipe.
     pub fn settings_pairs(self) -> Vec<(u16, u32)> {
         vec![
             (0x1, self.header_table_size),
             (0x2, self.enable_push),
-            (0x3, self.max_concurrent_streams),
             (0x4, self.initial_window_size),
             (0x5, self.max_frame_size),
             (0x6, self.max_header_list_size),
