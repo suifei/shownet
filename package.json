@@ -54,6 +54,7 @@
     "test:soak-harness": "node --experimental-strip-types --test tests/long-session-soak.test.ts",
     "test:egress": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml live_upstream_proxy_from_env -- --ignored --nocapture",
     "test:mitm-smoke": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml live_shownet_mitm_smoke -- --ignored --nocapture",
+    "test:impersonate-mitm": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring mitm_impersonate_presents_chrome -- --ignored --nocapture",
     "test:agent-sidecar": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml grok_runtime::tests::real_sidecar_ -- --ignored --nocapture",
     "test:windows": "node scripts/windows-qa.mjs --layer all",
     "test:windows:default": "node scripts/windows-qa.mjs --layer default",

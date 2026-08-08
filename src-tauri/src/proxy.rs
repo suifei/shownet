@@ -11546,4 +11546,121 @@ mod tests {
             captured.len()
         );
     }
+
+    /// Fully automated, no human: drives the whole MITM egress the embedded
+    /// browser drives — a client → ShowNet MITM → wreq → origin — with
+    /// impersonate on, against a JA4/h2 reflector, and asserts the origin sees
+    /// Chrome byte-exact. This is what proves the *proxy path* (not just
+    /// standalone wreq) presents Chrome; if it passes, a persisting Cloudflare
+    /// loop is the JS/connection-binding problem, not the fingerprint.
+    ///
+    ///   PROXY=http://127.0.0.1:8080 cargo test --no-default-features \
+    ///     --features impersonate-boring mitm_impersonate_presents_chrome \
+    ///     -- --ignored --nocapture
+    #[tokio::test]
+    #[cfg(feature = "impersonate-boring")]
+    #[ignore = "network + env upstream; run via npm run test:impersonate-mitm"]
+    async fn mitm_impersonate_presents_chrome_to_the_origin() {
+        let upstream = effective_upstream_from_process_env().unwrap_or_else(|| {
+            panic!("needs PROXY or HTTP(S)_PROXY / ALL_PROXY to reach the reflector")
+        });
+        crate::tls_impersonate::set_impersonate_requested(true);
+        assert_eq!(
+            tls_outbound::active_engine(),
+            tls_outbound::OutboundTlsEngine::Impersonate,
+            "impersonate must be the active engine for this test"
+        );
+
+        let capture_sink: CaptureSink = Arc::new(move |_| {});
+        let error_sink: ErrorSink = Arc::new(move |error| eprintln!("PROXY_ERR {error}"));
+        let certificate_authority = test_certificate_authority();
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-impersonate-mitm".to_string(),
+            upstream,
+            certificate_authority.clone(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .expect("ShowNet listener");
+        let listen = handle.local_addr();
+
+        let host = "tls.peet.ws";
+        let client = connect_tcp(&listen.ip().to_string(), listen.port())
+            .await
+            .expect("connect to listener");
+        let mut tunnel = BoxedIo(Box::new(client));
+        tunnel
+            .write_all(
+                format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut tunnel)
+            .await
+            .expect("CONNECT response");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "CONNECT: {response:?}"
+        );
+
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_authority.certificate_der()).unwrap();
+        let config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut tls = TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from(host.to_string()).unwrap(), tunnel)
+            .await
+            .expect("MITM client TLS");
+        tls.write_all(
+            format!("GET /api/all HTTP/1.1\r\nHost: {host}\r\nUser-Agent: shownet\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        // Read to EOF — the reflector JSON is well past one buffer.
+        let mut raw = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 8192];
+            let n = timeout(Duration::from_secs(30), tls.read(&mut chunk))
+                .await
+                .expect("read timeout")
+                .expect("read");
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if raw.len() > 512 * 1024 {
+                break;
+            }
+        }
+        handle.stop().await;
+        crate::tls_impersonate::set_impersonate_requested(false);
+
+        let text = String::from_utf8_lossy(&raw);
+        let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let json: serde_json::Value = {
+            let body = &text[body_start..];
+            let start = body.find('{').expect("no JSON in reflector response");
+            serde_json::from_str(body[start..].trim_end()).expect("reflector JSON")
+        };
+
+        let ja4 = json["tls"]["ja4"].as_str().expect("ja4");
+        let akamai = json["http2"]["akamai_fingerprint"]
+            .as_str()
+            .expect("akamai fingerprint");
+        eprintln!("MITM_IMPERSONATE_JA4 {ja4}");
+        eprintln!("MITM_IMPERSONATE_AKAMAI {akamai}");
+        assert!(
+            ja4.starts_with("t13d1516h2"),
+            "the origin must see Chrome's 16-extension JA4 through the MITM path, got {ja4}"
+        );
+        assert!(
+            akamai.ends_with("|m,a,s,p"),
+            "the origin must see Chrome's h2 pseudo order through the MITM path, got {akamai}"
+        );
+    }
 }
