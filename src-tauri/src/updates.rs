@@ -336,6 +336,33 @@ mod tests {
     }
 
     #[test]
+    fn a_release_that_sorts_earlier_as_text_is_still_an_update() {
+        // The other two cases, v0.0.1 and v99.1.0, land the same way whether
+        // the comparison parses semver or compares strings, so neither would
+        // notice if the parse were dropped. This is the case that separates
+        // them: 0.10.0 sorts before 0.4.x as text because '1' < '4', and a
+        // string comparison would leave everyone on the older release with no
+        // update ever offered.
+        const TAG: &str = "0.10.0";
+        let current = env!("CARGO_PKG_VERSION");
+        assert!(
+            TAG < current,
+            "this only discriminates while {TAG} sorts before {current} as text; pick another tag"
+        );
+        assert!(
+            Version::parse(TAG).unwrap() > Version::parse(current).unwrap(),
+            "and while it is genuinely the newer version"
+        );
+
+        let result = parse_update_manifest(&release_payload(&format!("v{TAG}"))).unwrap();
+        assert!(
+            result.available,
+            "a numerically newer release must be offered"
+        );
+        assert_eq!(result.latest_version, TAG);
+    }
+
+    #[test]
     fn a_draft_release_is_never_offered() {
         let mut value: serde_json::Value =
             serde_json::from_slice(&release_payload("v99.1.0")).unwrap();
