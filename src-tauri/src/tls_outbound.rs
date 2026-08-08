@@ -195,8 +195,15 @@ pub fn apply_http2_recipe_to_builder<E>(
         .header_table_size(recipe.header_table_size)
         .initial_stream_window_size(recipe.initial_window_size)
         .initial_connection_window_size(recipe.connection_window_size)
-        .max_frame_size(recipe.max_frame_size)
-        .max_header_list_size(recipe.max_header_list_size);
+        .max_header_list_size(recipe.max_header_list_size)
+        // None, not the recipe's value: hyper defaults this to Some(16384) and
+        // then announces it, but a captured Chromium 151 handshake sends only
+        // HEADER_TABLE_SIZE, ENABLE_PUSH, INITIAL_WINDOW_SIZE and
+        // MAX_HEADER_LIST_SIZE. Passing None keeps hyper from telling h2 at all,
+        // so the entry is absent and the set matches. No behaviour changes: an
+        // unannounced MAX_FRAME_SIZE means the protocol default, which is the
+        // 16384 we were announcing.
+        .max_frame_size(None);
     // Deliberately not applied. A real Chrome 151 handshake, captured through a
     // TLS listener with ALPN h2, sends exactly four SETTINGS — HEADER_TABLE_SIZE,
     // ENABLE_PUSH, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE — and no
@@ -1146,14 +1153,17 @@ mod tests {
         assert_eq!(st["supportsFullBrowserJa3"], false);
         assert_eq!(st["realImpersonateStackAvailable"], false);
         assert!(!st["h2Fingerprint"].as_str().unwrap_or("").is_empty());
-        // Five, not six: MAX_CONCURRENT_STREAMS is no longer announced, and the
-        // status page must not report an entry the connection does not send.
+        // Chrome's four. MAX_CONCURRENT_STREAMS and MAX_FRAME_SIZE are both
+        // absent from the handshake now, so the status page must not report
+        // them either — it describes what the connection announces.
         let announced = st["h2Settings"].as_array().unwrap();
-        assert_eq!(announced.len(), 5, "{announced:?}");
-        assert!(
-            !announced.iter().any(|s| s["id"] == 0x3),
-            "MAX_CONCURRENT_STREAMS must not appear: {announced:?}"
-        );
+        assert_eq!(announced.len(), 4, "{announced:?}");
+        for absent in [0x3, 0x5] {
+            assert!(
+                !announced.iter().any(|s| s["id"] == absent),
+                "setting {absent:#x} is not announced and must not be listed: {announced:?}"
+            );
+        }
     }
 
     #[test]

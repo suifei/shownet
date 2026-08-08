@@ -90,7 +90,6 @@ impl Http2Recipe {
             (0x1, self.header_table_size),
             (0x2, self.enable_push),
             (0x4, self.initial_window_size),
-            (0x5, self.max_frame_size),
             (0x6, self.max_header_list_size),
         ]
     }

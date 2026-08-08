@@ -6558,7 +6558,9 @@ mod tests {
             Some(chrome.initial_window_size),
             "INITIAL_WINDOW_SIZE"
         );
-        assert_eq!(value_of(0x5), Some(chrome.max_frame_size), "MAX_FRAME_SIZE");
+        // Absent, like Chrome's. hyper defaults it to Some(16384) and announces
+        // it; passing None keeps the entry off the wire entirely.
+        assert_eq!(value_of(0x5), None, "MAX_FRAME_SIZE is not Chrome's either");
         assert_eq!(
             value_of(0x6),
             Some(chrome.max_header_list_size),
@@ -6587,12 +6589,13 @@ mod tests {
         // frame is emitted where Chrome sends a priority tree. The *set* is as
         // much a fingerprint as the values, so matching Chrome's numbers is not
         // by itself enough to look like Chrome.
-        // Chrome sends four: 1, 2, 4, 6. We send those plus 5, because h2 emits
-        // MAX_FRAME_SIZE unconditionally — the builder has no way to suppress
-        // it. That single extra entry is what remains between this handshake and
-        // Chrome's, and removing it is what changing the h2 stack would buy.
+        // Exactly Chrome's four, in Chrome's order. Captured from Chromium 151
+        // through a TLS listener with ALPN h2:
+        //   SETTINGS 1:65536 2:0 4:6291456 6:262144, WINDOW_UPDATE +15663105
+        // The SETTINGS half of the h2 fingerprint now matches without patching
+        // h2; only the pseudo-header order still differs.
         let ids: Vec<u16> = observed.settings.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec![0x1, 0x2, 0x4, 0x5, 0x6], "SETTINGS set and order");
+        assert_eq!(ids, vec![0x1, 0x2, 0x4, 0x6], "SETTINGS set and order");
         assert!(
             observed.priority_frames.is_empty(),
             "h2 emitted priority frames after all: {:?}",
