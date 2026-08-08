@@ -178,9 +178,20 @@ jobs:
           # printf a constant, so a file named "verification" carried a claim
           # nobody had checked. Non-fatal: an unreadable signature is recorded as
           # "unknown" rather than failing a release over metadata.
-          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
+          # Read the DMG, not bundle/macos/ShowNet.app: tauri deletes that
+          # intermediate once the dmg is built ("Cleaning .../ShowNet.app" in the
+          # log), so the first version of this inspected a path that no longer
+          # existed and recorded "unknown". Mounting the artifact is also the
+          # more honest check — it is what a user receives.
+          dmg_path="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          mount_point="$(mktemp -d)"
           signature="unknown"
-          if codesign_out="$(codesign -dv --verbose=2 "$app_path" 2>&1)"; then
+          codesign_out=""
+          if [ -n "$dmg_path" ] && hdiutil attach -nobrowse -quiet "$dmg_path" -mountpoint "$mount_point"; then
+            codesign_out="$(codesign -dv --verbose=2 "$mount_point/ShowNet.app" 2>&1 || true)"
+            hdiutil detach "$mount_point" -quiet || true
+          fi
+          if [ -n "$codesign_out" ]; then
             if printf '%s' "$codesign_out" | grep -q "Signature=adhoc"; then
               signature="ad-hoc"
             elif printf '%s' "$codesign_out" | grep -q "Signature="; then
