@@ -37,6 +37,14 @@ describe("release long-session soak harness", () => {
     assert.throws(() => parseArgs(["--minimum-rate-utilization", "0.05"]), /between 0.1 and 1/);
   });
 
+  // Nothing invokes this gate. The soak needs a release bundle at
+  // target/release/bundle/macos/ShowNet.app, and the CI gate builds
+  // --debug --no-bundle, so it cannot run there as things stand; no workflow
+  // and no release doc mentions it either. What is covered here is the gate
+  // function's arithmetic, not that a release was ever gated on it — running
+  // `npm run soak:long-session` today stops at "Release app binary is
+  // missing". Kept because the arithmetic is worth pinning, named honestly so
+  // nobody reads the coverage as enforcement.
   it("makes realized formal load an explicit release gate", () => {
     const load = summarizeLoadRate(29_967, 1800.03, 20);
     assert.equal(load.realizedRatePerSecond, 16.65);
