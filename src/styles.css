@@ -7274,7 +7274,12 @@ kbd {
 .android-setup-scope { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; color: var(--text-subtle); font-size: 11px; line-height: 1.5; }
 .android-setup-scope svg { flex: 0 0 auto; margin-top: 1px; }
 
-.secret-input { display: flex; align-items: center; min-width: 0; padding-right: 4px !important; }
+.secret-input { display: flex; align-items: center; min-width: 0; }
+/* Scoped to match .settings-text-field .secret-input above rather than raised
+   with !important: that beat specificity everywhere, including .auth-editor
+   .secret-input, which lays the same class out as a block with an absolutely
+   positioned button and had no padding-right at all. */
+.settings-text-field .secret-input { padding-right: 4px; }
 .secret-input input { flex: 1; min-width: 0; width: auto; height: 100%; padding: 0; color: var(--text-body); font-size: 13px; text-align: left; background: transparent; border: 0; border-radius: 0; outline: 0; }
 .secret-input button { display: grid; flex: 0 0 27px; place-items: center; width: 27px; height: 27px; padding: 0; color: var(--text-muted); background: transparent; border-radius: 9px; }
 .secret-input button:disabled { color: var(--text-faint); cursor: not-allowed; }
