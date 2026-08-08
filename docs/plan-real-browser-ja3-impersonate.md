@@ -259,7 +259,33 @@ Android 上「接近浏览器 JA3」至少分三类：
 - [ ] 用真实 Chrome 149/150/151 抓金标，替换/并列 tool 金标。  
 - [ ] 差一字节 diff 工具（扩展列表、GREASE 策略说明）。  
 - [ ] 仅 `browser-matched` 时，对外文案允许「接近 Chrome NNN JA3」。  
-- [ ] H2 SETTINGS 与真浏览器对照（可选第二门禁）。
+- [x] H2 SETTINGS 与真浏览器对照 —— **不是可选门禁,而是首要项**。
+
+  issue #4(lionairthai 无限重载)的原因就是 h2 而非 JA3:同一套 TLS 下,
+  h2 出口让页面 20 秒内重载 23 次,降级到 h1 后一次导航即稳定。指纹权重上
+  h2 不低于 JA3。
+
+  已实测对照(Chromium 151,自建 TLS+ALPN 监听器直接解帧;我方经
+  `Http2FingerprintCollector` 读回):
+
+  | 项 | Chrome 151 | 我方 | 状态 |
+  |---|---|---|---|
+  | SETTINGS 集合 | `1,2,4,6` | `1,2,4,5,6` | 多 `5 MAX_FRAME_SIZE` |
+  | SETTINGS 数值 | 65536 / 0 / 6291456 / 262144 | 相同 | 一致 |
+  | WINDOW_UPDATE | `+15663105` | `+15663105` | 一致 |
+  | PRIORITY 帧 | 无 | 无 | 一致 |
+  | 伪头顺序 | `method,authority,scheme,path`(实测) | `method,scheme,authority,path`(h2 源码 `frame/headers.rs`) | 顺序不同 |
+
+  `MAX_CONCURRENT_STREAMS` 原本我方多发一项,已停发(Chrome 不发它)。
+
+  **剩余两项差异都需要改 h2 本身**:让 `MAX_FRAME_SIZE` 可省略,以及调换
+  伪头编码顺序。补丁本身十余行,但 h2 0.4.15 是 52 文件 3 万余行、且是
+  hyper 的传递依赖,只能用 `[patch.crates-io]` 接管 —— 意味着长期自行跟进
+  其安全更新(h2 有过 Rapid Reset 类 CVE)。**这是"要不要维护一个 HTTP/2
+  实现"的取舍,不是补丁大小的取舍。**
+
+  另注:`impersonate-boring` 目前是空 feature,不链接任何 BoringSSL 栈,
+  因此没有现成的 impersonation 依赖可顺带提供已打补丁的 h2。
 
 ### Phase 3 — 嵌入 BoringSSL（可选强化）
 
