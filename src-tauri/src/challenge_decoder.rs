@@ -1154,6 +1154,53 @@ function a0_0x4f2e(index, key){
     }
 
     #[test]
+    fn cutting_a_string_short_never_splits_a_character() {
+        // Both helpers slice by byte index, and this app's strings are mostly
+        // Chinese — a cut inside a three-byte character panics rather than
+        // returning something wrong, taking the analysis down with it. Neither
+        // had a test; these are the boundaries where an off-by-one would show.
+        let chinese = "抓包解密验证通过";
+        assert_eq!(chinese.len(), 24, "three bytes per character");
+
+        // Every byte index, including inside characters and past the end.
+        for limit in 0..=30 {
+            let cut = truncate_utf8(chinese, limit);
+            if limit >= chinese.len() {
+                assert_eq!(cut, chinese, "nothing to cut at {limit}");
+            } else {
+                assert!(cut.ends_with("\n[TRUNCATED]"), "{limit}: {cut}");
+                let kept = cut.trim_end_matches("\n[TRUNCATED]");
+                assert!(chinese.starts_with(kept), "{limit}: {kept}");
+                assert!(kept.len() <= limit, "{limit}: kept {} bytes", kept.len());
+            }
+        }
+
+        for index in 0..=30 {
+            let floored = floor_char_boundary(chinese, index);
+            assert!(chinese.is_char_boundary(floored), "{index} -> {floored}");
+            assert!(floored <= index.min(chinese.len()), "{index} -> {floored}");
+            // The result is the *nearest* boundary at or below, not merely some
+            // boundary — a helper that always returned 0 would satisfy the rest.
+            assert!(
+                index >= chinese.len() || floored + 3 > index,
+                "{index} -> {floored} skipped a boundary"
+            );
+        }
+
+        // Mixed widths, and an empty string, which is where a decrement would
+        // underflow if the zero case were not already a boundary.
+        assert_eq!(truncate_utf8("", 0), "");
+        assert_eq!(floor_char_boundary("", 5), 0);
+        let mixed = "ab解c包";
+        for limit in 0..=mixed.len() + 2 {
+            let cut = truncate_utf8(mixed, limit);
+            assert!(cut.is_char_boundary(0));
+            let kept = cut.trim_end_matches("\n[TRUNCATED]");
+            assert!(mixed.starts_with(kept), "{limit}: {kept}");
+        }
+    }
+
+    #[test]
     fn a_padded_placeholder_does_not_beat_the_real_key() {
         // Both are valid hex64, so the order they appear in the dump decided
         // which one was taken. The comment said non-zero-looking keys were
