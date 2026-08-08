@@ -18,6 +18,7 @@ mod challenge_decoder;
 mod client_access;
 mod crypto;
 mod crypto_code;
+mod dataflow;
 mod diagnostics;
 mod endpoint_model;
 mod evaluation_export;
@@ -37,6 +38,7 @@ mod request_collections;
 mod request_replay;
 mod scorecard;
 mod sdk_build;
+mod sdk_inputs;
 mod signature_adapter;
 mod skills;
 mod storage;
@@ -2113,6 +2115,21 @@ fn export_session_file(
 }
 
 #[tauri::command]
+fn build_sdk_package(
+    session_id: String,
+    output_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<sdk_inputs::SdkExportResult, String> {
+    let directory = match output_dir {
+        Some(path) if !path.trim().is_empty() => {
+            Some(validate_output_directory(path.trim().to_string())?)
+        }
+        _ => None,
+    };
+    sdk_inputs::export(&state.storage, session_id.trim(), directory.as_deref())
+}
+
+#[tauri::command]
 fn export_algorithm_replay_package(
     session_id: String,
     language: String,
@@ -3683,6 +3700,7 @@ pub fn run() {
             get_tls_fingerprints,
             export_session_file,
             import_session_file,
+            build_sdk_package,
             export_algorithm_replay_package,
             export_evaluation_package,
             get_outbound_tls_profile,

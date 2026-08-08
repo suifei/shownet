@@ -736,6 +736,25 @@ export interface EvaluationExportResult {
   allFullCredit?: boolean;
 }
 
+/** How much of a generated SDK the capture actually established. */
+export interface SdkReadiness {
+  endpointsConfirmed: number;
+  endpointsTotal: number;
+  cryptoVerified: number;
+  cryptoUnverified: number;
+  fingerprintTargetKnown: boolean;
+  gapCount: number;
+}
+
+export interface SdkExportResult {
+  sessionId: string;
+  language: string;
+  directory: string;
+  files: string[];
+  readiness: SdkReadiness;
+  bytesWritten: number;
+}
+
 export interface ClientHelloPresetInfo {
   id: string;
   family: string;

@@ -24,6 +24,7 @@
 //! The package is still generated: a client with marked holes is more useful
 //! than a refusal, as long as the holes are impossible to miss.
 
+use crate::dataflow::{credential_source, DataFlow, DataFlowEdge};
 use crate::endpoint_model::{Endpoint, EndpointModel, FieldModel, Gap, GapKind, ParamEvidence};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -95,6 +96,10 @@ pub struct VerifiedCryptoStep {
 #[derive(Clone, Debug, Default)]
 pub struct SdkInputs {
     pub fingerprint: FingerprintContract,
+    /// Where each credential came from. A credential one captured call
+    /// produces becomes an `authenticate()` on the client; one nothing
+    /// produces stays a required argument, because nothing here can obtain it.
+    pub dataflow: DataFlow,
     pub verified_crypto: Vec<VerifiedCryptoStep>,
     /// Steps that were identified but never reproduced a captured value. Named
     /// in the gaps, never emitted as code.
@@ -183,6 +188,25 @@ fn gaps_for(gaps: &[Gap], operation_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// Splits credentials into the ones a captured call produces and the ones
+/// nothing does. Only the second kind can be a required argument: asking the
+/// caller for a token the API itself hands out is the failure this exists to
+/// avoid.
+fn split_credentials<'a>(
+    credentials: &'a [FieldModel],
+    flow: &'a DataFlow,
+) -> (Vec<(&'a FieldModel, &'a DataFlowEdge)>, Vec<&'a FieldModel>) {
+    let mut sourced = Vec::new();
+    let mut unsourced = Vec::new();
+    for credential in credentials {
+        match credential_source(flow, &credential.name) {
+            Some(edge) => sourced.push((credential, edge)),
+            None => unsourced.push(credential),
+        }
+    }
+    (sourced, unsourced)
+}
+
 fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[FieldModel]) -> String {
     let mut out = String::new();
     out.push_str(
@@ -193,7 +217,25 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
          from __future__ import annotations\n\n\
          from typing import Any\n\n\
          from curl_cffi import requests\n\n\
-         from .fingerprint import CONTRACT, verify_fingerprint\n\n\n",
+         from .fingerprint import CONTRACT, verify_fingerprint\n\n\n\
+         def _pointer(payload: Any, pointer: str) -> Any:\n\
+         \x20   \"\"\"Resolve a JSON pointer, returning None rather than raising.\"\"\"\n\
+         \x20   current = payload\n\
+         \x20   for part in pointer.split(\"/\"):\n\
+         \x20       if part == \"\":\n\
+         \x20           continue\n\
+         \x20       if isinstance(current, list):\n\
+         \x20           try:\n\
+         \x20               current = current[int(part)]\n\
+         \x20           except (ValueError, IndexError):\n\
+         \x20               return None\n\
+         \x20       elif isinstance(current, dict):\n\
+         \x20           if part not in current:\n\
+         \x20               return None\n\
+         \x20           current = current[part]\n\
+         \x20       else:\n\
+         \x20           return None\n\
+         \x20   return current\n\n\n",
     );
 
     let base_url = model
@@ -201,6 +243,8 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
         .first()
         .cloned()
         .unwrap_or_else(|| "https://example.invalid".to_string());
+
+    let (sourced, unsourced) = split_credentials(credentials, &inputs.dataflow);
 
     out.push_str("class ApiClient:\n");
     out.push_str("    \"\"\"One captured API.\n\n");
@@ -216,10 +260,18 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
     }
     out.push_str("    \"\"\"\n\n");
 
-    // Constructor: credentials first and required, everything else defaulted.
+    // Constructor: only the credentials nothing in the capture produces are
+    // required. For the rest there is an authenticate_* method below, and
+    // demanding a token the API itself mints would defeat having traced it.
     out.push_str("    def __init__(\n        self,\n        *,\n");
-    for credential in credentials {
+    for credential in &unsourced {
         out.push_str(&format!("        {}: str,\n", snake_case(&credential.name)));
+    }
+    for (credential, _) in &sourced {
+        out.push_str(&format!(
+            "        {}: str | None = None,\n",
+            snake_case(&credential.name)
+        ));
     }
     out.push_str(&format!(
         "        base_url: str = {},\n        impersonate: str = {},\n        timeout: float = 30.0,\n    ) -> None:\n",
@@ -233,7 +285,7 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
     );
     out.push_str("        # see fingerprint.py for the target it is meant to match.\n");
     out.push_str("        self.session = requests.Session(impersonate=impersonate)\n");
-    for credential in credentials {
+    for credential in &unsourced {
         let field = snake_case(&credential.name);
         out.push_str(&format!(
             "        self.session.headers[{}] = {}\n",
@@ -241,7 +293,21 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
             field
         ));
     }
+    for (credential, _) in &sourced {
+        let field = snake_case(&credential.name);
+        out.push_str(&format!("        if {field} is not None:\n"));
+        out.push_str(&format!(
+            "            self.session.headers[{}] = {}\n",
+            py_string(&credential.name),
+            field
+        ));
+    }
     out.push('\n');
+
+    for (credential, edge) in &sourced {
+        out.push_str(&render_authenticate(credential, edge));
+    }
+
     out.push_str("    def check_fingerprint(self) -> dict[str, Any]:\n");
     out.push_str(
         "        \"\"\"Measure this client's real fingerprint against the captured target.\"\"\"\n",
@@ -252,6 +318,56 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
         out.push_str(&render_method(endpoint, &model.gaps));
     }
 
+    out
+}
+
+/// A method that obtains a credential the capture showed one call producing,
+/// instead of asking the caller for a token only the API can mint.
+///
+/// The wrapper matters as much as the value: the capture recorded
+/// `Bearer <token>`, and sending the bare token is a different header.
+fn render_authenticate(credential: &FieldModel, edge: &DataFlowEdge) -> String {
+    let mut out = String::new();
+    let method = snake_case(&edge.producer);
+    let field = snake_case(&credential.name);
+    out.push_str(&format!(
+        "    def authenticate_{field}(self, **kwargs: Any) -> str:\n"
+    ));
+    out.push_str(&format!(
+        "        \"\"\"Call {} and keep the {} it returns.\n\n\
+         \x20       The capture showed {} produced the value this header carries at\n\
+         \x20       ``{}``, in {} later request(s). Arguments are passed through.\n\
+         \x20       \"\"\"\n",
+        edge.producer, credential.name, edge.producer, edge.producer_pointer, edge.occurrences
+    ));
+    out.push_str(&format!("        payload = self.{method}(**kwargs)\n"));
+    out.push_str(&format!(
+        "        value = _pointer(payload, {})\n",
+        py_string(&edge.producer_pointer)
+    ));
+    out.push_str("        if not isinstance(value, str):\n");
+    out.push_str(&format!(
+        "            raise RuntimeError(\n                {}\n            )\n",
+        py_string(&format!(
+            "{} did not return a value at {}; the API may have changed since the capture",
+            edge.producer, edge.producer_pointer
+        ))
+    ));
+    // Only the wrapper that exists: `"Bearer " + value + ""` runs the same and
+    // reads like a generator that did not know what it was writing.
+    let mut expression = String::new();
+    if !edge.prefix.is_empty() {
+        expression.push_str(&format!("{} + ", py_string(&edge.prefix)));
+    }
+    expression.push_str("value");
+    if !edge.suffix.is_empty() {
+        expression.push_str(&format!(" + {}", py_string(&edge.suffix)));
+    }
+    out.push_str(&format!(
+        "        self.session.headers[{}] = {expression}\n",
+        py_string(&credential.name)
+    ));
+    out.push_str("        return value\n\n");
     out
 }
 
@@ -788,6 +904,64 @@ mod tests {
         assert!(
             !client.contains("captured-session-token"),
             "the captured value must not appear in the package"
+        );
+    }
+
+    #[test]
+    fn a_credential_the_api_hands_out_becomes_a_login_not_an_argument() {
+        // The point of tracing data flow. Without it the client asks for a
+        // token only the API can mint, which the caller has no way to supply.
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.body.sig-9f2c";
+        let mut login = request("POST", "/v1/auth/login");
+        login.response_body = format!(r#"{{"token":"{TOKEN}"}}"#);
+        let mut call = request("GET", "/v1/me");
+        call.request_headers = vec![HeaderEntry {
+            name: "Authorization".into(),
+            value: format!("Bearer {TOKEN}"),
+        }];
+
+        let session = bundle(vec![login, call]);
+        let model = build_endpoint_model(&session);
+        let inputs = SdkInputs {
+            dataflow: crate::dataflow::build_dataflow(&session, &model),
+            ..SdkInputs::default()
+        };
+        let package = build_python_sdk(&model, &inputs);
+        let client = file(&package, "shownet_sdk/client.py");
+
+        assert!(
+            client.contains("authorization: str | None = None,"),
+            "a credential with a source is optional, not demanded:\n{client}"
+        );
+        assert!(
+            client.contains("def authenticate_authorization(self, **kwargs: Any) -> str:"),
+            "and comes with a way to obtain it:\n{client}"
+        );
+        assert!(
+            client.contains("payload = self.post_v1_auth_login(**kwargs)"),
+            "which calls the operation the capture showed producing it"
+        );
+        // The wrapper, not just the value: a bare token is a different header.
+        assert!(
+            client.contains(r#"self.session.headers["authorization"] = "Bearer " + value"#),
+            "the captured `Bearer ` prefix has to be rebuilt:\n{client}"
+        );
+        assert!(!client.contains(TOKEN), "still no captured value anywhere");
+    }
+
+    #[test]
+    fn a_credential_with_no_source_stays_required() {
+        // Nothing in the capture produces it, so the caller has to.
+        let model = build_endpoint_model(&bundle(vec![
+            authorised("GET", "/v1/users/1"),
+            authorised("GET", "/v1/users/2"),
+        ]));
+        let package = build_python_sdk(&model, &SdkInputs::default());
+        let client = file(&package, "shownet_sdk/client.py");
+        assert!(client.contains("        authorization: str,\n"));
+        assert!(
+            !client.contains("def authenticate_"),
+            "there is nothing to call:\n{client}"
         );
     }
 

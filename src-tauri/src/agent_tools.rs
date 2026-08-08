@@ -619,6 +619,7 @@ pub fn execute_write_tool(
     let result = match name {
         "shownet_export_analysis_artifacts" => export_analysis_artifacts(state, arguments),
         "shownet_export_auto_crawler" => export_auto_crawler_tool(state, arguments),
+        "shownet_build_sdk" => build_sdk_tool(state, arguments),
         "shownet_export_evaluation_package" => export_evaluation_package_tool(state, arguments),
         "shownet_run_autonomous_analysis" => run_autonomous_analysis_tool(state, arguments),
         "shownet_seed_web_risk_fixture" => {
@@ -1124,6 +1125,19 @@ pub fn browser_write_tool_definitions() -> Vec<ToolDefinition> {
 pub fn extra_write_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         tool(
+            "shownet_build_sdk",
+            "把一次抓包归纳成端点并生成 Python API SDK（curl_cffi + 指纹自检 + 已验证的加解密）；未经抓包证实的部分写入 GAPS.md 而不是省略。是否可用由用户的 MCP 写入设置决定",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": { "type": "string" },
+                    "outputDir": { "type": "string" }
+                },
+                "required": ["sessionId"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "shownet_seed_web_risk_fixture",
             "创建可结束的 VJ/AWS-WAF 形态 fixture 会话（challenge/captcha/mp_verify + interaction hooks），供 Lab/视觉链路自测",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
@@ -1416,6 +1430,29 @@ fn export_analysis_artifacts(state: &AppState, arguments: &Value) -> Result<Valu
         output_dir.as_deref(),
     )?;
     serde_json::to_value(exported).map_err(|error| error.to_string())
+}
+
+fn build_sdk_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {
+    let session_id = required_string(arguments, "sessionId")?;
+    let output_dir = arguments
+        .get("outputDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(path) = output_dir.as_ref() {
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("outputDir 不能包含 ..".to_string());
+        }
+    }
+    let result = crate::sdk_inputs::export(&state.storage, &session_id, output_dir.as_deref())?;
+    // The readiness goes back with the paths, so an agent reporting on this
+    // has the gap count in hand and cannot describe a package with holes as a
+    // finished SDK.
+    serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
 fn export_evaluation_package_tool(state: &AppState, arguments: &Value) -> Result<Value, String> {

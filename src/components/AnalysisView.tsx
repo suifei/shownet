@@ -8,7 +8,7 @@ import { DEFAULT_AI_CONTEXT_TOKENS, promptBudgetBytes } from "../aiContextBudget
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
 import { pickReplayExportDirectory } from "../replayExport";
-import type { AiAnalysisSettings, AiProviderSettings, AlgorithmReplayExportResult, AnalysisActivity, AnalysisChatMessage, AnalysisGraphRun, AnalysisMode, AnalysisReport, AnalysisStatus, AnalysisStreamEvent, AutonomousAnalysisResult, EvaluationExportResult, RequestListItem, SkillPlan, SkillRunAudit } from "../types";
+import type { AiAnalysisSettings, AiProviderSettings, AlgorithmReplayExportResult, AnalysisActivity, AnalysisChatMessage, AnalysisGraphRun, AnalysisMode, AnalysisReport, AnalysisStatus, AnalysisStreamEvent, AutonomousAnalysisResult, EvaluationExportResult, RequestListItem, SdkExportResult, SkillPlan, SkillRunAudit } from "../types";
 
 const modes = ANALYSIS_MODES;
 
@@ -236,6 +236,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   const [evalExport, setEvalExport] = useState<EvaluationExportResult | null>(null);
   const [exportingEval, setExportingEval] = useState(false);
   const evalExportRequestId = useRef(0);
+  const [sdkExport, setSdkExport] = useState<SdkExportResult | null>(null);
+  const [exportingSdk, setExportingSdk] = useState(false);
+  const sdkExportRequestId = useRef(0);
   const reportEndRef = useRef<HTMLDivElement | null>(null);
   const activeAnalysisId = useRef("");
   const replayExportRequestId = useRef(0);
@@ -749,6 +752,50 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     }
   };
 
+  const exportSdkPackage = async () => {
+    if (exportingSdk) return;
+    if (!isTauri()) {
+      onNotify("API SDK 需要在 ShowNet 桌面应用中生成");
+      return;
+    }
+    const picked = await pickReplayExportDirectory(() =>
+      openDialog({ directory: true, multiple: false, title: "选择 API SDK 保存目录" }),
+    );
+    if (picked.status === "cancel") {
+      onNotify("已取消生成");
+      return;
+    }
+    if (picked.status === "error") {
+      onNotify(`无法打开目录选择：${picked.message}`);
+      return;
+    }
+
+    setExportingSdk(true);
+    setSdkExport(null);
+    const requestId = ++sdkExportRequestId.current;
+    try {
+      const exported = await invoke<SdkExportResult>("build_sdk_package", {
+        sessionId,
+        outputDir: picked.path,
+      });
+      if (sdkExportRequestId.current !== requestId) return;
+      setSdkExport(exported);
+      // The gap count leads, because a package that looks finished and is not
+      // is the failure this feature has to avoid.
+      const { gapCount, endpointsTotal } = exported.readiness;
+      onNotify(
+        gapCount > 0
+          ? `SDK 已生成 · ${endpointsTotal} 个端点 · ${gapCount} 处未经抓包证实，见 GAPS.md`
+          : `SDK 已生成 · ${endpointsTotal} 个端点 · 无未证实项`,
+      );
+    } catch (exportError) {
+      if (sdkExportRequestId.current !== requestId) return;
+      onNotify(`生成 SDK 失败：${String(exportError)}`);
+    } finally {
+      if (sdkExportRequestId.current === requestId) setExportingSdk(false);
+    }
+  };
+
   const exportEvaluationPackage = async () => {
     if (!report || exportingEval) return;
     if (!isTauri()) {
@@ -980,6 +1027,37 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 </button>
               </div>
             )}
+            <div className={`replay-export-toolbar ${sdkExport ? "is-exported" : ""}`}>
+              <span className="replay-export-toolbar__mark" aria-hidden>
+                {sdkExport ? <Check size={17} /> : <Package size={17} />}
+              </span>
+              <div className="replay-export-toolbar__body">
+                <div className="replay-export-toolbar__heading">
+                  <strong>API SDK（Python）</strong>
+                  <span className="replay-export-pill">
+                    {sdkExport
+                      ? sdkExport.readiness.gapCount > 0
+                        ? `${sdkExport.readiness.gapCount} 处未证实`
+                        : "无未证实项"
+                      : "curl_cffi + 指纹自检"}
+                  </span>
+                </div>
+                <small title={sdkExport?.directory}>
+                  {sdkExport
+                    ? `${sdkExport.readiness.endpointsTotal} 个端点（${sdkExport.readiness.endpointsConfirmed} 个路径参数已互证）· 加解密已验证 ${sdkExport.readiness.cryptoVerified} 个 · ${sdkExport.directory}`
+                    : "把这次抓包归纳成端点，生成可直接调用的 Python 客户端：凭据由调用方传入，指纹目标可实测比对，未经证实的部分写在 GAPS.md 并标在对应方法上。"}
+                </small>
+              </div>
+              <button
+                className="replay-export-button"
+                onClick={() => void exportSdkPackage()}
+                disabled={exportingSdk}
+                title="选择目录并生成 Python SDK"
+              >
+                {exportingSdk ? <LoaderCircle className="spin" size={14} /> : <Package size={14} />}
+                {exportingSdk ? "正在生成" : "生成 SDK"}
+              </button>
+            </div>
             {status === "complete" && report && (
               <div className={`replay-export-toolbar ${evalExport ? "is-exported" : ""}`}>
                 <span className="replay-export-toolbar__mark" aria-hidden>
