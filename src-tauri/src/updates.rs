@@ -386,6 +386,24 @@ mod tests {
         assert!(parse_update_manifest(&vec![b'x'; MAX_MANIFEST_BYTES + 1])
             .unwrap_err()
             .contains("128 KB"));
+
+        // Credentials in the URL were rejected but never tested: deleting that
+        // branch left all thirteen tests here passing. The shape that matters
+        // is not a stray password, it is the host confusion — a reader scanning
+        // this sees github.com, while the request goes to evil.example.com.
+        value["assets"] = serde_json::json!([
+            {
+                "name": "ShowNet_99.1.0_aarch64.dmg",
+                "browser_download_url": "https://github.com@evil.example.com/ShowNet.dmg"
+            },
+            {
+                "name": "ShowNetPortable_99.1.0_windows_x86_64.zip",
+                "browser_download_url": "https://github.com@evil.example.com/ShowNet.zip"
+            }
+        ]);
+        assert!(parse_update_manifest(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .contains("不能包含用户名或密码"));
     }
 
     /// The default must be GitHub's API, so a fresh build depends on no
