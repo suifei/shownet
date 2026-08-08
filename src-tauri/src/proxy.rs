@@ -2134,10 +2134,17 @@ async fn connect_verified_tls_boring(
         .set_min_proto_version(Some(SslVersion::TLS1_2))
         .and_then(|_| builder.set_max_proto_version(Some(SslVersion::TLS1_3)))
         .map_err(|error| format!("boring 协议版本设置失败: {error}"))?;
-    // GREASE and a Chrome-family cipher order are what make the handshake read
-    // as a browser rather than a generic TLS client. The exact set is the knob
-    // Phase 2 tunes against a golden.
+    // Tuned against a real Chrome ClientHello measured on the inbound side and
+    // a JA4 reflector. The cipher list below hashes to Chrome 151's exact
+    // cipher component (8daaf6152771 in JA4). GREASE, permuted extension order,
+    // a post-quantum group and the SCT/OCSP extensions bring the rest of the
+    // handshake into the Chromium family. What is NOT reachable with this
+    // BoringSSL: the ALPS (0x44cd) and ECH (0xfe0d) extensions and the
+    // MLKEM768 group Chrome 151 uses — so the JA4 lands at t13d1513h2, not
+    // t13d1516h2. That gap needs a boring fork or curl-impersonate and is the
+    // Phase 2 ceiling. Certificate verification still decides trust.
     builder.set_grease_enabled(true);
+    builder.set_permute_extensions(true);
     builder
         .set_cipher_list(
             "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
@@ -2148,6 +2155,22 @@ async fn connect_verified_tls_boring(
              AES256-GCM-SHA384:AES128-SHA:AES256-SHA",
         )
         .map_err(|error| format!("boring cipher 设置失败: {error}"))?;
+    // Chrome's group order, post-quantum first. MLKEM768 is what Chrome 151
+    // actually sends but this BoringSSL only has the draft Kyber name; fall
+    // back cleanly to classical groups if even that is absent, rather than
+    // failing the whole handshake over one group.
+    if builder
+        .set_curves_list("X25519Kyber768Draft00:X25519:P-256:P-384")
+        .is_err()
+    {
+        builder
+            .set_curves_list("X25519:P-256:P-384")
+            .map_err(|error| format!("boring 曲线设置失败: {error}"))?;
+    }
+    // status_request (0x0005) and signed_certificate_timestamp (0x0012): two of
+    // the extensions a real Chrome sends, and the two this BoringSSL exposes.
+    builder.enable_ocsp_stapling();
+    builder.enable_signed_cert_timestamps();
     let alpn: &[u8] = if force_http11 {
         b"\x08http/1.1"
     } else {

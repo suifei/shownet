@@ -241,7 +241,7 @@ export function AdvancedConsoleView({
       // hold when a real stack is linked, and the status is the source of truth.
       onNotify(
         status.impersonateRequested
-          ? "出站已切到真实 BoringSSL 引擎"
+          ? "出站已切到真实 BoringSSL（浏览器系，非逐字节 Chrome；严格 JA4 风控仍可能拦）"
           : enabled
             ? "已记录，但当前构建未链接真实栈，仍走 rustls"
             : "出站已切回 rustls",
@@ -767,15 +767,29 @@ export function AdvancedConsoleView({
                       checked={Boolean(outboundTls?.impersonateRequested)}
                       onChange={(e) => void setImpersonate(e.target.checked)}
                     />
-                    用真实 BoringSSL 出站（Chrome 系 ClientHello，绕过按 JA3 判定的风控）
+                    用真实 BoringSSL 出站（浏览器系握手，非逐字节 Chrome）
                   </label>
                 ) : null}
                 <p className="hint">
-                  浏览器 JA3 全量对齐需要 BoringSSL/curl-impersonate 级栈（当前 engine=
-                  {outboundTls?.engine ?? "rustls"}，supportsFullBrowserJa3=
-                  {String(outboundTls?.supportsFullBrowserJa3 ?? false)}，ja3Parity=
-                  {String(outboundTls?.ja3Parity ?? false)}）。版本预置仍会改变出站 ClientHello
-                  的可测配方 / JA3。
+                  {outboundTls?.impersonateRequested ? (
+                    <>
+                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：真实
+                      BoringSSL 握手，比 rustls 更接近浏览器。但这版 BoringSSL 缺 ALPS / ECH
+                      扩展与 MLKEM768 曲线，JA4 落在 <code>t13d1513h2</code> 而非 Chrome 151 的
+                      <code>t13d1516h2</code>，所以 <strong>ja3Parity=
+                      {String(outboundTls?.ja3Parity ?? false)}</strong>、supportsFullBrowserJa3=
+                      {String(outboundTls?.supportsFullBrowserJa3 ?? false)}。
+                      <br />
+                      对<strong>只拦已知脚本库</strong>（rustls/python/go）的站点足够；对
+                      <strong>按 JA4 严格匹配 Chrome</strong> 的风控（Cloudflare/Akamai）
+                      仍可能被拦——那需要 boring fork 或 curl-impersonate 达到逐字节对齐。
+                    </>
+                  ) : (
+                    <>
+                      浏览器 JA3/JA4 逐字节对齐需要能发全套扩展的栈。当前 engine=
+                      {outboundTls?.engine ?? "rustls"}。版本预置仍会改变出站 ClientHello 的可测配方 / JA3。
+                    </>
+                  )}
                 </p>
               </div>
               <div>

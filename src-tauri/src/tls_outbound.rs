@@ -116,9 +116,21 @@ impl OutboundTlsEngine {
         }
     }
 
-    /// True only for a real browser TLS stack — never for a UI toggle alone.
+    /// Whether the active engine can present a **byte-exact** browser JA3/JA4,
+    /// not merely a browser-family one.
+    ///
+    /// The linked BoringSSL connector is a real Chromium-family stack, but this
+    /// BoringSSL cannot emit the ALPS and ECH extensions or the MLKEM768 group
+    /// that Chrome 151 sends, so a measured handshake lands at JA4 t13d1513h2,
+    /// not Chrome's t13d1516h2. Claiming "full browser JA3" here would tell a
+    /// user a strict JA4 gate (Cloudflare, Akamai) will accept it, which is not
+    /// true. So this stays false until a connector that reaches byte-exact
+    /// parity is linked — a boring fork or curl-impersonate. `active_engine()`
+    /// still reports Impersonate, and per-request `ja3Parity` still reports
+    /// whether a specific handshake matched a golden; those are the honest
+    /// signals for "a real stack is in use."
     pub fn supports_full_browser_ja3(self) -> bool {
-        matches!(self, Self::Impersonate) && real_impersonate_stack_available()
+        false
     }
 }
 
