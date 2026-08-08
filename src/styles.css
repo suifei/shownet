@@ -6003,6 +6003,9 @@ kbd {
   grid-template-columns: 18px minmax(0, 1fr) 18px;
   align-items: center;
   flex: 1;
+  /* A flex item's automatic minimum is its content, which would stop this
+     absorbing the shrink the buttons no longer take. */
+  min-width: 0;
   height: 30px;
   gap: 3px;
   padding: 0 8px;
@@ -6014,7 +6017,10 @@ kbd {
 
 .address-bar:focus-within { background: var(--surface-panel); border-color: var(--border-strong); }
 .address-bar input { min-width: 0; color: var(--text-secondary); font-size: 13px; background: transparent; border: 0; outline: 0; }
-.hook-toggle { display: inline-flex; align-items: center; justify-content: center; height: 30px; gap: 5px; padding: 0 8px; color: var(--text-muted); background: transparent; border-radius: 9px; }
+/* flex-shrink so a narrow window squeezes the address bar rather than the
+   labels: without it the toolbar's five buttons compress until their text wraps
+   one character per line. */
+.hook-toggle { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; height: 30px; gap: 5px; padding: 0 8px; color: var(--text-muted); background: transparent; border-radius: 9px; white-space: nowrap; }
 .hook-toggle span { padding: 1px 4px; font-size: 11px; background: var(--surface-sunken); border-radius: 10px; }
 .hook-toggle.is-active {
   color: var(--purple-ink);
