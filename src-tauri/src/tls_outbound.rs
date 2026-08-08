@@ -1,9 +1,10 @@
 //! Outbound (MITM → origin) TLS profile selection.
 //!
-//! Full browser JA3 parity needs BoringSSL / curl-impersonate (or equivalent).
-//! With the `impersonate-boring` feature that stack is linked (see proxy::
-//! connect_verified_tls_boring); the default build has none and this module
-//! reports so honestly rather than claiming a stack it does not have.
+//! Full browser JA3/JA4 parity needs a real browser TLS+h2 stack. With the
+//! `impersonate-boring` feature that stack is linked — wreq (its own patched
+//! BoringSSL and Chrome-order h2), driven at proxy's CONNECT-tunnel egress.
+//! The default build has none and this module reports so honestly rather than
+//! claiming a stack it does not have.
 //!
 //! Profiles customize **real rustls** ClientConfig material (cipher suite order,
 //! key-exchange group order, ALPN) so inbound→outbound selection changes the wire
@@ -131,8 +132,8 @@ impl OutboundTlsEngine {
 
 /// Detect a real JA3-capable outbound stack usable for MITM origin TLS.
 ///
-/// True only with the `impersonate-boring` feature, which links a BoringSSL
-/// connector. The default build links none. Detection probes:
+/// True only with the `impersonate-boring` feature, which links wreq (its own
+/// BoringSSL). The default build links none. Detection probes:
 /// 1. Compile-time feature is not present (always off here).
 /// 2. Optional env `SHOWNET_IMPERSONATE_LIB` pointing at an existing loadable library file
 ///    **and** `SHOWNET_IMPERSONATE_ENABLE=1` — still does not wire MITM through that library
@@ -143,25 +144,24 @@ impl OutboundTlsEngine {
 /// False in the default (rustls-only) build so `supportsFullBrowserJa3` cannot
 /// go true without a real integrated stack.
 pub fn real_impersonate_stack_available() -> bool {
-    // Two independent conditions, deliberately. The cargo feature only compiles the
-    // impersonate lane in; it links nothing. Treating the flag alone as "a real
-    // browser TLS stack is present" would let a build claim browser-level JA3 while
-    // still handshaking with rustls — exactly the false-positive the plan forbids
-    // (docs/plan-real-browser-ja3-impersonate.md §1.2, §7).
+    // Two conditions, kept separate on purpose. The feature gates the code in;
+    // impersonate_connector_linked() is where a build asserts a stack is really
+    // wired (wreq is, in the feature build). Collapsing them to the flag alone
+    // would let a future half-wired build claim browser JA3 while still on
+    // rustls — the false-positive the plan forbids (§1.2, §7).
     cfg!(feature = "impersonate-boring") && impersonate_connector_linked()
 }
 
 /// Whether a real BoringSSL / curl-impersonate-class origin connector is linked
 /// and usable for MITM egress.
 ///
-/// Linked when the `impersonate-boring` feature is on: the boring connector
-/// lives at proxy::connect_verified_tls_boring. The default build keeps the
+/// Linked when the `impersonate-boring` feature is on: wreq backs the egress
+/// (proxy routes the CONNECT tunnel through it). The default build keeps the
 /// other arm and stays pure rustls.
 #[cfg(feature = "impersonate-boring")]
 fn impersonate_connector_linked() -> bool {
-    // A real BoringSSL origin connector is compiled and wired into the proxy's
-    // egress path (proxy::connect_verified_tls_boring). This flips true only in
-    // this build configuration; the default build keeps the other arm.
+    // wreq is compiled and wired into the proxy's egress. This flips true only
+    // in this build configuration; the default build keeps the other arm.
     true
 }
 

@@ -589,7 +589,9 @@ export function AdvancedConsoleView({
               </div>
               <div>
                 <span>supportsFullBrowserJa3</span>
-                <strong className="is-warn">{String(outboundTls?.supportsFullBrowserJa3 ?? false)}</strong>
+                <strong className={outboundTls?.supportsFullBrowserJa3 ? "is-ok" : "is-warn"}>
+                  {String(outboundTls?.supportsFullBrowserJa3 ?? false)}
+                </strong>
               </div>
             </div>
             <p className="hint">
@@ -756,7 +758,7 @@ export function AdvancedConsoleView({
                   />
                   根据入站 JA3/JA4 自动选择出站预置（真实变更 rustls 套件顺序）
                 </label>
-                {/* Only shown when a real BoringSSL connector is linked. In the
+                {/* Only shown when the wreq impersonate engine is linked. In the
                     default rustls build there is nothing to turn on, so a toggle
                     would be a dead control that implies a capability the build
                     does not have. */}

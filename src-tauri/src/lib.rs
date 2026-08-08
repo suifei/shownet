@@ -3552,7 +3552,7 @@ pub fn run() {
                 // connector is linked. Without one the request is inert anyway —
                 // active_engine() gates on the stack too — but refusing to set
                 // it keeps the false-positive impossible even if that gate ever
-                // loosened. With the boring connector linked, this is what lets
+                // loosened. With wreq linked, this is what lets
                 // a user's saved choice actually take effect.
                 let wants_impersonate = value
                     .get("impersonate")
