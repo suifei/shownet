@@ -1871,8 +1871,12 @@ fn extract_token_candidates(body: &str) -> Vec<String> {
             candidates.push(token.to_string());
         }
     }
-    if let Some(index) = body.find("\"token\":\"") {
-        let rest = &body[index + 9..];
+    // The offset is the marker's own length rather than a literal 9. They must
+    // agree or the slice lands mid-character and panics — the failure mode is a
+    // crash, not a wrong answer, and the coupling is invisible at the call site.
+    const TOKEN_MARKER: &str = "\"token\":\"";
+    if let Some(index) = body.find(TOKEN_MARKER) {
+        let rest = &body[index + TOKEN_MARKER.len()..];
         if let Some(end) = rest.find('"') {
             candidates.push(rest[..end].to_string());
         }
@@ -2131,6 +2135,28 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_token_followed_by_multibyte_text_is_extracted_not_a_panic() {
+        // extract_token_candidates slices at the marker's length. A literal 9
+        // agreed with the marker only because both are ASCII, and a mismatch
+        // would land the slice mid-character — a panic, not a wrong answer.
+        // Nothing exercised this path with multibyte content, so the coupling
+        // could have been broken without any test noticing.
+        let body = r#"{"note":"抓包解密验证","token":"abc123","extra":"密钥内容"}"#;
+        let found = extract_token_candidates(body);
+        assert!(
+            found.iter().any(|t| t == "abc123"),
+            "the token must survive a body full of multibyte text: {found:?}"
+        );
+
+        // The marker surrounded by multibyte characters, and truncated forms
+        // that must not slice past the end of the string.
+        let _ = extract_token_candidates(r#"{"中":"文","token":"tok-中","尾":"部"}"#);
+        let _ = extract_token_candidates(r#"{"token":"#);
+        let _ = extract_token_candidates(r#"{"token":""#);
+        let _ = extract_token_candidates("抓包");
+    }
+
     use super::*;
     use crate::models::{BodyCaptureMetadata, CapturedRequestInput, HeaderEntry};
     use crate::storage::Storage;
