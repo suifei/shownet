@@ -3307,6 +3307,15 @@ mod tests {
                 .as_str(),
             "https://api.x.ai/v1/models"
         );
+        // The third suffix in the list had no case of its own: deleting it left
+        // every test here passing, and a base URL ending in /v1/completions
+        // would have asked for /v1/completions/models.
+        assert_eq!(
+            models_endpoint("https://api.example.com/v1/completions")
+                .unwrap()
+                .as_str(),
+            "https://api.example.com/v1/models"
+        );
     }
 
     #[test]
