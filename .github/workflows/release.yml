@@ -152,9 +152,20 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
+          # Verify the app inside the dmg, not bundle/macos/ShowNet.app: with
+          # --bundles dmg, tauri deletes that intermediate once the image is
+          # built ("Cleaning .../ShowNet.app" in the log), so this step would
+          # have failed on a missing path the first time signing was switched
+          # on. The ad-hoc branch below reads the dmg for the same reason, and
+          # that has run correctly in CI since 0.4.9.
           dmg_path="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           test -n "$dmg_path"
+          mount_point="$(mktemp -d)"
+          hdiutil attach -nobrowse -quiet "$dmg_path" -mountpoint "$mount_point"
+          # Detach whether verification passes or fails; the failure must still
+          # fail the job, which a trap preserves and `&&` would not.
+          trap 'hdiutil detach "$mount_point" -quiet || true' EXIT
+          app_path="$mount_point/ShowNet.app"
           npm run verify:release:macos -- \
             --app "$app_path" \
             --dmg "$dmg_path" \
