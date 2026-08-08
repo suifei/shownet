@@ -19,12 +19,11 @@ path = "src/bin/tls_golden_probe.rs"
 # `real_impersonate_stack_available` can return true. Default build is rustls-only.
 [features]
 default = []
-# Links a real BoringSSL origin connector — the same TLS library Chrome uses —
-# so MITM egress can present a browser-family ClientHello instead of rustls's.
-# Off by default: it pulls a C dependency (boring-sys vendors BoringSSL) that
-# the portable default build does not want. When on, tls_outbound reports the
-# connector as linked and the impersonate engine becomes selectable.
-impersonate-boring = ["dep:boring", "dep:tokio-boring"]
+# Links wreq — a byte-exact Chrome-impersonation client (its own BoringSSL and
+# a patched h2 with Chrome's pseudo-header order) — as the MITM egress engine.
+# Off by default: it pulls a vendored BoringSSL C build the portable default
+# build does not want. When on, the impersonate engine becomes selectable.
+impersonate-boring = ["dep:wreq", "dep:wreq-util"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -59,9 +58,11 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26"
-# Only compiled with the `impersonate-boring` feature; see [features].
-boring = { version = "4", optional = true }
-tokio-boring = { version = "4", optional = true }
+# Only compiled with the `impersonate-boring` feature. wreq is a byte-exact
+# browser-impersonation HTTP client (its own boring2 + a patched h2 that emits
+# Chrome's pseudo-header order); it backs the impersonate egress.
+wreq = { version = "5", optional = true }
+wreq-util = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
 tree-sitter = "0.25"
 tree-sitter-javascript = "0.23"

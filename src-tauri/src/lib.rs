@@ -25,6 +25,8 @@ mod evaluation_export;
 mod external_mcp;
 mod grok_runtime;
 mod http2_fingerprint;
+#[cfg(feature = "impersonate-boring")]
+mod impersonate_egress;
 mod interchange;
 mod mcp;
 mod mirror;

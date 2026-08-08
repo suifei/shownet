@@ -2070,15 +2070,9 @@ async fn connect_verified_tls_measured(
     profile: OutboundTlsProfile,
     force_http11: bool,
 ) -> Result<VerifiedTlsConnect, String> {
-    // The impersonate engine only becomes active when a real connector is
-    // linked (the feature) and the user asked for it — active_engine() already
-    // enforces both, so a false parity claim is impossible here.
-    if tls_outbound::active_engine() == tls_outbound::OutboundTlsEngine::Impersonate {
-        #[cfg(feature = "impersonate-boring")]
-        {
-            return connect_verified_tls_boring(stream, host, profile, force_http11).await;
-        }
-    }
+    // Impersonate egress does not run here: wreq is a full client, so when the
+    // impersonate engine is active the egress branches before this connector is
+    // ever reached (see the CONNECT-tunnel dispatch). This path is always rustls.
     let config = if force_http11 {
         tls_outbound::build_client_config_http11_only(profile)
     } else {
@@ -2111,118 +2105,6 @@ async fn connect_verified_tls_measured(
         stream: BoxedIo(Box::new(tls)),
         negotiated_alpn,
         protocol_version,
-        measured_ja3: measured.as_ref().map(|(j, _)| j.clone()),
-        measured_ja4: measured.map(|(_, j4)| j4),
-    })
-}
-
-/// Origin TLS via a real BoringSSL handshake — the library Chrome ships — so the
-/// ClientHello is browser-family rather than rustls's. The ClientHello is
-/// measured the same way as the rustls path (CapturingIo over the wire, parsed
-/// by fingerprint_client_hello_wire), so parity is judged from what actually
-/// went out, never from the fact that boring was used.
-///
-/// This is the Phase-1 MVP of docs/plan-real-browser-ja3-impersonate.md: a real
-/// stack that measures its own JA3. Byte-exact alignment to a specific Chrome
-/// golden is Phase 2 — until a measured handshake matches a golden, the parity
-/// gate downstream reports parity=false even though the stack is real.
-#[cfg(feature = "impersonate-boring")]
-async fn connect_verified_tls_boring(
-    stream: BoxedIo,
-    host: &str,
-    // One Chrome-family ClientHello for now, regardless of profile. Mapping the
-    // profile enum to per-browser boring configs (Firefox, Safari) is Phase 2,
-    // alongside the goldens each would be matched against.
-    _profile: OutboundTlsProfile,
-    force_http11: bool,
-) -> Result<VerifiedTlsConnect, String> {
-    use boring::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
-
-    let sni = host.trim_matches(['[', ']']).to_string();
-    let mut builder = SslConnector::builder(SslMethod::tls())
-        .map_err(|error| format!("boring 连接器构造失败: {error}"))?;
-    builder
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .and_then(|_| builder.set_max_proto_version(Some(SslVersion::TLS1_3)))
-        .map_err(|error| format!("boring 协议版本设置失败: {error}"))?;
-    // Tuned against a real Chrome ClientHello measured on the inbound side and
-    // a JA4 reflector. The cipher list below hashes to Chrome 151's exact
-    // cipher component (8daaf6152771 in JA4). GREASE, permuted extension order,
-    // a post-quantum group and the SCT/OCSP extensions bring the rest of the
-    // handshake into the Chromium family. What is NOT reachable with this
-    // BoringSSL: the ALPS (0x44cd) and ECH (0xfe0d) extensions and the
-    // MLKEM768 group Chrome 151 uses — so the JA4 lands at t13d1513h2, not
-    // t13d1516h2. That gap needs a boring fork or curl-impersonate and is the
-    // Phase 2 ceiling. Certificate verification still decides trust.
-    builder.set_grease_enabled(true);
-    builder.set_permute_extensions(true);
-    builder
-        .set_cipher_list(
-            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
-             ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-             ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-             ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
-             ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:\
-             AES256-GCM-SHA384:AES128-SHA:AES256-SHA",
-        )
-        .map_err(|error| format!("boring cipher 设置失败: {error}"))?;
-    // Chrome's group order, post-quantum first. MLKEM768 is what Chrome 151
-    // actually sends but this BoringSSL only has the draft Kyber name; fall
-    // back cleanly to classical groups if even that is absent, rather than
-    // failing the whole handshake over one group.
-    if builder
-        .set_curves_list("X25519Kyber768Draft00:X25519:P-256:P-384")
-        .is_err()
-    {
-        builder
-            .set_curves_list("X25519:P-256:P-384")
-            .map_err(|error| format!("boring 曲线设置失败: {error}"))?;
-    }
-    // status_request (0x0005) and signed_certificate_timestamp (0x0012): two of
-    // the extensions a real Chrome sends, and the two this BoringSSL exposes.
-    builder.enable_ocsp_stapling();
-    builder.enable_signed_cert_timestamps();
-    let alpn: &[u8] = if force_http11 {
-        b"\x08http/1.1"
-    } else {
-        b"\x02h2\x08http/1.1"
-    };
-    builder
-        .set_alpn_protos(alpn)
-        .map_err(|error| format!("boring ALPN 设置失败: {error}"))?;
-
-    let mut config = builder
-        .build()
-        .configure()
-        .map_err(|error| format!("boring 配置失败: {error}"))?;
-    config.set_use_server_name_indication(true);
-    // Certificate verification stays on: an impersonate egress must not become a
-    // quiet downgrade of trust. A caller that wants MITM-of-MITM configures the
-    // upstream, not this.
-    config.set_verify(SslVerifyMode::PEER);
-
-    let (capturing, capture) = CapturingIo::new(stream);
-    let boxed = BoxedIo(Box::new(capturing));
-    let tls = timeout(
-        Duration::from_secs(15),
-        tokio_boring::connect(config, &sni, boxed),
-    )
-    .await
-    .map_err(|_| format!("目标 TLS 握手超时: {host}"))?
-    .map_err(|error| format!("目标 TLS(boring) 握手失败 {host}: {error}"))?;
-
-    let measured = capture.lock().ok().and_then(|bytes| {
-        crate::tls_fingerprint::fingerprint_client_hello_wire(&bytes)
-            .ok()
-            .map(|fp| (fp.ja3, fp.ja4))
-    });
-    let negotiated_alpn = tls.ssl().selected_alpn_protocol().map(<[u8]>::to_vec);
-    let protocol_version = tls.ssl().version_str().to_string();
-
-    Ok(VerifiedTlsConnect {
-        stream: BoxedIo(Box::new(tls)),
-        negotiated_alpn,
-        protocol_version: Some(protocol_version),
         measured_ja3: measured.as_ref().map(|(j, _)| j.clone()),
         measured_ja4: measured.map(|(_, j4)| j4),
     })
@@ -11520,47 +11402,5 @@ mod tests {
             listen,
             captured.len()
         );
-    }
-
-    /// Drives ShowNet's own boring egress against a real host, not a standalone
-    /// probe: TcpStream -> BoxedIo -> connect_verified_tls_boring, and asserts a
-    /// real ClientHello was measured. Ignored because it needs the network and a
-    /// valid public cert (the connector verifies certs, so the local self-signed
-    /// test server cannot stand in). Run with:
-    ///   cargo test --no-default-features --features impersonate-boring \
-    ///     boring_egress_measures_a_real_ja3 -- --ignored --nocapture
-    #[tokio::test]
-    #[ignore = "network + real cert; run explicitly under --features impersonate-boring"]
-    #[cfg(feature = "impersonate-boring")]
-    async fn boring_egress_measures_a_real_ja3() {
-        use tokio::net::TcpStream;
-        crate::tls_impersonate::set_impersonate_requested(true);
-        assert_eq!(
-            tls_outbound::active_engine(),
-            tls_outbound::OutboundTlsEngine::Impersonate,
-            "the boring path only runs when the engine is Impersonate"
-        );
-
-        let host = "tls.peet.ws";
-        let tcp = TcpStream::connect((host, 443))
-            .await
-            .expect("tcp connect to reflector");
-        let boxed = BoxedIo(Box::new(tcp));
-        let verified =
-            connect_verified_tls_measured(boxed, host, OutboundTlsProfile::ChromeLike, false)
-                .await
-                .expect("boring handshake");
-
-        let ja3 = verified.measured_ja3.expect("a ClientHello was measured");
-        assert_eq!(ja3.len(), 32, "JA3 is an md5 hex digest: {ja3}");
-        // A real TLS 1.3 ClientHello from BoringSSL announces the 1.3 suites.
-        // rustls would too, but the point stands: this went out over boring and
-        // was measured from the wire, closing the gap the standalone probe left.
-        eprintln!("BORING_JA3 {ja3}");
-        assert!(
-            verified.negotiated_alpn.is_some(),
-            "ALPN should have been negotiated"
-        );
-        crate::tls_impersonate::set_impersonate_requested(false);
     }
 }
