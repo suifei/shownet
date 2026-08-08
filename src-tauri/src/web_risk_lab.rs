@@ -328,7 +328,7 @@ pub fn sandbox_challenge_fragment(source: &str, profile_id: Option<&str>) -> Res
                 .config
                 .identifier
                 .as_ref()
-                .map(|value| format!("\"{}\"", value.replace('\"', "\\\"")))
+                .map(|value| js_string(value))
                 .unwrap_or_else(|| "null".into())
         );
         eval_js_sandbox(
@@ -346,10 +346,18 @@ pub fn sandbox_challenge_fragment(source: &str, profile_id: Option<&str>) -> Res
     }))
 }
 
+/// A JavaScript string literal, escaped by the JSON writer rather than by hand.
+/// The four call sites below escaped only the double quote, so a value ending
+/// in a backslash escaped the closing quote instead and the whole injected
+/// script failed to parse — inside the page, where nothing reports it back.
+fn js_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 pub fn request_hijack_script(url_markers: &[&str]) -> String {
     let markers = url_markers
         .iter()
-        .map(|marker| format!("\"{}\"", marker.replace('\"', "\\\"")))
+        .map(|marker| js_string(marker))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -451,7 +459,7 @@ pub fn request_hijack_script(url_markers: &[&str]) -> String {
 pub fn object_hook_dump_script(paths: &[&str]) -> String {
     let list = paths
         .iter()
-        .map(|path| format!("\"{}\"", path.replace('\"', "\\\"")))
+        .map(|path| js_string(path))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -496,7 +504,7 @@ pub fn fixed_params_inject_script(profile: &JsDebugProfile) -> String {
     let languages = profile
         .languages
         .iter()
-        .map(|item| format!("\"{}\"", item.replace('\"', "\\\"")))
+        .map(|item| js_string(item))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -1261,6 +1269,45 @@ mod tests {
         assert!(result.ok, "{:?}", result.errors);
         // result may be object via JSON stringify path or null fallback; at least no crash
         assert_eq!(result.profile_id, "chrome-desktop-stable");
+    }
+
+    #[test]
+    fn injected_markers_survive_backslashes_and_newlines() {
+        // The old escaping handled the double quote and nothing else, so a
+        // marker ending in a backslash escaped the closing quote and the whole
+        // injected script failed to parse. It fails inside the page, so the
+        // only symptom is a hook that never fires. Confirmed against
+        // `node --check` while investigating; asserted here by round-trip,
+        // which is the same property without a Node process.
+        let hostile = [
+            "/api/",
+            "a\\",
+            "a\"b",
+            "a\nb",
+            "\\d+",
+            "</script>",
+            "tab\there",
+        ];
+        for value in hostile {
+            let literal = js_string(value);
+            let parsed: String = serde_json::from_str(&literal)
+                .unwrap_or_else(|error| panic!("{value:?} produced {literal:?}: {error}"));
+            assert_eq!(parsed, value, "literal did not round-trip");
+        }
+
+        // And the array as it is actually embedded, not just the helper.
+        let script = request_hijack_script(&hostile);
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("const MARKERS = ["))
+            .expect("script must declare MARKERS");
+        let array = line
+            .trim_start()
+            .trim_start_matches("const MARKERS = ")
+            .trim_end_matches(';');
+        let decoded: Vec<String> = serde_json::from_str(array)
+            .unwrap_or_else(|error| panic!("MARKERS is not a valid array: {array} ({error})"));
+        assert_eq!(decoded, hostile);
     }
 
     #[test]
