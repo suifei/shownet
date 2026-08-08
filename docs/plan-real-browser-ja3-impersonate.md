@@ -401,3 +401,50 @@ Android 上「接近浏览器 JA3」至少分三类：
 | 2026-08-03 | 初稿：目标、双引擎、金标、桌面/Android/iOS、阶段与门禁 |
 
 **下一步（执行层）**：评审 D1–D5 → 开 Phase 0 探针与 `tls-golden` 目录 → 再立项 Phase 1 工程任务。
+
+---
+
+## 10. 决策与进展（2026-08-09）
+
+### 10.1 已落地：Phase 1 boring 连接器(过渡)
+
+`impersonate-boring` 特性链接真实 BoringSSL 出站连接器
+(`proxy::connect_verified_tls_boring`),从抓包实测确诊有效但**不逐字节 Chrome**:
+
+- 密码套件哈希已对齐 Chrome 151(`8daaf6152771`),加了后量子曲线 + SCT/OCSP + 扩展乱序;
+- **天花板**:这版 boring-sys(4.22)发不出 ALPS(`0x44cd`)、ECH(`0xfe0d`),也没有
+  Chrome 151 的 MLKEM768 曲线 → JA4 落在 `t13d1513h2` 而非 Chrome 的 `t13d1516h2`;
+- 另一条独立缺口:**h2 伪头顺序**。`h2` crate(0.4.15)把顺序硬编码为
+  `method,scheme,authority,path`,配置改不了;Chrome 是 `method,authority,scheme,path`。
+- 因此 `supportsFullBrowserJa3` 恒为 false,UI 明说"浏览器系,非逐字节 Chrome"。
+
+### 10.2 已决:生产引擎选 **wreq**(已实测证明)
+
+`wreq` 5.x(rquest 后继)自带 patched boring2 + patched h2,**一个库同时把 TLS 逐字节
+和 h2 伪头顺序都做对**。对 `tls.peet.ws/api/all` 实测:
+
+- TLS JA4:`t13d1516h2_8daaf6152771_...`(16 扩展,与 Chrome 一致)
+- h2 akamai:`1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`(伪头 `m,a,s,p` = Chrome)
+
+### 10.3 约束:boring 与 wreq 不能共存
+
+`boring-sys`(过渡连接器)与 `boring-sys2`(wreq 内部)都 `links = "boringssl"`,
+cargo 禁止两个包链接同一原生库。**所以迁移到 wreq 必须整体替换 boring,不能并存。**
+
+### 10.4 集成方案(下一次专门做)
+
+wreq 是完整 HTTP 客户端(非流级连接器),集成点在**请求级**,不在连接器级:
+
+1. 删 `boring`/`tokio-boring` 依赖与 `connect_verified_tls_boring` 及其测试。
+2. 出站派发处(`proxy.rs` 的 CONNECT 隧道主路径 ~1613、`dedicated_request_sender_factory`、
+   ~4800)在 impersonate 激活时,不走 `connect_verified_tls_measured + handshake_origin_https`,
+   改为用 wreq 客户端(带上游代理)整发整收。`HttpsRequestSender` 需加 `Impersonate` 变体或
+   在更高层分流;`send_request` 返回体从 `Incoming` 改为 boxed body。
+3. 流式(SSE)/WebSocket:wreq 不覆盖的走现有 rustls 路径回退。
+4. 指纹记录:wreq 逐字节,记录目标 JA4 并置 parity=true(或自检实测)。
+5. **自动测试**(已写好待接):`wreq_egress_is_byte_exact_chrome`——
+   断言 JA4 以 `t13d1516h2` 开头、akamai 以 `|m,a,s,p` 结尾。
+
+**为何不在本轮完成**:这是对 11k 行流式 MITM 出站路径的整体替换(流式/ws/隧道共享
+sender/GOAWAY/抓包都要处理),半途会弄坏代理。boring 过渡路径保持已测可用,wreq 作为
+下一次专门工程,靶子(§10.2)与接缝(§10.4)已定。
