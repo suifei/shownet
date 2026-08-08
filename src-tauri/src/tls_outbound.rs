@@ -929,7 +929,10 @@ mod tests {
         assert_eq!(status["ja3Parity"], false);
         assert_eq!(status["supportsFullBrowserJa3"], false);
         assert_eq!(status["engine"], "rustls");
-        assert_eq!(status["realImpersonateStackAvailable"], false);
+        assert_eq!(
+            status["realImpersonateStackAvailable"],
+            cfg!(feature = "impersonate-boring")
+        );
     }
 
     /// The cargo feature compiles the impersonate lane in; it links nothing.
@@ -937,6 +940,7 @@ mod tests {
     /// feature can be built and tested in CI without manufacturing a claim.
     /// Phase 1 changes this only by linking an actual connector.
     #[test]
+    #[cfg(not(feature = "impersonate-boring"))]
     fn compiling_the_feature_does_not_by_itself_provide_a_stack() {
         let _guard = preset_lock();
         assert!(
@@ -1180,7 +1184,10 @@ mod tests {
         assert_eq!(st["documentedJa3"], "ab063844a93885b408c5a0bfcb2444c6");
         assert_eq!(st["ja3Parity"], false);
         assert_eq!(st["supportsFullBrowserJa3"], false);
-        assert_eq!(st["realImpersonateStackAvailable"], false);
+        assert_eq!(
+            st["realImpersonateStackAvailable"],
+            cfg!(feature = "impersonate-boring")
+        );
         assert!(!st["h2Fingerprint"].as_str().unwrap_or("").is_empty());
         // Chrome's four. MAX_CONCURRENT_STREAMS and MAX_FRAME_SIZE are both
         // absent from the handshake now, so the status page must not report
@@ -1204,7 +1211,14 @@ mod tests {
         assert_eq!(st["ja3Parity"], false);
         assert_eq!(st["supportsFullBrowserJa3"], false);
         assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
-        assert!(!impersonate_unavailable_reason().is_empty());
+        // The invariant under test is that a documented JA3 alone never turns
+        // parity on — asserted above. Whether the stack is "unavailable" is a
+        // separate axis: empty reason once the connector is linked.
+        if cfg!(feature = "impersonate-boring") {
+            assert!(impersonate_unavailable_reason().is_empty());
+        } else {
+            assert!(!impersonate_unavailable_reason().is_empty());
+        }
     }
 
     #[test]
