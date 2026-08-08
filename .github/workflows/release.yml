@@ -162,8 +162,24 @@ jobs:
             --config src-tauri/tauri.grok.conf.json \
             --config src-tauri/tauri.local.macos.conf.json
           mkdir -p src-tauri/target/aarch64-apple-darwin/release/bundle
-          printf '%s\n' '{"mode":"ad-hoc","architecture":"arm64","note":"Built without APPLE_* secrets"}' \
+          # Report what codesign found, not what this branch assumes. The signed
+          # path writes this file from a real verification; this one used to
+          # printf a constant, so a file named "verification" carried a claim
+          # nobody had checked. Non-fatal: an unreadable signature is recorded as
+          # "unknown" rather than failing a release over metadata.
+          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
+          signature="unknown"
+          if codesign_out="$(codesign -dv --verbose=2 "$app_path" 2>&1)"; then
+            if printf '%s' "$codesign_out" | grep -q "Signature=adhoc"; then
+              signature="ad-hoc"
+            elif printf '%s' "$codesign_out" | grep -q "Signature="; then
+              signature="signed"
+            fi
+          fi
+          team="$(printf '%s' "${codesign_out:-}" | sed -n 's/^TeamIdentifier=//p' | head -1)"
+          printf '%s\n' "{\"mode\":\"$signature\",\"architecture\":\"arm64\",\"teamIdentifier\":\"${team:-not set}\",\"note\":\"Built without APPLE_* secrets; mode read from codesign\"}" \
             > src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
+          cat src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
       - uses: actions/upload-artifact@v4
         with:
           name: shownet-macos-aarch64
