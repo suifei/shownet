@@ -116,21 +116,16 @@ impl OutboundTlsEngine {
         }
     }
 
-    /// Whether the active engine can present a **byte-exact** browser JA3/JA4,
-    /// not merely a browser-family one.
+    /// Whether the active engine presents a **byte-exact** browser JA3/JA4.
     ///
-    /// The linked BoringSSL connector is a real Chromium-family stack, but this
-    /// BoringSSL cannot emit the ALPS and ECH extensions or the MLKEM768 group
-    /// that Chrome 151 sends, so a measured handshake lands at JA4 t13d1513h2,
-    /// not Chrome's t13d1516h2. Claiming "full browser JA3" here would tell a
-    /// user a strict JA4 gate (Cloudflare, Akamai) will accept it, which is not
-    /// true. So this stays false until a connector that reaches byte-exact
-    /// parity is linked — a boring fork or curl-impersonate. `active_engine()`
-    /// still reports Impersonate, and per-request `ja3Parity` still reports
-    /// whether a specific handshake matched a golden; those are the honest
-    /// signals for "a real stack is in use."
+    /// True only when the impersonate engine is active and a real stack is
+    /// linked. That stack is now wreq (its own patched BoringSSL and h2), which
+    /// is byte-exact Chrome on both axes a strict gate checks — JA4 t13d1516h2
+    /// and h2 pseudo order m,a,s,p, verified by wreq_egress_is_byte_exact_chrome.
+    /// So unlike the earlier boring stepping stone, claiming full browser JA3
+    /// here is honest. In the default (rustls) build this is always false.
     pub fn supports_full_browser_ja3(self) -> bool {
-        false
+        matches!(self, Self::Impersonate) && real_impersonate_stack_available()
     }
 }
 

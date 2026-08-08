@@ -241,7 +241,7 @@ export function AdvancedConsoleView({
       // hold when a real stack is linked, and the status is the source of truth.
       onNotify(
         status.impersonateRequested
-          ? "出站已切到真实 BoringSSL（浏览器系，非逐字节 Chrome；严格 JA4 风控仍可能拦）"
+          ? "出站已切到 wreq 逐字节 Chrome（JA4 t13d1516h2 · h2 伪头 m,a,s,p）"
           : enabled
             ? "已记录，但当前构建未链接真实栈，仍走 rustls"
             : "出站已切回 rustls",
@@ -767,27 +767,30 @@ export function AdvancedConsoleView({
                       checked={Boolean(outboundTls?.impersonateRequested)}
                       onChange={(e) => void setImpersonate(e.target.checked)}
                     />
-                    用真实 BoringSSL 出站（浏览器系握手，非逐字节 Chrome）
+                    用逐字节 Chrome 出站（wreq：真实 BoringSSL + Chrome h2 伪头顺序）
                   </label>
                 ) : null}
                 <p className="hint">
                   {outboundTls?.impersonateRequested ? (
                     <>
-                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：真实
-                      BoringSSL 握手，比 rustls 更接近浏览器。但这版 BoringSSL 缺 ALPS / ECH
-                      扩展与 MLKEM768 曲线，JA4 落在 <code>t13d1513h2</code> 而非 Chrome 151 的
-                      <code>t13d1516h2</code>，所以 <strong>ja3Parity=
-                      {String(outboundTls?.ja3Parity ?? false)}</strong>、supportsFullBrowserJa3=
-                      {String(outboundTls?.supportsFullBrowserJa3 ?? false)}。
+                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：wreq
+                      逐字节 Chrome —— TLS JA4 <code>t13d1516h2</code>（16 扩展,含 ALPS/ECH/后量子
+                      曲线),HTTP/2 伪头顺序 <code>m,a,s,p</code>,与真 Chrome 一致。
+                      <strong>
+                        {" "}
+                        supportsFullBrowserJa3=
+                        {String(outboundTls?.supportsFullBrowserJa3 ?? false)}、ja3Parity=
+                        {String(outboundTls?.ja3Parity ?? false)}
+                      </strong>
+                      。
                       <br />
-                      对<strong>只拦已知脚本库</strong>（rustls/python/go）的站点足够；对
-                      <strong>按 JA4 严格匹配 Chrome</strong> 的风控（Cloudflare/Akamai）
-                      仍可能被拦——那需要 boring fork 或 curl-impersonate 达到逐字节对齐。
+                      按 JA4 / h2 指纹严格匹配 Chrome 的风控(Cloudflare/Akamai)应当放行。
+                      注意 wreq 整发整收原始请求,流式(SSE)/WebSocket 走 rustls 回退。
                     </>
                   ) : (
                     <>
-                      浏览器 JA3/JA4 逐字节对齐需要能发全套扩展的栈。当前 engine=
-                      {outboundTls?.engine ?? "rustls"}。版本预置仍会改变出站 ClientHello 的可测配方 / JA3。
+                      开启后出站握手切到 wreq(逐字节 Chrome)。当前 engine=
+                      {outboundTls?.engine ?? "rustls"}。版本预置仍会改变 rustls 路径的可测配方 / JA3。
                     </>
                   )}
                 </p>
