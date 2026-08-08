@@ -388,6 +388,30 @@ jobs:
               if ($signature.Status -ne "Valid") { throw "$($executable.Name) signature is $($signature.Status)" }
             }
           }
+          # Report what Authenticode found, in both modes. The check above only
+          # runs when signing was expected, so an unsigned build stated nothing
+          # at all while macOS stated its mode — a user comparing the two
+          # downloads had an answer for one and silence for the other. Read from
+          # the executables that are about to be zipped, not from what this
+          # branch assumes. Non-fatal: metadata must not fail a release.
+          try {
+            $statuses = [ordered]@{}
+            foreach ($executable in $executables) {
+              $statuses[$executable.Name] = (Get-AuthenticodeSignature $executable.FullName).Status.ToString()
+            }
+            $mode = if ($env:SHOWNET_SIGNED -eq "true") { "signed" } else { "unsigned" }
+            $report = [ordered]@{
+              mode = $mode
+              architecture = "x86_64"
+              executables = $statuses
+              note = "Status read from Get-AuthenticodeSignature"
+            }
+            $reportPath = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/release-verification-windows.json"
+            $report | ConvertTo-Json -Depth 3 | Set-Content -Path $reportPath -Encoding utf8
+            Get-Content $reportPath
+          } catch {
+            Write-Host "release-verification-windows.json skipped: $_"
+          }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $archive = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable_${version}_windows_x86_64.zip"
           Compress-Archive -Path $portableRoot -DestinationPath $archive -CompressionLevel Optimal -Force
@@ -399,6 +423,7 @@ jobs:
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/*.zip
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/*.zip.sha256
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/release-verification-windows.json
           if-no-files-found: error
 
   publish:
