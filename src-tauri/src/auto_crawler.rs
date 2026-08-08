@@ -1454,7 +1454,11 @@ function dynamicFields(domain, path, headers) {{
   if (!Object.keys(steps).length) return [{{}}, "env"];
   const request = {{ method: "GET", host: domain, path, query: null, headers, body: null }};
   const out = {{}};
-  for (const [name, step] of Object.entries(steps)) out[name] = step(request);
+  // Indexed rather than destructured from Object.entries: that yields {{}} for
+  // each value, and calling it is the one thing tsc rejects in this file, which
+  // is otherwise the JavaScript client with ESM imports rather than typed
+  // TypeScript. Valid in both, so there is no language-specific branch here.
+  for (const name of Object.keys(steps)) out[name] = steps[name](request);
   return [out, "reconstructed"];
 }}
 
@@ -3150,6 +3154,56 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
             }
         }
         None
+    }
+
+    #[test]
+    fn typescript_crawler_is_the_javascript_one_and_still_typechecks() {
+        // tsc rejected the .ts client at one line: destructuring
+        // Object.entries(steps) types each value as {} and calling it is
+        // TS2349. Found by compiling the export — the package advertises a
+        // TypeScript client and shipped one that does not build.
+        let storage = storage();
+        let sid = scorecard::seed_scorecard_fixture(&storage).expect("seed");
+        let client = |language: &str| {
+            build_auto_crawler(&storage, &sid, language)
+                .expect("build")
+                .files
+                .into_iter()
+                .find(|file| file.role == "auto-crawler-client")
+                .expect("package must carry a client")
+                .content
+        };
+
+        let js = client("javascript");
+        let ts = client("typescript");
+        for source in [&js, &ts] {
+            assert!(
+                !source.contains("Object.entries(steps)"),
+                "the value is typed {{}} there, and calling it is what tsc refuses"
+            );
+            assert!(source.contains("Object.keys(steps)"));
+        }
+
+        // What "typescript" means here: the same client with an ESM import, not
+        // a typed rewrite. Stated as a test so the difference cannot grow
+        // silently — anything more than the import line needs its own check.
+        let differing: Vec<(&str, &str)> = js
+            .lines()
+            .zip(ts.lines())
+            .filter(|(left, right)| left != right)
+            .collect();
+        assert_eq!(
+            js.lines().count(),
+            ts.lines().count(),
+            "line counts diverged"
+        );
+        assert_eq!(
+            differing.len(),
+            1,
+            "expected only the import to differ, got {differing:?}"
+        );
+        assert!(differing[0].0.contains("require(\"fs\")"));
+        assert!(differing[0].1.contains("import * as fs"));
     }
 
     #[test]
