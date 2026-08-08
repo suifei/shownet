@@ -841,6 +841,17 @@ fn render_agent_algorithms_python(verified_steps: &[(&str, &str, &str)]) -> Stri
     out
 }
 
+/// Declared wherever the TypeScript package annotates AGENT_STEPS with it,
+/// which is both the empty and the populated shape.
+const AGENT_STEP_INPUT_TYPE: &str = "export type AgentStepInput = {\n\
+                                     \x20 method: string;\n\
+                                     \x20 host: string;\n\
+                                     \x20 path: string;\n\
+                                     \x20 query: string | null;\n\
+                                     \x20 headers: Record<string, string>;\n\
+                                     \x20 body: string | null;\n\
+                                     };\n\n";
+
 fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &str) -> String {
     let typed = language == "typescript";
     let registry_type = if typed {
@@ -849,8 +860,15 @@ fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &
         ""
     };
     if verified_steps.is_empty() {
+        // The declaration below sits after this return, so the empty package
+        // annotated AGENT_STEPS with a name it never declared and tsc rejected
+        // replay.ts outright. Emitting no step is the ordinary outcome — most
+        // captures verify none — so this was the common shape of the package,
+        // not an edge case.
+        let declaration = if typed { AGENT_STEP_INPUT_TYPE } else { "" };
         return format!(
-            "// (no agent-written step passed verification against this capture)\n\
+            "{declaration}\
+             // (no agent-written step passed verification against this capture)\n\
              export const AGENT_STEPS{registry_type} = {{}};\n"
         );
     }
@@ -876,15 +894,7 @@ fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &
     if typed {
         out = out.replace(
             "const shownet = {",
-            "export type AgentStepInput = {\n\
-             \x20 method: string;\n\
-             \x20 host: string;\n\
-             \x20 path: string;\n\
-             \x20 query: string | null;\n\
-             \x20 headers: Record<string, string>;\n\
-             \x20 body: string | null;\n\
-             };\n\n\
-             const shownet = {",
+            &format!("{AGENT_STEP_INPUT_TYPE}const shownet = {{"),
         );
     }
 
@@ -2393,6 +2403,51 @@ const difficulty=1; const t="awswaf";
     fn rejects_unknown_language() {
         let err = normalize_language("brainfuck").unwrap_err();
         assert!(err.contains("不支持的重播语言"));
+    }
+
+    #[test]
+    fn typescript_replay_declares_the_type_it_annotates() {
+        // The package shipped `AGENT_STEPS: Record<string, (request:
+        // AgentStepInput) => string>` while the declaration of AgentStepInput
+        // lived past an early return taken whenever no agent step verified —
+        // the ordinary outcome — so tsc rejected replay.ts with TS2304. Caught
+        // by compiling the export, not by reading it: every other language in
+        // the package built cleanly.
+        let storage = storage();
+        let session = storage.create_session(Some("ts-types".into())).unwrap();
+        let sid = session.id.clone();
+        let mut sensor = base(&sid, "www.example.com", "/_bm/sensor");
+        sensor.method = "POST".into();
+        sensor.request_body = Some(r#"{"sensor_data":"1"}"#.into());
+        storage.store_request(sensor).unwrap();
+
+        let package = build_algorithm_replay(&storage, &sid, "typescript").unwrap();
+        let replay = package
+            .files
+            .iter()
+            .find(|file| file.name == "replay.ts")
+            .expect("typescript package must carry replay.ts");
+        assert!(
+            replay.content.contains("AgentStepInput"),
+            "fixture no longer annotates with AgentStepInput, so it checks nothing"
+        );
+        assert_eq!(
+            replay.content.matches("export type AgentStepInput").count(),
+            1,
+            "replay.ts must declare AgentStepInput exactly once, not zero or twice"
+        );
+
+        // The JavaScript package is untyped and must stay free of the annotation.
+        let js = build_algorithm_replay(&storage, &sid, "javascript").unwrap();
+        let js_replay = js
+            .files
+            .iter()
+            .find(|file| file.name == "replay.js")
+            .expect("javascript package must carry replay.js");
+        assert!(
+            !js_replay.content.contains("AgentStepInput"),
+            "the untyped package picked up a TypeScript annotation"
+        );
     }
 
     #[test]
