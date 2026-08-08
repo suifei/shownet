@@ -51,6 +51,12 @@ jobs:
       - run: npm run check:release
       - run: npm run build
       - run: npm test
+      # 360 assertions across three viewports in about three minutes. Added
+      # after this suite — which had never run in CI — caught a real regression
+      # the moment it was run by hand: a toolbar button whose label collapsed to
+      # one character per line. The config starts its own dev server.
+      - run: npx playwright install chromium
+      - run: npm run test:browser
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
