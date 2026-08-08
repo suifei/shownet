@@ -32,5 +32,10 @@ export default defineConfig({
     // The narrow layout has its own rules; several of them were only ever
     // eyeballed.
     { name: "narrow", use: { viewport: { width: 900, height: 800 } } },
+    // The smallest window the app itself permits — tauri.conf.json sets
+    // minWidth 1080 and minHeight 680. Neither dimension was covered: desktop
+    // and narrow bracket it without landing on it, and 680 is shorter than
+    // either. This is the tightest layout a user can actually produce.
+    { name: "minimum", use: { viewport: { width: 1080, height: 680 } } },
   ],
 });
