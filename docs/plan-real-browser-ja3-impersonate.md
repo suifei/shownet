@@ -276,13 +276,23 @@ Android 上「接近浏览器 JA3」至少分三类：
   | PRIORITY 帧 | 无 | 无 | 一致 |
   | 伪头顺序 | `method,authority,scheme,path`(实测) | `method,scheme,authority,path`(h2 源码 `frame/headers.rs`) | 顺序不同 |
 
-  `MAX_CONCURRENT_STREAMS` 原本我方多发一项,已停发(Chrome 不发它)。
+  **SETTINGS 已完全对齐,且未使用打补丁的 h2。** 我方原本多发两项:
+  `MAX_CONCURRENT_STREAMS` 是自己设的,停设即可;`MAX_FRAME_SIZE` 是
+  hyper 默认 `Some(16384)` 并宣告的 —— `max_frame_size` 的签名是
+  `impl Into<Option<u32>>`,而 `proto/h2/client.rs` 只在 `if let Some(max)`
+  时转发,所以传 `None` 就不上线。行为不变:不宣告即用协议默认值,正是
+  原先宣告的 16384。
 
-  **剩余两项差异都需要改 h2 本身**:让 `MAX_FRAME_SIZE` 可省略,以及调换
-  伪头编码顺序。补丁本身十余行,但 h2 0.4.15 是 52 文件 3 万余行、且是
-  hyper 的传递依赖,只能用 `[patch.crates-io]` 接管 —— 意味着长期自行跟进
-  其安全更新(h2 有过 Rapid Reset 类 CVE)。**这是"要不要维护一个 HTTP/2
-  实现"的取舍,不是补丁大小的取舍。**
+  **剩余差异只有伪头顺序一项,且已确认无法通过配置解决**:h2 的 `Pseudo`
+  是具名字段结构体而非有序容器,顺序完全来自 `frame/headers.rs` 中 `Iter`
+  的 `if let` 先后;全 crate 无任何 `pseudo order` / `header_order` 配置。
+  改它必须 `[patch.crates-io]` 接管 h2 0.4.15(52 文件、3 万余行、hyper
+  的传递依赖),意味着长期自行跟进其安全更新(h2 有过 Rapid Reset 类
+  CVE)。
+
+  **为一项差异接管一个 HTTP/2 实现,当前判断是不划算** —— 但这是取舍,
+  不是技术障碍。若要做,验收标准已经就位:用本节的探针重抓一次,伪头顺序
+  应变为 `method,authority,scheme,path`。
 
   另注:`impersonate-boring` 目前是空 feature,不链接任何 BoringSSL 栈,
   因此没有现成的 impersonation 依赖可顺带提供已打补丁的 h2。
