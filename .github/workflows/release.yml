@@ -54,6 +54,11 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
+      # Its own crate, so the line above never reached it: the portable
+      # launcher's test had never run in CI. It is what a Windows user
+      # double-clicks, and its one test covers the layout decision that keeps
+      # application and user data inside the portable root.
+      - run: cargo test --manifest-path packaging/windows/launcher/Cargo.toml
       - run: npm run test:rust:network
       - run: npm run tauri -- build --debug --no-bundle
 
