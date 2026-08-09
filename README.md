@@ -82,6 +82,35 @@ Python 包,所以 `fingerprint.py` 记录目标 JA3、由 `curl_cffi` 的 impers
 加解密只写入**用抓包里的真实值执行并复现成功**的步骤;仅被识别、未能复现的只列名不生成代码——
 一个「几乎对」的签名和没有签名一样会失败,而且失败得更不明显。
 
+#### 逐字节 Chrome 出站,而且这次真的装进了安装包(0.4.14 新增)
+
+安装包现在链接 **wreq**(自带 BoringSSL + Chrome 伪头顺序的 h2),出站握手不再是 rustls 近似。
+在此之前这个开关是**空的**:feature 默认关闭且没有任何打包命令开启它,所以用户把
+「逐字节 Chrome 出站」打开、配置里写下 `impersonate: true`,线上走的仍是 rustls——
+一次真实会话里入站 JA4 是 `t13d1516h2_8daaf6152771_d8a2da3f94cd`,出站从未与之相符。
+现在同一站点实测两侧相同:
+
+```
+engine=impersonate
+ja4 in  t13d1516h2_8daaf6152771_d8a2da3f94cd
+ja4 out t13d1516h2_8daaf6152771_d8a2da3f94cd
+```
+
+对比的是 **JA4 而不是 JA3**:JA3 覆盖 Chrome 每条连接随机化的 GREASE 值,
+一次页面加载里量到 16 个互不相同的入站 JA3 对应同一个 JA4。指纹面板据此改为记录出站 JA4,
+一致性从「声明」变成「比对」。流式(SSE)与 WebSocket 仍走 rustls 回退。
+
+#### 抓包浏览器不再自报无头(0.4.14 新增)
+
+原先只有渲染器级的 CDP 覆盖,它只作用于所附着的那个页面:一次真实会话里主文档被改写,
+而 **17,763 条子资源与 worker 请求仍向源站发送 `HeadlessChrome/151`**。改为启动参数级覆盖后没有接缝——
+自动化测试对同一站点实测,去掉修复是 726/726 条泄露,修复后 0/675。
+
+同时修正 **WebSocket over HTTP/2**:浏览器按 RFC 8441 发起的扩展 CONNECT 不携带
+`Sec-WebSocket-Key`(h2 流本身即握手),而代理把它降级成 RFC 6455 升级时没有补上,
+源站一律回 `400 Missing or invalid Sec-WebSocket-Key header`——轮询能通、WebSocket 全废,
+所以看起来像站点问题。同一会话里该端点 16,548 条轮询成功、2,368 条升级失败。
+
 ---
 
 ## 先看教程视频
@@ -241,7 +270,7 @@ Android 也可用「设备证书与代理」由电脑协助推送证书与代理
 
 - 显式 HTTP 代理默认 `127.0.0.1:8888`；可选私有局域网监听与设备二维码  
 - 上游直连 / HTTP / HTTPS / SOCKS5；系统代理可选接管并自动恢复  
-- HTTPS HTTP/1.1 与 HTTP/2 MITM；入站 JA3/JA4、出站版本化 ClientHello 预置（rustls 配方，**不宣称**位级浏览器 JA3 克隆，见 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)）  
+- HTTPS HTTP/1.1 与 HTTP/2 MITM；入站 JA3/JA4、出站版本化 ClientHello 预置。默认 rustls 配方（**不宣称**位级浏览器 JA3 克隆）；开启「逐字节 Chrome 出站」后走 wreq，出站 JA4 与抓包浏览器实测相同，见 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)  
 - WebSocket / SSE 有序有界捕获与专用检视  
 - MITM 高级控制台：阶段工作流、指纹、PX 证据、预置选择、抓包/分析能力表  
 - Agent 自动取证：TLS 指纹、出站 TLS 状态、PX 证据/结构解码（只读，诚实边界内）  
