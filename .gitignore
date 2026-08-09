@@ -27,3 +27,4 @@ tools/utls-chrome-dial/utls-chrome-dial
 
 test-results/
 playwright-report/
+src-tauri/templates/python/__pycache__/
