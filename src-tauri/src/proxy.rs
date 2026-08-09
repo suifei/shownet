@@ -14,7 +14,7 @@ use crate::models::{
     EffectiveUpstreamProxy, HeaderEntry, UpstreamProbeResult,
 };
 use crate::tls_fingerprint::{
-    mitm_fingerprint, mitm_fingerprint_with_selection, read_client_hello, tunnel_fingerprint,
+    mitm_fingerprint_with_selection, read_client_hello, tunnel_fingerprint,
 };
 use crate::tls_interception::TlsInterceptionDecision;
 use crate::tls_outbound::{self, OutboundTlsProfile};
@@ -2719,6 +2719,24 @@ async fn forward_mitm_https(
             parts
                 .headers
                 .insert("upgrade", HeaderValue::from_static("websocket"));
+            // RFC 8441 carries no Sec-WebSocket-Key — the h2 stream itself proves
+            // the handshake, so the browser never sends one. RFC 6455 requires it,
+            // and this is the line that turns one into the other, so the key has to
+            // be minted here. Without it the origin answers 400 "Missing or invalid
+            // Sec-WebSocket-Key header" and every WebSocket a captured page opens
+            // fails while its polling fallback keeps working — measured on one real
+            // session as 2,368 failed upgrades against 16,548 successful polls.
+            //
+            // Any 16 random bytes are a valid key; a v4 UUID is exactly that, and
+            // the response's Sec-WebSocket-Accept is not checked against it because
+            // the inbound half is h2, where the accept value has no meaning and is
+            // stripped from the 200 below.
+            if !parts.headers.contains_key("sec-websocket-key") {
+                let key = STANDARD.encode(Uuid::new_v4().as_bytes());
+                if let Ok(value) = HeaderValue::from_str(&key) {
+                    parts.headers.insert("sec-websocket-key", value);
+                }
+            }
         }
         if websocket {
             parts.headers.remove("sec-websocket-extensions");
@@ -2818,6 +2836,11 @@ async fn forward_mitm_https(
             let outbound_upgrade = hyper::upgrade::on(&mut response);
             if extended_websocket {
                 *response.status_mut() = StatusCode::OK;
+                // Answers the key minted for the downgraded h1 handshake, and
+                // means nothing on an h2 stream — RFC 8441 defines no accept
+                // value. Forwarding it would hand the browser a header its own
+                // request never asked for.
+                response.headers_mut().remove("sec-websocket-accept");
                 strip_http2_forbidden_headers(response.headers_mut());
             }
             let response_headers = headers_to_entries(response.headers());
@@ -6218,7 +6241,10 @@ mod tests {
     }
 
     fn test_tls_fingerprint() -> crate::tls_fingerprint::TlsFingerprintRecord {
-        mitm_fingerprint(crate::tls_fingerprint::ClientTlsFingerprint {
+        // Qualified rather than imported at the top of the file: this is its only
+        // caller and it lives in the test module, so a top-level `use` reads as a
+        // production dependency and warns as unused in the lib build.
+        crate::tls_fingerprint::mitm_fingerprint(crate::tls_fingerprint::ClientTlsFingerprint {
             ja3: "test-ja3".to_string(),
             ja3_raw: "771,4865,,,".to_string(),
             ja4: "test-ja4".to_string(),
@@ -8095,12 +8121,34 @@ mod tests {
             let service = service_fn(move |mut request: Request<Incoming>| {
                 let upstream_seen_sink = upstream_seen_sink.clone();
                 async move {
+                    // RFC 6455 requires Sec-WebSocket-Key on the handshake, and a
+                    // real origin answers 400 without it. An earlier version of
+                    // this fake accepted the upgrade unconditionally, so the
+                    // downgrade from RFC 8441 shipped without minting a key and
+                    // every real WebSocket failed while this test stayed green.
+                    let key_is_valid = request
+                        .headers()
+                        .get("sec-websocket-key")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| STANDARD.decode(value).ok())
+                        .is_some_and(|bytes| bytes.len() == 16);
                     upstream_seen_sink.lock().unwrap().push((
                         request.method().clone(),
                         request.version(),
                         request.uri().path().to_string(),
                         is_websocket_upgrade(request.headers()),
+                        key_is_valid,
                     ));
+                    if !key_is_valid {
+                        return Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Full::new(Bytes::from_static(
+                                    b"Missing or invalid Sec-WebSocket-Key header",
+                                )))
+                                .unwrap(),
+                        );
+                    }
                     let on_upgrade = hyper::upgrade::on(&mut request);
                     tokio::spawn(async move {
                         let upgraded = on_upgrade.await.unwrap();
@@ -8255,7 +8303,12 @@ mod tests {
             .version(Version::HTTP_2)
             .uri("https://example.test/socket?q=1")
             .header("sec-websocket-version", "13")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            // No sec-websocket-key, because RFC 8441 has none: the h2 stream
+            // itself is the handshake. Chrome's real extended CONNECT was
+            // captured and carries only version, protocol and the ordinary
+            // headers. This fixture used to send one anyway, which let the
+            // downgrade below reach the origin keyless while the test stayed
+            // green — the fixture was the reason the bug was invisible.
             .header("sec-websocket-protocol", "shownet-test")
             .body(Full::new(Bytes::new()))
             .unwrap();
@@ -8328,6 +8381,11 @@ mod tests {
         assert_eq!(upstream_seen[0].1, Version::HTTP_11);
         assert_eq!(upstream_seen[0].2, "/socket");
         assert!(upstream_seen[0].3);
+        assert!(
+            upstream_seen[0].4,
+            "the h1 handshake reached the origin without a valid Sec-WebSocket-Key; \
+             RFC 8441 does not carry one, so the downgrade has to mint it"
+        );
         drop(upstream_seen);
         assert_eq!(shared_seen.lock().unwrap().as_slice(), ["/after-websocket"]);
 
