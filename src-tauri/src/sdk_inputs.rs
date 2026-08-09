@@ -185,14 +185,19 @@ pub struct CurationDrop {
 /// — captures change between the proposal and the decision — but it is recorded
 /// rather than ignored.
 pub fn apply_curation(model: &mut EndpointModel, curation: &SdkCuration) {
-    let present: std::collections::BTreeSet<String> = model
-        .endpoints
-        .iter()
-        .map(|endpoint| endpoint.operation_id.clone())
-        .collect();
+    // An agent reads the generated client, where operations are snake_case
+    // method names, but the model keys them camelCase. Requiring the caller to
+    // know that conversion is a trap with no error: the first curation written
+    // against the method names matched nothing, changed nothing, and the export
+    // reported success. Accept either spelling.
+    let matches = |endpoint: &crate::endpoint_model::Endpoint, wanted: &str| {
+        endpoint.operation_id == wanted
+            || crate::sdk_build::snake_case(&endpoint.operation_id) == wanted
+    };
+    let present = |wanted: &str| model.endpoints.iter().any(|e| matches(e, wanted));
 
     for drop in &curation.drop {
-        if present.contains(&drop.operation_id) {
+        if present(&drop.operation_id) {
             model.gaps.push(crate::endpoint_model::Gap {
                 kind: crate::endpoint_model::GapKind::CuratedOut,
                 operation_id: drop.operation_id.clone(),
@@ -200,17 +205,19 @@ pub fn apply_curation(model: &mut EndpointModel, curation: &SdkCuration) {
             });
         }
     }
-    let dropped: std::collections::BTreeSet<&str> = curation
-        .drop
-        .iter()
-        .map(|drop| drop.operation_id.as_str())
-        .collect();
-    model
-        .endpoints
-        .retain(|endpoint| !dropped.contains(endpoint.operation_id.as_str()));
+    model.endpoints.retain(|endpoint| {
+        !curation
+            .drop
+            .iter()
+            .any(|drop| matches(endpoint, &drop.operation_id))
+    });
 
     for endpoint in &mut model.endpoints {
-        if let Some(name) = curation.rename.get(&endpoint.operation_id) {
+        if let Some(name) = curation.rename.get(&endpoint.operation_id).or_else(|| {
+            curation
+                .rename
+                .get(&crate::sdk_build::snake_case(&endpoint.operation_id))
+        }) {
             endpoint.operation_id = name.clone();
         }
     }
@@ -483,6 +490,34 @@ mod curation_tests {
         );
     }
 
+    /// The trap this cost an hour to find: an agent curates against the method
+    /// names it can see in the generated client, which are snake_case, while the
+    /// model keys operations camelCase. A curation written the readable way
+    /// matched nothing, removed nothing, and the export still reported success.
+    #[test]
+    fn a_decision_written_against_the_generated_method_name_still_applies() {
+        let mut surface = EndpointModel {
+            endpoints: vec![endpoint("getShieldVerify")],
+            ..model()
+        };
+        apply_curation(
+            &mut surface,
+            &SdkCuration {
+                drop: vec![CurationDrop {
+                    // What the client calls it.
+                    operation_id: "get_shield_verify".into(),
+                    reason: "HTML 过渡页,不是接口".into(),
+                }],
+                rename: BTreeMap::new(),
+            },
+        );
+        assert!(
+            surface.endpoints.is_empty(),
+            "the snake_case spelling has to reach the camelCase operation"
+        );
+        assert_eq!(surface.gaps.len(), 1, "and still leave its reason behind");
+    }
+
     #[test]
     fn renaming_replaces_the_generated_name() {
         let mut surface = model();
@@ -526,7 +561,22 @@ mod real_session_tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).expect("output dir");
 
-        let result = super::export(&storage, &session, Some(&out), None).expect("export");
+        // SHOWNET_CURATION points at the decision document an agent produced, so
+        // the same test covers both halves: the raw proposal, and the proposal
+        // with judgement applied.
+        let curation: Option<super::SdkCuration> = std::env::var("SHOWNET_CURATION")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"));
+                serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {path}: {error}"))
+            });
+        if curation.is_some() {
+            eprintln!("SDK applying a curation document");
+        }
+        let result =
+            super::export(&storage, &session, Some(&out), curation.as_ref()).expect("export");
         eprintln!(
             "SDK dir={} files={} bytes={}",
             result.directory,
