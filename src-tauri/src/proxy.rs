@@ -12037,6 +12037,24 @@ mod tests {
             }
         }
 
+        // Whether the page actually rendered, which the request log alone cannot
+        // say: a site can fetch every asset successfully and still show nothing
+        // if one of them fails in a way its framework catches during render.
+        // Measured here as the search form the site's own home page builds.
+        let rendered = bus
+            .evaluate(
+                "JSON.stringify({inputs: document.querySelectorAll('input').length, \
+                 rootKids: document.getElementById('root') ? \
+                 document.getElementById('root').children.length : -1, \
+                 text: (document.body ? document.body.innerText.length : 0)})",
+                false,
+            )
+            .await;
+        match &rendered {
+            Ok(value) => eprintln!("LIVE_CAPTURE   rendered: {:?}", value.value),
+            Err(error) => eprintln!("LIVE_CAPTURE   rendered: (evaluate failed: {error})"),
+        }
+
         let seen = captured.lock().unwrap().clone();
         browser.stop().await;
         let _ = std::fs::remove_dir_all(&data_dir);
