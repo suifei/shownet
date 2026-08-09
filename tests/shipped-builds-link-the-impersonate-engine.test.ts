@@ -54,12 +54,15 @@ describe("shipped builds link the impersonate engine", () => {
     // it as one command is also what a shell does.
     const joined = workflow.replace(/\\\n\s*/g, " ");
 
-    // `tauri ... build` lines are the ones that compile the shipped binary;
-    // --debug builds and bundling-only steps are not what users install.
+    // Every `tauri ... build`, including the gate's --debug one. That build is
+    // not shipped, but it writes the same target/debug/shownet a developer runs,
+    // so a featureless build there silently replaces a feature build — and the
+    // two binaries look identical. Requiring the feature everywhere removes the
+    // trap rather than documenting it.
     const builds = joined
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => /tauri\s+--\s+build/.test(line) && !line.includes("--debug"));
+      .filter((line) => /tauri\s+--\s+build/.test(line));
 
     assert.ok(builds.length >= 2, `expected the macOS and Windows release builds, saw ${builds.length}`);
     const bare = builds.filter((line) => !line.includes(FEATURE));

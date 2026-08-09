@@ -92,7 +92,12 @@ jobs:
       # application and user data inside the portable root.
       - run: cargo test --manifest-path packaging/windows/launcher/Cargo.toml
       - run: npm run test:rust:network
-      - run: npm run tauri -- build --debug --no-bundle
+      # Carries the feature for two reasons. It is what ships, so "the app
+      # builds" should mean the shipped configuration builds. And the output
+      # path is the same target/debug/shownet a developer runs locally — a
+      # featureless build here silently replaces a feature build there, and the
+      # two are indistinguishable by eye. That cost real debugging time.
+      - run: npm run tauri -- build --debug --no-bundle -- --features impersonate-boring
 
   # ─── Release builds (tag v* or manual dispatch) ───────────────────────────
   release-macos:
