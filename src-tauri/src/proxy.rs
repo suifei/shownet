@@ -2676,7 +2676,7 @@ async fn forward_mitm_https(
         // protocol, or from the shared connection while sending on a dedicated
         // one, produces a request the origin rejects outright.
         let mut dedicated_sender = if use_dedicated {
-            Some(dedicated_sender_factory(dedicated_route).await?)
+            Some(dedicated_sender_factory(dedicated_route.clone()).await?)
         } else {
             None
         };
@@ -2768,6 +2768,10 @@ async fn forward_mitm_https(
             extended_websocket,
         );
         runtime_request.request_headers = request_headers.clone();
+        // Decided before the body is consumed by TapBody below; the retry needs
+        // to know whether the request can be rebuilt, and by then it cannot ask.
+        let replay = replayable_over_http11(&parts, &editable_request_body)
+            .then(|| (parts.method.clone(), parts.uri.clone(), parts.headers.clone()));
         let request_capture = Arc::new(StdMutex::new(None));
         let request_capture_sink = request_capture.clone();
         let request_body = TapBody::new(
@@ -2781,14 +2785,62 @@ async fn forward_mitm_https(
         )
         .with_rate_limit(control.upload_bytes_per_second);
         let outbound_request = Request::from_parts(parts, request_body);
-        let mut response = match (dedicated_sender.as_mut(), shared_guard.as_mut()) {
+        let mut result = match (dedicated_sender.as_mut(), shared_guard.as_mut()) {
             (Some(dedicated), _) => dedicated.send_request(outbound_request).await,
             (None, Some(shared)) => shared.send_request(outbound_request).await,
             // `use_dedicated` decides which of the two is Some, so neither being
             // set cannot happen. Stated rather than faked with an error value
             // built from a handshake that would actually succeed.
             (None, None) => unreachable!("a sender is always selected"),
+        };
+
+        // Remembering the refusal only helps the *next* request, and a stylesheet
+        // has no next request: measured on lionairthai, fonts.googleapis.com
+        // refused our h2, the 502 rejected the page's CSS preload, React Router
+        // caught the rejection during render, and #root stayed empty. Every other
+        // asset on that load was 200. So retry this one over HTTP/1.1 rather than
+        // leaving the caller a 502 and a lesson for later.
+        if result.is_err()
+            && outbound_is_http2
+            && replay.is_some()
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(looks_like_origin_http2_refusal)
+        {
+            let (method, uri, headers) = replay.expect("checked above");
+            let http11_route = DedicatedRequestRoute {
+                prefer_http2: false,
+                ..dedicated_route.clone()
+            };
+            match dedicated_sender_factory(http11_route).await {
+                Ok(mut h1) => {
+                    // h1 wants origin-form; the h2 attempt rewrote it to absolute.
+                    let mut retry = Request::builder()
+                        .method(method)
+                        .uri(origin_form_uri(&uri).unwrap_or(uri))
+                        .version(Version::HTTP_11);
+                    if let Some(map) = retry.headers_mut() {
+                        *map = headers;
+                    }
+                    if let Ok(request) = retry.body(TapBody::new(
+                        full_body(Bytes::new()),
+                        MAX_CAPTURED_WIRE_BYTES,
+                        |_| {},
+                    )) {
+                        if let Ok(response) = h1.send_request(request).await {
+                            result = Ok(response);
+                            dedicated_sender = Some(h1);
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("http/1.1 retry could not connect to {host}: {error}");
+                }
+            }
         }
+
+        let mut response = result
         .map_err(|error| {
             // Some origins fingerprint the HTTP/2 connection itself and refuse
             // ours, which surfaces here as a bare protocol error. Remember the
@@ -5438,6 +5490,25 @@ fn ensure_host_header(
 /// So a close, an incomplete message, a cancellation, a user error and plain I/O
 /// (a dropped Wi-Fi link, a VPN toggle, sleep/wake) are all excluded. What
 /// remains is a protocol-level complaint, and even then it takes more than one.
+/// Whether a request that failed on h2 may be sent again over HTTP/1.1.
+///
+/// Conservative on purpose: a replay must be safe to run twice, and the body has
+/// already been consumed by the first attempt, so only a bodyless request can be
+/// rebuilt faithfully. That still covers the case this exists for — stylesheets,
+/// scripts and images, where one failure is fatal to the render and the browser
+/// never asks again.
+fn replayable_over_http11(parts: &hyper::http::request::Parts, body: &EditableRequestBody) -> bool {
+    let idempotent = matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
+    let declared_empty = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_none_or(|length| length == 0);
+    let no_captured_body = body.text.as_ref().is_none_or(|text| text.is_empty());
+    idempotent && declared_empty && no_captured_body
+}
+
 fn looks_like_origin_http2_refusal(error: &BoxError) -> bool {
     // Only a hyper error can be an origin h2 refusal; a wreq error is not, and
     // wreq manages its own protocol negotiation anyway.
