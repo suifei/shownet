@@ -1126,12 +1126,37 @@ pub fn extra_write_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         tool(
             "shownet_build_sdk",
-            "把一次抓包归纳成端点并生成 Python API SDK（curl_cffi + 指纹自检 + 已验证的加解密）；未经抓包证实的部分写入 GAPS.md 而不是省略。是否可用由用户的 MCP 写入设置决定",
+            "把一次抓包归纳成端点并生成 Python API SDK（curl_cffi + 指纹自检 + 已验证的加解密）；未经抓包证实的部分写入 GAPS.md 而不是省略。\n\n不带 curation 时返回的是原始提议：抓包里所有看起来像接口的东西，包括风控、埋点、CDN 探针。哪些属于这个站点的 API 是关于站点的判断，本工具不替你做——把厂商路径写进软件只会在下一个没人见过的厂商面前失效。\n\n建议先不带 curation 调一次拿到提议，用 shownet_get_request / shownet_list_requests 看证据，再带 curation 调一次。drop 的每一条都要写 reason，它会进 GAPS.md 供人复核。是否可用由用户的 MCP 写入设置决定",
             json!({
                 "type": "object",
                 "properties": {
                     "sessionId": { "type": "string" },
-                    "outputDir": { "type": "string" }
+                    "outputDir": { "type": "string" },
+                    "curation": {
+                        "type": "object",
+                        "description": "对提议出来的接口面的判断。缺省表示照单全收。",
+                        "properties": {
+                            "drop": {
+                                "type": "array",
+                                "description": "判定不属于本 API 的操作。每条都要给理由——理由会写进 GAPS.md，读的人可以不同意。",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "operationId": { "type": "string" },
+                                        "reason": { "type": "string" }
+                                    },
+                                    "required": ["operationId", "reason"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "rename": {
+                                "type": "object",
+                                "description": "给生成名字不可用的操作改名，键是 operationId。",
+                                "additionalProperties": { "type": "string" }
+                            }
+                        },
+                        "additionalProperties": false
+                    }
                 },
                 "required": ["sessionId"],
                 "additionalProperties": false
@@ -1448,7 +1473,23 @@ fn build_sdk_tool(state: &AppState, arguments: &Value) -> Result<Value, String> 
             return Err("outputDir 不能包含 ..".to_string());
         }
     }
-    let result = crate::sdk_inputs::export(&state.storage, &session_id, output_dir.as_deref())?;
+    // The agent's judgement about the surface, if it made one. Absent, the
+    // export is the raw proposal — the deterministic layer never decides on its
+    // own which endpoints are "the API", because that answer is about the site
+    // and would otherwise have to be a vendor list compiled into the binary.
+    let curation: Option<crate::sdk_inputs::SdkCuration> = match arguments.get("curation") {
+        Some(value) if !value.is_null() => Some(
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("curation 结构无效: {error}"))?,
+        ),
+        _ => None,
+    };
+    let result = crate::sdk_inputs::export(
+        &state.storage,
+        &session_id,
+        output_dir.as_deref(),
+        curation.as_ref(),
+    )?;
     // The readiness goes back with the paths, so an agent reporting on this
     // has the gap count in hand and cannot describe a package with holes as a
     // finished SDK.

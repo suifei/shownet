@@ -165,6 +165,8 @@ pub enum GapKind {
     SingleSample,
     /// Traffic to a host outside the session's own site, left out of the SDK.
     OffSiteHost,
+    /// An agent judged this endpoint not to be part of the API and said why.
+    CuratedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

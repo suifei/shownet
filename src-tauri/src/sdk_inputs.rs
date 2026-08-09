@@ -10,6 +10,8 @@ use crate::endpoint_model::{build_endpoint_model, EndpointModel};
 use crate::sdk_build::{FingerprintContract, SdkInputs, VerifiedCryptoStep};
 use crate::storage::Storage;
 use crate::tls_outbound;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Which curl_cffi target stands in for a ShowNet ClientHello preset.
 ///
@@ -141,6 +143,79 @@ fn crypto_from_replay(
 }
 
 /// Everything the generator needs for one session.
+
+/// What an agent decided about a proposed API surface.
+///
+/// The deterministic layer proposes: it extracts endpoints, parameters and
+/// dataflow from a capture and says what it could not establish. It does not
+/// decide which of them are *the API*, because that judgement is about the site
+/// and belongs to whoever looked at it — not to a list of vendor paths compiled
+/// into the binary. `/cdn-cgi/…` is Cloudflare, `/_next/…` is Next.js, and the
+/// next capture will bring a vendor nobody here has heard of; a product that
+/// hardcodes them is a product that only works on sites someone already knew
+/// about.
+///
+/// So the decisions arrive as data, from an agent that read the evidence, and
+/// the same binary serves any capture. Absent, nothing is dropped: an export
+/// without curation is the raw proposal, which is what it has always been.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkCuration {
+    /// Operations to leave out, by operation id, each with the reason it was
+    /// left out. The reason is not decoration: it goes into GAPS.md, so a reader
+    /// can see what was excluded and disagree.
+    #[serde(default)]
+    pub drop: Vec<CurationDrop>,
+    /// Better names for operations whose generated name is unusable.
+    #[serde(default)]
+    pub rename: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurationDrop {
+    pub operation_id: String,
+    pub reason: String,
+}
+
+/// Applies an agent's decisions to a proposed surface.
+///
+/// Every drop becomes a gap, so the package always states what is missing from
+/// it. A curation that names an operation which does not exist is not an error
+/// — captures change between the proposal and the decision — but it is recorded
+/// rather than ignored.
+pub fn apply_curation(model: &mut EndpointModel, curation: &SdkCuration) {
+    let present: std::collections::BTreeSet<String> = model
+        .endpoints
+        .iter()
+        .map(|endpoint| endpoint.operation_id.clone())
+        .collect();
+
+    for drop in &curation.drop {
+        if present.contains(&drop.operation_id) {
+            model.gaps.push(crate::endpoint_model::Gap {
+                kind: crate::endpoint_model::GapKind::CuratedOut,
+                operation_id: drop.operation_id.clone(),
+                detail: drop.reason.clone(),
+            });
+        }
+    }
+    let dropped: std::collections::BTreeSet<&str> = curation
+        .drop
+        .iter()
+        .map(|drop| drop.operation_id.as_str())
+        .collect();
+    model
+        .endpoints
+        .retain(|endpoint| !dropped.contains(endpoint.operation_id.as_str()));
+
+    for endpoint in &mut model.endpoints {
+        if let Some(name) = curation.rename.get(&endpoint.operation_id) {
+            endpoint.operation_id = name.clone();
+        }
+    }
+}
+
 pub fn collect(storage: &Storage, session_id: &str) -> Result<(EndpointModel, SdkInputs), String> {
     let bundle = storage.export_session_bundle(session_id)?;
     let model = build_endpoint_model(&bundle);
@@ -222,7 +297,7 @@ mod tests {
             );
         }
 
-        let exported = export(&storage, &session.id, Some(std::path::Path::new("/private/tmp/claude-501/-Users-suifei-works-shownet/18a99b54-e55c-4d61-9804-0cf417ccc7dd/scratchpad/e2e")))
+        let exported = export(&storage, &session.id, Some(std::path::Path::new("/private/tmp/claude-501/-Users-suifei-works-shownet/18a99b54-e55c-4d61-9804-0cf417ccc7dd/scratchpad/e2e")), None)
             .expect("export");
         assert!(exported.readiness.endpoints_total >= 2, "{exported:?}");
         assert!(!exported.files.is_empty());
@@ -275,9 +350,13 @@ pub fn export(
     storage: &Storage,
     session_id: &str,
     output_dir: Option<&std::path::Path>,
+    curation: Option<&SdkCuration>,
 ) -> Result<SdkExportResult, String> {
     let session = storage.get_session(session_id)?;
-    let (model, inputs) = collect(storage, session_id)?;
+    let (mut model, inputs) = collect(storage, session_id)?;
+    if let Some(curation) = curation {
+        apply_curation(&mut model, curation);
+    }
     let package = crate::sdk_build::build_python_sdk(&model, &inputs);
 
     let directory = match output_dir {
@@ -312,6 +391,118 @@ pub fn export(
 }
 
 #[cfg(test)]
+mod curation_tests {
+    use super::*;
+    use crate::endpoint_model::{Endpoint, GapKind};
+
+    fn endpoint(id: &str) -> Endpoint {
+        Endpoint {
+            operation_id: id.to_string(),
+            method: "GET".into(),
+            server: "https://example.test".into(),
+            path_template: format!("/{id}"),
+            sample_count: 1,
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers: Vec::new(),
+            request_body: None,
+            responses: Vec::new(),
+            sample_paths: Vec::new(),
+        }
+    }
+
+    fn model() -> EndpointModel {
+        EndpointModel {
+            session_id: "s".into(),
+            servers: vec!["https://example.test".into()],
+            endpoints: vec![endpoint("get_api_orders"), endpoint("get_cdn_cgi_probe")],
+            gaps: Vec::new(),
+            request_count: 2,
+            skipped_count: 0,
+        }
+    }
+
+    /// Dropping is a decision someone made, so the package has to say it was
+    /// made. A quietly shorter SDK reads as "the capture contained this much",
+    /// which is a different and false claim.
+    #[test]
+    fn a_dropped_operation_leaves_a_gap_that_names_the_reason() {
+        let mut surface = model();
+        apply_curation(
+            &mut surface,
+            &SdkCuration {
+                drop: vec![CurationDrop {
+                    operation_id: "get_cdn_cgi_probe".into(),
+                    reason: "风控探针，不属于站点 API".into(),
+                }],
+                rename: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(surface.endpoints.len(), 1);
+        assert_eq!(surface.endpoints[0].operation_id, "get_api_orders");
+
+        let gap = surface
+            .gaps
+            .iter()
+            .find(|gap| gap.kind == GapKind::CuratedOut)
+            .expect("a drop must be recorded");
+        assert_eq!(gap.operation_id, "get_cdn_cgi_probe");
+        assert!(gap.detail.contains("风控探针"), "the reason must survive");
+    }
+
+    /// No curation is not the same as empty curation, and neither may invent a
+    /// judgement: the raw proposal is what the deterministic layer found.
+    #[test]
+    fn without_a_decision_nothing_is_removed() {
+        let mut surface = model();
+        apply_curation(&mut surface, &SdkCuration::default());
+        assert_eq!(surface.endpoints.len(), 2);
+        assert!(surface.gaps.is_empty());
+    }
+
+    /// Captures change between proposing and deciding. Naming something that is
+    /// no longer there is not an error, and must not drop a bystander.
+    #[test]
+    fn a_decision_about_an_operation_that_is_gone_changes_nothing() {
+        let mut surface = model();
+        apply_curation(
+            &mut surface,
+            &SdkCuration {
+                drop: vec![CurationDrop {
+                    operation_id: "get_something_else".into(),
+                    reason: "已不存在".into(),
+                }],
+                rename: BTreeMap::new(),
+            },
+        );
+        assert_eq!(surface.endpoints.len(), 2);
+        assert!(
+            surface.gaps.is_empty(),
+            "a gap for an operation the package never had would mislead"
+        );
+    }
+
+    #[test]
+    fn renaming_replaces_the_generated_name() {
+        let mut surface = model();
+        let mut rename = BTreeMap::new();
+        rename.insert("get_api_orders".to_string(), "list_orders".to_string());
+        apply_curation(
+            &mut surface,
+            &SdkCuration {
+                drop: Vec::new(),
+                rename,
+            },
+        );
+        assert!(surface
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.operation_id == "list_orders"));
+    }
+}
+
+#[cfg(test)]
 mod real_session_tests {
     /// Runs the whole capture-to-SDK pipeline against a real captured session,
     /// which is the only way to see what it makes of traffic nobody curated.
@@ -335,7 +526,7 @@ mod real_session_tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).expect("output dir");
 
-        let result = super::export(&storage, &session, Some(&out)).expect("export");
+        let result = super::export(&storage, &session, Some(&out), None).expect("export");
         eprintln!(
             "SDK dir={} files={} bytes={}",
             result.directory,

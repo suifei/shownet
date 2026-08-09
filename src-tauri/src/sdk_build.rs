@@ -602,6 +602,7 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
             GapKind::OpaqueBody => "请求体无法描述成结构",
             GapKind::SingleSample => "只有一个样本",
             GapKind::OffSiteHost => "站外主机,未纳入",
+            GapKind::CuratedOut => "经判断不属于本 API,已剔除",
         };
         out.push_str(&format!(
             "- **{}** · `{}` — {}\n",

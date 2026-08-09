@@ -2128,7 +2128,12 @@ fn build_sdk_package(
         }
         _ => None,
     };
-    sdk_inputs::export(&state.storage, session_id.trim(), directory.as_deref())
+    sdk_inputs::export(
+        &state.storage,
+        session_id.trim(),
+        directory.as_deref(),
+        None,
+    )
 }
 
 #[tauri::command]
