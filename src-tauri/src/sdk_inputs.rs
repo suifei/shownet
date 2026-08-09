@@ -353,5 +353,26 @@ mod real_session_tests {
             !result.files.is_empty(),
             "an export with no files is not one"
         );
+
+        // The one check that cannot be argued with: an SDK that does not parse is
+        // not an SDK. Every generated .py, compiled by the interpreter it targets.
+        // Emitting Python from Rust string literals makes indentation a thing you
+        // can get wrong silently — a helper came out flush-left and still passed
+        // every other assertion here.
+        for file in result.files.iter().filter(|f| f.ends_with(".py")) {
+            let path = std::path::Path::new(&result.directory).join(file);
+            let output = std::process::Command::new("python3")
+                .arg("-m")
+                .arg("py_compile")
+                .arg(&path)
+                .output()
+                .expect("run python3");
+            assert!(
+                output.status.success(),
+                "{file} does not compile:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        eprintln!("SDK every generated python file compiles");
     }
 }

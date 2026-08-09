@@ -285,6 +285,10 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
         py_string(&inputs.fingerprint.impersonate)
     ));
     out.push_str("        self.base_url = base_url.rstrip(\"/\")\n");
+    out.push_str(&format!(
+        "        self._primary = {}\n",
+        py_string(&base_url)
+    ));
     out.push_str("        self.timeout = timeout\n");
     out.push_str(
         "        # impersonate is what actually produces the TLS and HTTP/2 fingerprint;\n",
@@ -319,6 +323,21 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
         "        \"\"\"Measure this client's real fingerprint against the captured target.\"\"\"\n",
     );
     out.push_str("        return verify_fingerprint(self.session)\n\n");
+
+    // One site, several hosts. base_url overrides the primary one; the siblings
+    // keep the origin they were captured on, so a call to search.* does not go
+    // to www.* because that is what sorted first.
+    out.push_str(concat!(
+        "    def _origin(self, captured: str) -> str:\n",
+        "        \"\"\"The origin this endpoint was captured on.\n\n",
+        "        base_url overrides the primary host only; the site's other hosts\n",
+        "        keep the origin they were captured on, so a call to search.* is not\n",
+        "        sent to www.* merely because that one sorted first.\n",
+        "        \"\"\"\n",
+        "        if captured == self._primary:\n",
+        "            return self.base_url\n",
+        "        return captured.rstrip(\"/\")\n\n",
+    ));
 
     for endpoint in &model.endpoints {
         out.push_str(&render_method(endpoint, &model.gaps));
@@ -495,8 +514,9 @@ fn render_method(endpoint: &Endpoint, gaps: &[Gap]) -> String {
     }
 
     let mut call = format!(
-        "        response = self.session.request(\n            {},\n            self.base_url + path,\n            params=params,\n            timeout=self.timeout,\n",
-        py_string(&endpoint.method)
+        "        response = self.session.request(\n            {},\n            self._origin({}) + path,\n            params=params,\n            timeout=self.timeout,\n",
+        py_string(&endpoint.method),
+        py_string(&endpoint.server)
     );
     if endpoint.request_body.is_some() {
         call.push_str("            json=json_body,\n");
@@ -646,6 +666,7 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
             GapKind::ConflictingFieldType => "同一字段在不同样本里类型不同",
             GapKind::OpaqueBody => "请求体无法描述成结构",
             GapKind::SingleSample => "只有一个样本",
+            GapKind::OffSiteHost => "站外主机,未纳入",
         };
         out.push_str(&format!(
             "- **{}** · `{}` — {}\n",

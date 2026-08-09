@@ -163,6 +163,8 @@ pub enum GapKind {
     OpaqueBody,
     /// Only one sample, so nothing about it is known to be required or optional.
     SingleSample,
+    /// Traffic to a host outside the session's own site, left out of the SDK.
+    OffSiteHost,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,6 +644,47 @@ struct Group<'a> {
     requests: Vec<&'a BundleRequest>,
 }
 
+/// Public suffixes that take two labels, so `example.co.uk` is one site rather
+/// than every `.co.uk` being one. Not the full PSL — that is a megabyte and a
+/// network dependency — just the ones a capture is likely to meet. An unlisted
+/// two-part suffix groups one site too coarsely, which shows up as extra hosts
+/// rather than as silence.
+const TWO_LABEL_SUFFIXES: &[&str] = &[
+    "co.uk", "co.jp", "co.kr", "co.in", "co.nz", "co.za", "com.cn", "com.au", "com.br", "com.tw",
+    "com.hk", "com.sg", "com.mx", "net.cn", "org.uk", "org.cn", "gov.cn", "ac.uk",
+];
+
+/// The site a host belongs to: `cms.lionairthai.com` and `search.lionairthai.com`
+/// are one product and one SDK, `cdn.jsdelivr.net` is somebody else's.
+fn registrable_domain(server: &str) -> String {
+    let host = server
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(server)
+        .split(':')
+        .next()
+        .unwrap_or(server)
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 {
+        return host;
+    }
+    let last_two = labels[labels.len() - 2..].join(".");
+    let take = if TWO_LABEL_SUFFIXES.contains(&last_two.as_str()) {
+        3
+    } else {
+        2
+    };
+    if labels.len() <= take {
+        host
+    } else {
+        labels[labels.len() - take..].join(".")
+    }
+}
+
 pub fn build_endpoint_model(bundle: &SessionBundle) -> EndpointModel {
     let mut groups: BTreeMap<(String, String, String), Group<'_>> = BTreeMap::new();
     let mut skipped = 0usize;
@@ -665,15 +708,71 @@ pub fn build_endpoint_model(bundle: &SessionBundle) -> EndpointModel {
             .push(request);
     }
 
+    // A capture spans whatever the page pulled in — fonts, CDNs, analytics,
+    // a challenge provider. An SDK for "this API" is about one site, and the
+    // generator emits one base URL, so keeping the rest produced a client whose
+    // default host was whichever origin sorted first alphabetically: measured on
+    // a real session, every lionairthai endpoint would have been called against
+    // clients2.google.com. Keep the site the session is actually about — the
+    // registrable domain with the most API requests — and say what was dropped
+    // rather than dropping it quietly.
+    let mut by_domain: BTreeMap<String, usize> = BTreeMap::new();
+    for group in groups.values() {
+        *by_domain
+            .entry(registrable_domain(&group.server))
+            .or_default() += group.requests.len();
+    }
+    let primary_domain = by_domain
+        .iter()
+        .max_by_key(|(domain, count)| (**count, std::cmp::Reverse((*domain).clone())))
+        .map(|(domain, _)| domain.clone());
+
+    let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
     let mut endpoints = Vec::new();
     let mut gaps = Vec::new();
     let mut servers = BTreeSet::new();
+    let mut server_weight: BTreeMap<String, usize> = BTreeMap::new();
 
     for group in groups.into_values() {
+        if primary_domain
+            .as_deref()
+            .is_some_and(|primary| registrable_domain(&group.server) != primary)
+        {
+            *dropped.entry(group.server.clone()).or_default() += group.requests.len();
+            skipped += group.requests.len();
+            continue;
+        }
+        *server_weight.entry(group.server.clone()).or_default() += group.requests.len();
         servers.insert(group.server.clone());
         for endpoint in endpoints_from_group(&group, &mut gaps) {
             endpoints.push(endpoint);
         }
+    }
+
+    // The generator takes the first server as the client's default base URL, so
+    // the order here decides which host the SDK points at. Sorted alphabetically
+    // it picked cdn.lionairthai.com over the site people actually call. Busiest
+    // first instead, ties broken by name so the output stays deterministic.
+    let mut servers: Vec<String> = servers.into_iter().collect();
+    servers.sort_by(|left, right| {
+        server_weight
+            .get(right)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&server_weight.get(left).copied().unwrap_or(0))
+            .then_with(|| left.cmp(right))
+    });
+
+    for (server, count) in &dropped {
+        gaps.push(Gap {
+            kind: GapKind::OffSiteHost,
+            operation_id: server.clone(),
+            detail: format!(
+                "{count} 条请求来自 {server},不属于本次会话的主站点 {}。它们没有进入 SDK——\
+                 一个客户端只能有一个基础地址,把别人的 CDN 混进来会让所有调用打错主机。",
+                primary_domain.as_deref().unwrap_or("(未知)")
+            ),
+        });
     }
 
     endpoints.sort_by(|left, right| {
@@ -688,7 +787,7 @@ pub fn build_endpoint_model(bundle: &SessionBundle) -> EndpointModel {
             .first()
             .map(|_| bundle.session.name.clone())
             .unwrap_or_default(),
-        servers: servers.into_iter().collect(),
+        servers,
         endpoints,
         gaps,
         request_count: bundle.requests.len(),
