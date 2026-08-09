@@ -333,8 +333,12 @@ export function AdvancedConsoleView({
             </strong>
           </span>
         </div>
-        <p className="advanced-console-honesty" role="note" title={honestyBanner()}>
-          {honestyBanner()}
+        <p
+          className="advanced-console-honesty"
+          role="note"
+          title={honestyBanner(outboundTls)}
+        >
+          {honestyBanner(outboundTls)}
         </p>
       </header>
 
@@ -595,7 +599,7 @@ export function AdvancedConsoleView({
               </div>
             </div>
             <p className="hint">
-              {outboundTls?.alignmentClaim ?? outboundTls?.note ?? honestyBanner()}
+              {outboundTls?.alignmentClaim ?? outboundTls?.note ?? honestyBanner(outboundTls)}
               {outboundTls?.goldenAuthorisedClaim
                 ? ` · ${outboundTls.goldenAuthorisedClaim}`
                 : ""}

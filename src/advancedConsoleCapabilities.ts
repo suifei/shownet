@@ -212,13 +212,18 @@ export const CAPABILITY_CATALOG: CapabilityEntry[] = [
     name: "出站 ClientHello 预置",
     phase: "capture",
     when: "MITM 出站握手前/中；在高级控制台「配置」或设置页选择",
-    linksTo: "决定源站看到的 rustls 配方（非位级浏览器 JA3）",
+    linksTo: "决定源站看到的出站配方；impersonate 引擎下主路径固定用 wreq 配方，预置只作用于 rustls 回退",
     entryPoints: [
       "set_outbound_tls_profile",
       "get_outbound_tls_profile",
       "shownet_get_outbound_tls_status",
     ],
-    honesty: "ja3Parity=false；supportsFullBrowserJa3=false（rustls）",
+    // Was "ja3Parity=false；supportsFullBrowserJa3=false（rustls）". Both are
+    // live values that depend on the engine and on a measured handshake, and
+    // this catalog is static — so the card asserted rustls-only while the
+    // config panel beside it reported supportsFullBrowserJa3=true. State the
+    // contract; the numbers belong to the status.
+    honesty: "parity 仅在实测出站握手与浏览器目标一致时为真；当前引擎与实测值见「配置」页",
   },
   {
     id: "inbound-auto-preset",
@@ -386,6 +391,23 @@ export function suggestWorkflowStage(stats: {
   return "evidence";
 }
 
-export function honestyBanner(): string {
-  return "出站 TLS 为 rustls 配方（ja3Parity=false）；PX 解码为结构解析，非无密钥硬破。";
+/**
+ * The one line that tells the user what their traffic actually leaves as.
+ *
+ * It used to be a constant reading "rustls 配方（ja3Parity=false）" whatever the
+ * engine was, so a build with the impersonate engine active showed a header
+ * claiming rustls directly above a panel reporting `engine=impersonate`. A
+ * banner whose whole job is honesty cannot be the one element that ignores the
+ * status it sits next to.
+ *
+ * Undefined status keeps the conservative wording: before the backend answers,
+ * the weaker claim is the true one.
+ */
+export function honestyBanner(
+  status?: { engine?: string; ja3Parity?: boolean } | null,
+): string {
+  const engine =
+    status?.engine === "impersonate" ? "wreq 的逐字节 Chrome 配方" : "rustls 配方";
+  const parity = status?.ja3Parity === true ? "true" : "false";
+  return `出站 TLS 为 ${engine}（ja3Parity=${parity}）；PX 解码为结构解析，非无密钥硬破。`;
 }

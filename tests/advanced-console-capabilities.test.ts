@@ -181,6 +181,60 @@ describe("agent wiring: catalog tools exist in MCP preview and agent_tools", () 
     assert.match(agentTools, /非无密钥硬破|结构解码/);
   });
 
+  it("the honesty banner names the engine that is actually running", async () => {
+    const { honestyBanner } = await import("../src/advancedConsoleCapabilities.ts");
+
+    // Driving the real app found this: the console header claimed rustls while
+    // the panel two inches below reported engine=impersonate, because the
+    // banner was a constant. The one line whose job is honesty must not be the
+    // one that ignores the status beside it.
+    const rustls = honestyBanner({ engine: "rustls", ja3Parity: false });
+    const impersonate = honestyBanner({ engine: "impersonate", ja3Parity: true });
+
+    assert.match(rustls, /rustls/);
+    assert.doesNotMatch(rustls, /wreq|逐字节/);
+
+    assert.match(impersonate, /wreq|逐字节/);
+    assert.doesNotMatch(
+      impersonate,
+      /rustls/,
+      "an impersonate session must not be described as rustls",
+    );
+    assert.match(impersonate, /ja3Parity=true/, "parity is reported, not assumed");
+
+    // Before the backend answers, the weaker claim is the true one.
+    for (const unknown of [honestyBanner(), honestyBanner(null)]) {
+      assert.match(unknown, /rustls/);
+      assert.match(unknown, /ja3Parity=false/);
+    }
+
+    // Whatever the engine, the PX wording stays — it is a separate claim.
+    for (const line of [rustls, impersonate]) {
+      assert.match(line, /非无密钥硬破/);
+    }
+  });
+
+  it("the static catalog never asserts a live fingerprint value", async () => {
+    const { CAPABILITY_CATALOG } = await import("../src/advancedConsoleCapabilities.ts");
+
+    // ja3Parity and supportsFullBrowserJa3 depend on the engine and on a
+    // measured handshake. This catalog is a fixed table rendered next to the
+    // live status, so any literal here is a claim it cannot keep — one entry
+    // read "supportsFullBrowserJa3=false（rustls）" while the panel beside it
+    // reported true.
+    const asserting = CAPABILITY_CATALOG.filter((entry) =>
+      [entry.honesty, entry.linksTo, entry.when]
+        .filter(Boolean)
+        .some((text) => /ja3Parity\s*=\s*(true|false)|supportsFullBrowserJa3\s*=\s*(true|false)/.test(String(text))),
+    ).map((entry) => entry.id);
+
+    assert.deepEqual(
+      asserting,
+      [],
+      `these catalog entries hardcode a value only the running status knows: ${asserting.join(", ")}`,
+    );
+  });
+
   it("crypto-reverse and dynamic-signature skills list TLS/PX analysis tools", async () => {
     const [caps, skills] = await Promise.all([
       readFile(new URL("../src/capabilities.ts", import.meta.url), "utf8"),
