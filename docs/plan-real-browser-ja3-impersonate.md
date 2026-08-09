@@ -448,3 +448,76 @@ wreq 是完整 HTTP 客户端(非流级连接器),集成点在**请求级**,不�
 **为何不在本轮完成**:这是对 11k 行流式 MITM 出站路径的整体替换(流式/ws/隧道共享
 sender/GOAWAY/抓包都要处理),半途会弄坏代理。boring 过渡路径保持已测可用,wreq 作为
 下一次专门工程,靶子(§10.2)与接缝(§10.4)已定。
+
+---
+
+## 11. 测量推翻了"版本不匹配"诊断(2026-08-09)
+
+Cloudflare 托管挑战在抓包时反复循环。此前的判断是 **wreq-util 落后浏览器约 14 个
+版本**(内嵌浏览器 Chrome 151,wreq-util 2.2.6 最高 Chrome 137)导致指纹版本不一致。
+本轮做了完整测量,**该判断是错的**。
+
+### 11.1 实测数据
+
+反射器 `tls.peet.ws/api/all`,同一网络出口:
+
+| 客户端 | JA4 |
+|---|---|
+| 真实 Chrome 151(抓包库中的入站记录 + headless 复测) | `t13d1516h2_8daaf6152771_806a8c22fdea` |
+| 真实 Chrome 151 + `--disable-features=TlsMldsaSignatures` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| 真实 Chrome 137(Chrome for Testing 137.0.7151.70) | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| wreq-util 2.2.6 `Chrome137`(当前出站) | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| wreq-util 3.0.0-rc.14 `Chrome140/145/149` | `t13d1517h2_8daaf6152771_b6f405a00624` |
+
+逐段拆开,Chrome 151 与 wreq Chrome137 的差异**只有签名算法列表开头三个值**
+`0904,0905,0906`(ML-DSA:mldsa44/65/87);密码套件与扩展列表(含 ALPS `44cd`、
+ECH `fe0d`)完全一致。
+
+### 11.2 结论
+
+1. **不是版本代差。** 真实 Chrome 137 与关闭 ML-DSA 的真实 Chrome 151 产生**同一个
+   JA4** —— ML-DSA 是 137→151 之间唯一的 ClientHello 差异。因此"TLS 像 137、UA 说
+   151"不是异常组合,大量真实 151 装机就是这个指纹。
+2. **升级 wreq 无用且更差。** wreq-util 3.0.0-rc.14 虽然把目录扩到 Chrome149,但其
+   Chrome140+ 配方多了扩展 `0029` → 17 扩展(`t13d1517h2`),且同样不带 ML-DSA,
+   离真浏览器比现在更远。3.0/6.0 均为 rc,底层也从 boring2 换成了 btls。
+3. **补不上 ML-DSA。** boring-sys2 4.15.15 中没有 ML-DSA,`sigalgs_list` 虽可配置
+   但底层不认这三个值。
+
+### 11.3 真正的原因:UA 自报 HeadlessChrome
+
+同一个抓包库中,**17,763 条真正发往源站的 GET/POST/OPTIONS** 携带
+
+```
+user-agent: Mozilla/5.0 (...) HeadlessChrome/151.0.0.0 Safari/537.36
+```
+
+以 lionairthai 为例:`/api/socket.io/` 17,288 条泄露,主文档 `/` 382 条已改写。
+原有防护是渲染器级的 CDP `Emulation.setUserAgentOverride`,**只覆盖它附着的那个
+页面**,子资源与 worker 全部漏出。TLS 指纹做到逐字节也救不了自报无头的 UA。
+
+同时该覆盖硬编码 `"Not_A Brand";v="24"`,而真实 Chrome 151 发的是
+`"Not=A?Brand";v="99"` —— 且 headless Chrome 151 自身的 `sec-ch-ua` 本就干净
+(实测),该 metadata 改写没有解决任何问题,反而制造了它本想防止的身份分裂。
+
+### 11.4 本轮落地
+
+- `browser.rs`:启动加 `--user-agent`(由 `chrome --version` 读主版本 + Chrome
+  精简 UA 的固定平台串构造),对所有渲染器/worker/子资源生效。
+- `BrowserView.tsx`:删除手写 `userAgentMetadata`(及随之死掉的 `uaPlatform`/
+  `uaArchitecture`),让 Chrome 自己提供客户端提示;仅保留 UA 串覆盖作为页面级兜底,
+  因为 Chrome 不提供读回 `--user-agent` 的接口,两者只能按同一主版本各自构造。
+- `DISABLED_FEATURES` 加 `TlsMldsaSignatures`。**注意这不改变源站看到的东西** ——
+  浏览器的 ClientHello 终止在 ShowNet 自己的监听端口。它修的是 `ja3Parity`:开启时
+  该指标为一个出站栈永远补不上的固定差值长期报红,指向不可行动的方向(本次即因此
+  误判)。
+- 测试:`disabled_feature_list_stays_well_formed_and_keeps_ja4_parity`、
+  `launch_user_agent_never_announces_automation`、
+  `chrome_version_parsing_reads_the_major_from_every_build_wording`(常规);
+  `launch_user_agent_matches_the_browsers_own_client_hints`(`npm run test:browser-ua`)、
+  `browser_and_egress_present_one_fingerprint`(`npm run test:ja4-parity`)。
+
+### 11.5 仍未验证
+
+Cloudflare 循环是否因此消失,**尚未在真实站点上验证**。UA 泄露是有证据的缺陷且已修,
+但它是不是该循环的唯一原因还需要一次真实抓包确认。

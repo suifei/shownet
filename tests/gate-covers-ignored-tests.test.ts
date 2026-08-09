@@ -33,6 +33,10 @@ const EXCLUDED: Record<string, string> = {
     "hits a live JA4 reflector to prove Chrome parity; run explicitly under --features impersonate-boring",
   mitm_impersonate_presents_chrome_to_the_origin:
     "drives the full MITM path to a live reflector; run via npm run test:impersonate-mitm",
+  launch_user_agent_matches_the_browsers_own_client_hints:
+    "needs a locally installed Chrome; run via npm run test:browser-ua",
+  browser_and_egress_present_one_fingerprint:
+    "needs a locally installed Chrome and a live reflector; run via npm run test:ja4-parity",
 };
 
 describe("the release gate runs every ignored test it can", () => {

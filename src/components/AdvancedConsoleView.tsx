@@ -775,9 +775,9 @@ export function AdvancedConsoleView({
                 <p className="hint">
                   {outboundTls?.impersonateRequested ? (
                     <>
-                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：wreq
-                      逐字节 Chrome —— TLS JA4 <code>t13d1516h2</code>（16 扩展,含 ALPS/ECH/后量子
-                      曲线),HTTP/2 伪头顺序 <code>m,a,s,p</code>,与真 Chrome 一致。
+                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：wreq 的
+                      Chrome 137 配方 —— JA4 <code>t13d1516h2_8daaf6152771_d8a2da3f94cd</code>
+                      (16 扩展,含 ALPS/ECH/后量子曲线),HTTP/2 伪头顺序 <code>m,a,s,p</code>。
                       <strong>
                         {" "}
                         supportsFullBrowserJa3=
@@ -786,8 +786,13 @@ export function AdvancedConsoleView({
                       </strong>
                       。
                       <br />
-                      按 JA4 / h2 指纹严格匹配 Chrome 的风控(Cloudflare/Akamai)应当放行。
-                      注意 wreq 整发整收原始请求,流式(SSE)/WebSocket 走 rustls 回退。
+                      上面的版本预置<strong>不影响这条主路径</strong>,它只作用于 rustls
+                      回退(流式 SSE / WebSocket);主路径固定用上面这份配方。
+                      <br />
+                      抓包浏览器已关闭 ML-DSA 签名算法(<code>TlsMldsaSignatures</code>),
+                      握手指纹与上面这串一致,因此 <code>ja3Parity</code> 反映的是真实差异
+                      而不是一个出站栈永远补不上的固定差值。注意浏览器的握手只到 ShowNet
+                      自己的监听端口,源站看到的始终是上面这份出站指纹。
                     </>
                   ) : (
                     <>

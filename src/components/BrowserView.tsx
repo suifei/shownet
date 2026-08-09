@@ -55,15 +55,6 @@ interface BrowserViewProps {
 }
 
 const previewHookEvents: BrowserHookEvent[] = [];
-/** Chromium's UA-CH platform name — used for userAgentMetadata.platform only. */
-function uaPlatform(): string {
-  const platform = navigator.platform || "";
-  if (/Mac/i.test(platform)) return "macOS";
-  if (/Win/i.test(platform)) return "Windows";
-  if (/Linux|X11/i.test(platform)) return "Linux";
-  return "Windows";
-}
-
 /**
  * What `navigator.platform` should report — a different vocabulary from UA-CH.
  *
@@ -79,23 +70,6 @@ function navigatorPlatform(): string {
   if (/Mac/i.test(ua)) return "MacIntel";
   if (/Win/i.test(ua)) return "Win32";
   return "Linux x86_64";
-}
-
-/** CPU architecture as UA-CH reports it; Apple Silicon is "arm". */
-function uaArchitecture(): string {
-  // Required by CDP: omitting it makes Chrome reject the whole
-  // setUserAgentOverride command, which silently loses the UA, the client hints
-  // and the accept-language with it — the browser then announces HeadlessChrome
-  // on the main document, which is the thing this override exists to prevent.
-  //
-  // Neither `navigator.platform` ("MacIntel" on both) nor `userAgentData`
-  // (undefined in this webview) can tell Apple Silicon from Intel, and two
-  // previous attempts each guessed wrong for one half of the fleet. An empty
-  // string is accepted, and reports empty when a site asks for the high-entropy
-  // hint — a mild tell, against a rejected command which is a total one.
-  if (/aarch64|arm64/i.test(navigator.userAgent)) return "arm";
-  if (/Win|X11|Linux/i.test(navigator.platform)) return "x86";
-  return "";
 }
 
 /** A weighted Accept-Language list, the shape a real browser sends. */
@@ -597,30 +571,22 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         // it in a getVersion callback let the main document, the one request a
         // bot manager actually scores, leave announcing HeadlessChrome.
         if (status.honestUserAgent) {
-          const version = /Chrome\/(\d+)/.exec(status.honestUserAgent)?.[1] ?? "";
           send("Emulation.setUserAgentOverride", {
             userAgent: status.honestUserAgent,
-            // Without this the UA string says Chrome while Sec-CH-UA and
-            // navigator.userAgentData still say HeadlessChrome. Two sources
-            // disagreeing is a stronger signal than one honest headless UA, so
-            // omitting it made the disguise worse than no disguise.
-            userAgentMetadata: {
-              brands: [
-                { brand: "Not_A Brand", version: "24" },
-                { brand: "Chromium", version },
-                { brand: "Google Chrome", version },
-              ],
-              fullVersionList: [
-                { brand: "Not_A Brand", version: "24.0.0.0" },
-                { brand: "Chromium", version: `${version}.0.0.0` },
-                { brand: "Google Chrome", version: `${version}.0.0.0` },
-              ],
-              platform: uaPlatform(),
-              platformVersion: "",
-              architecture: uaArchitecture(),
-              model: "",
-              mobile: false,
-            },
+            // No userAgentMetadata. It used to be restated here on the belief that
+            // Sec-CH-UA would otherwise say HeadlessChrome, and that is not what
+            // headless Chrome sends: measured on 151 it already reports
+            // "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151" —
+            // clean, and agreeing with the UA. The hand-built list said
+            // "Not_A Brand";v="24" instead, so restating it introduced the exact
+            // split identity it was added to prevent. Chrome derives the hints
+            // from the running build; letting it is both simpler and correct.
+            //
+            // The UA string itself still needs overriding here because Chrome
+            // exposes no way to read back the --user-agent launch flag, so this
+            // stays as the per-target backstop. The flag is what actually covers
+            // subresources and workers; this covers only the attached page.
+            //
             // A bare single token with no q-values is itself anomalous; real
             // Chrome always sends a weighted list.
             acceptLanguage: acceptLanguageHeader(),

@@ -20,15 +20,22 @@ use wreq_util::Emulation;
 
 /// The Chrome build wreq emulates — the newest wreq-util 2.x offers.
 ///
-/// KNOWN LIMITATION, and the reason a Cloudflare managed challenge can still
-/// loop even with this engine: the embedded browser auto-updates to the latest
-/// Chrome (151 at time of writing, inbound JA4 t13d1517h2, 17 extensions, and
-/// sec-ch-ua v=151), while wreq-util trails — Chrome137 here, JA4 t13d1516h2,
-/// 16 extensions. The forwarded request carries the browser's v=151 UA and its
-/// JS attests 151, but the wire TLS is 137-shaped, and a managed challenge that
-/// cross-checks the two sees the mismatch. Byte-exact parity needs wreq-util to
-/// ship the browser's exact version, or the embedded browser pinned to one wreq
-/// can match. Verified against a reflector by wreq_egress_is_byte_exact_chrome.
+/// Trailing the installed browser by a dozen major versions matters far less than
+/// it looks, and an earlier revision of this comment was wrong about it. Measured:
+/// real Chrome 137 and real Chrome 151 present the *same* ClientHello
+/// (t13d1516h2_8daaf6152771_d8a2da3f94cd) once ML-DSA is off, because ML-DSA is
+/// the only difference across that range. So the wire says "some Chrome between
+/// 137 and 151", which is exactly what the forwarded v=151 UA claims — not the
+/// version mismatch it reads as.
+///
+/// Do not "fix" this by moving to wreq-util 3.x. Its Chrome140+ profiles add
+/// extension 0x0029 (17 extensions, t13d1517h2), which no measured Chrome in this
+/// range sends, so it is further from the browser rather than closer. Its
+/// signature algorithms still omit ML-DSA, and 3.x/wreq 6.x are release
+/// candidates that swap the TLS backend from boring2 to btls.
+///
+/// Verified against a reflector by wreq_egress_is_byte_exact_chrome, and against
+/// the actual installed browser by browser_and_egress_present_one_fingerprint.
 pub const EMULATION: Emulation = Emulation::Chrome137;
 
 /// A gathered response: everything the MITM path needs to relay it back to the
@@ -175,6 +182,150 @@ mod tests {
         assert!(
             akamai.starts_with("1:65536;2:0;4:6291456;6:262144"),
             "h2 SETTINGS drifted from Chrome: {akamai}"
+        );
+    }
+
+    /// What `ja3Parity` claims, measured rather than assumed.
+    ///
+    /// An origin never sees the browser's ClientHello — that connection ends at
+    /// ShowNet's own listener — so this is not a defense against anything. It is
+    /// what makes the parity readout mean something: the two sides are different
+    /// TLS stacks (the user's installed Chrome, whatever version it auto-updated
+    /// to, against wreq's pinned profile), so their agreement is a fact that
+    /// expires. The browser shipping one new ClientHello extension breaks it
+    /// silently, and a permanently-red parity light is worse than none — it sent
+    /// this investigation chasing a version mismatch that did not exist.
+    ///
+    ///   cargo test --no-default-features --features impersonate-boring \
+    ///     browser_and_egress_present_one_fingerprint -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "network + a locally installed Chrome; run via npm run test:ja4-parity"]
+    async fn browser_and_egress_present_one_fingerprint() {
+        const REFLECTOR: &str = "https://tls.peet.ws/api/all";
+
+        let egress = Client::builder()
+            .no_proxy()
+            .emulation(EMULATION)
+            .build()
+            .expect("client")
+            .get(REFLECTOR)
+            .send()
+            .await
+            .expect("egress send")
+            .text()
+            .await
+            .expect("egress body");
+        let egress_ja4 = serde_json::from_str::<serde_json::Value>(&egress)
+            .ok()
+            .and_then(|value| value["tls"]["ja4"].as_str().map(str::to_owned))
+            .expect("egress ja4");
+
+        let browser_ja4 = measure_browser_ja4(REFLECTOR).await;
+
+        eprintln!("BROWSER_JA4 {browser_ja4}\nEGRESS_JA4  {egress_ja4}");
+        assert_eq!(
+            browser_ja4, egress_ja4,
+            "the capture browser and the impersonate egress present different \
+             ClientHellos, so ja3Parity now reports a difference nothing in the \
+             product can close. If the browser grew an extension or signature \
+             algorithm wreq cannot reproduce, either suppress it in \
+             browser::DISABLED_FEATURES the way TlsMldsaSignatures is, or move \
+             EMULATION to a profile that matches. Do not read a mismatch here as \
+             the cause of an origin-side block: the origin never saw either of \
+             these handshakes' differences, only the egress one."
+        );
+    }
+
+    /// Drives the real browser the same way `ProxyBrowserHandle::launch` does — the
+    /// same suppressed features — and reads the fingerprint it presented. Anything
+    /// less would measure a browser ShowNet does not actually run.
+    #[cfg(test)]
+    async fn measure_browser_ja4(reflector: &str) -> String {
+        use tokio::process::Command;
+
+        /// How long to let the browser reach the reflector. Measured at ~3s; the
+        /// margin is for a cold profile behind a slow proxy.
+        const ATTEMPT: std::time::Duration = std::time::Duration::from_secs(60);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+        let chrome = crate::browser::chrome_executable().expect("an installed Chrome");
+        let profile = std::env::temp_dir().join(format!("shownet-ja4-{}", std::process::id()));
+        // Waiting for the browser to exit does not work: `--dump-dom` writes the
+        // rendered DOM and then keeps running — measured, even on about:blank it
+        // never exited, so waiting on the process burned the whole timeout on a
+        // page that had loaded in three seconds. Watch the output instead and end
+        // the process once the fingerprint is in it.
+        let dump = std::env::temp_dir().join(format!("shownet-ja4-{}.html", std::process::id()));
+        let mut last = String::new();
+        for _ in 0..3 {
+            let mut command = Command::new(&chrome);
+            command.kill_on_drop(true);
+            // wreq reads the same variables, so honoring them keeps both sides on
+            // one egress — otherwise a proxied runner would compare a proxied
+            // fingerprint against a direct one.
+            if let Some(proxy) = std::env::var("HTTPS_PROXY")
+                .or_else(|_| std::env::var("https_proxy"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            {
+                command.arg(format!("--proxy-server={proxy}"));
+            }
+            let mut run = command
+                .arg("--headless=new")
+                .arg("--disable-gpu")
+                .arg("--no-first-run")
+                .arg("--no-default-browser-check")
+                .arg("--disable-sync")
+                .arg("--disable-background-networking")
+                .arg(format!("--user-data-dir={}", profile.to_string_lossy()))
+                .arg(format!(
+                    "--disable-features={}",
+                    crate::browser::DISABLED_FEATURES
+                ))
+                .arg("--virtual-time-budget=25000")
+                .arg("--dump-dom")
+                .arg(reflector)
+                .stdout(std::fs::File::create(&dump).expect("create dump file"))
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn chrome");
+
+            // --dump-dom writes the rendered DOM, so the JSON arrives wrapped in
+            // <html><body><pre>; the field is unambiguous enough to read directly.
+            let read_ja4 = |text: &str| -> Option<String> {
+                text.split("\"ja4\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').nth(1))
+                    .map(str::to_owned)
+            };
+
+            let deadline = tokio::time::Instant::now() + ATTEMPT;
+            let mut found = None;
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(POLL).await;
+                last = std::fs::read_to_string(&dump).unwrap_or_default();
+                if let Some(ja4) = read_ja4(&last) {
+                    found = Some(ja4);
+                    break;
+                }
+            }
+            // kill_on_drop covers the panic paths; this covers the normal one.
+            let _ = run.kill().await;
+
+            if let Some(ja4) = found {
+                let _ = std::fs::remove_dir_all(&profile);
+                let _ = std::fs::remove_file(&dump);
+                return ja4;
+            }
+            eprintln!("browser produced no fingerprint within {ATTEMPT:?}, retrying");
+        }
+        let _ = std::fs::remove_dir_all(&profile);
+        let _ = std::fs::remove_file(&dump);
+        panic!(
+            "the browser never reported a fingerprint (network or startup failure), \
+             last {} bytes of DOM: {}",
+            last.len(),
+            &last[last.len().saturating_sub(300)..]
         );
     }
 }
