@@ -70,14 +70,22 @@ jobs:
           retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      # The impersonate feature now links a real BoringSSL connector, so this
-      # step compiles boring-sys (vendored BoringSSL). macOS only for now:
-      # boring-sys needs NASM to build BoringSSL's assembly on Windows, which
-      # this runner does not have, and adding an untested Windows C build to the
-      # release gate would risk red CI on a path nothing ships by default.
-      # Windows boring support is a follow-up (install nasm, then drop this if).
-      - if: runner.os == 'macOS'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
+      # BoringSSL's x86_64 assembly is NASM syntax, so boring-sys cannot build on
+      # Windows without it. Verified locally: the cross build fails with "No
+      # CMAKE_ASM_NASM_COMPILER could be found" and succeeds once nasm is on
+      # PATH. This step is what lets the impersonate build below run on both
+      # runners rather than macOS only.
+      - if: runner.os == 'Windows'
+        name: Install NASM for BoringSSL
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        shell: pwsh
+      # The impersonate feature links a real BoringSSL connector, so this step
+      # compiles boring-sys (vendored BoringSSL). It runs on both runners because
+      # both now ship it: the release builds pass --features impersonate-boring,
+      # so a break here is a break in what users get, not in an unused path.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring
       # Its own crate, so the line above never reached it: the portable
       # launcher's test had never run in CI. It is what a Windows user
       # double-clicks, and its one test covers the layout decision that keeps
@@ -163,7 +171,12 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.grok.conf.json
+        # --features impersonate-boring: without it the shipped binary cannot
+        # honour the app's own impersonate setting. It was off here while the
+        # setting was user-visible, so `impersonate: true` selected an engine no
+        # release could provide and the egress silently stayed rustls — measured
+        # on a real session as an outbound JA4 that never matched the browser's.
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.grok.conf.json -- --features impersonate-boring
       - name: Verify Apple signature and notarization ticket
         if: steps.mode.outputs.signed == 'true'
         shell: bash
@@ -200,7 +213,8 @@ jobs:
             APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH || true
           npm run tauri -- build --target aarch64-apple-darwin --bundles dmg \
             --config src-tauri/tauri.grok.conf.json \
-            --config src-tauri/tauri.local.macos.conf.json
+            --config src-tauri/tauri.local.macos.conf.json \
+            -- --features impersonate-boring
           mkdir -p src-tauri/target/aarch64-apple-darwin/release/bundle
           # Report what codesign found, not what this branch assumes. The signed
           # path writes this file from a real verification; this one used to
@@ -325,10 +339,17 @@ jobs:
           # sidecar's recorded checksum has to describe the shipped file, so the
           # stamp is redone after SignPath returns.
           npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
+      # Same reason as the quality job: BoringSSL's x86_64 assembly is NASM
+      # syntax, and the build below now compiles it.
+      - name: Install NASM for BoringSSL
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
       - name: Build application and launcher
         shell: pwsh
         run: |
-          npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.grok.conf.json
+          npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.grok.conf.json -- --features impersonate-boring
           $env:CARGO_TARGET_DIR = (Resolve-Path "src-tauri/target").Path
           cargo build --manifest-path packaging/windows/launcher/Cargo.toml --release --target x86_64-pc-windows-msvc
 
