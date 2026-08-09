@@ -1727,16 +1727,24 @@ async fn handle_connect(
                 } else {
                     format!("https://{tls_identity_host}:{port}")
                 };
-                // wreq is byte-exact Chrome by construction (JA4 t13d1516h2,
-                // pseudo m,a,s,p), verified by wreq_egress_is_byte_exact_chrome,
-                // so parity is true rather than measured per handshake.
+                // wreq presents one fixed ClientHello per emulation, so unlike the
+                // rustls path there is nothing to measure per handshake — but the
+                // value is known and is checked against a live reflector by
+                // wreq_egress_is_byte_exact_chrome. Recording it makes the panel's
+                // parity claim a comparison against the inbound handshake rather
+                // than an assertion, which is what it read as before: parity was
+                // set true here with no fingerprint stored beside it.
+                let egress_ja4 = crate::impersonate_egress::EGRESS_JA4;
                 fingerprint.outbound.negotiated_alpn = Some("h2".to_string());
                 fingerprint.outbound.application_protocol = Some("h2".to_string());
                 fingerprint.outbound.engine = Some("impersonate".into());
-                fingerprint.outbound.ja3_parity = Some(true);
+                fingerprint.outbound.ja4 = Some(egress_ja4.to_string());
+                let parity = fingerprint.inbound.ja4 == egress_ja4;
+                fingerprint.outbound.ja3_parity = Some(parity);
                 fingerprint.outbound.note = format!(
-                    "{} wreq byte-exact Chrome egress (JA4 t13d1516h2, h2 pseudo m,a,s,p)",
-                    fingerprint.outbound.note
+                    "{} wreq Chrome egress (JA4 {egress_ja4}, h2 pseudo m,a,s,p); inbound JA4 {} — parity={parity}",
+                    fingerprint.outbound.note,
+                    fingerprint.inbound.ja4
                 );
                 (
                     HttpsRequestSender::Impersonate { client, base },
@@ -1820,6 +1828,7 @@ async fn handle_connect(
                 let parity = crate::tls_outbound::real_impersonate_stack_available()
                     && alignment.is_matched();
                 fingerprint.outbound.ja3 = Some(measured.clone());
+                fingerprint.outbound.ja4 = measured_ja4.map(str::to_owned);
                 fingerprint.outbound.ja3_parity = Some(parity);
                 fingerprint.outbound.engine =
                     Some(crate::tls_outbound::active_engine().as_str().into());
@@ -8633,6 +8642,36 @@ mod tests {
     }
 
     #[test]
+    /// The panel compares the two sides; before this the outbound half had no
+    /// JA4 field at all, so the measurement was taken, written into prose, and
+    /// dropped. Comparing the JA3s instead cannot work: Chrome randomises the
+    /// GREASE values JA3 covers, so a real session produced sixteen distinct
+    /// inbound JA3s carrying one identical JA4.
+    #[test]
+    fn a_tunnelled_handshake_reports_the_same_ja4_on_both_sides() {
+        let inbound = crate::tls_fingerprint::ClientTlsFingerprint {
+            ja3: "inbound-ja3".to_string(),
+            ja3_raw: "771,4865,,,".to_string(),
+            ja4: "t13d1516h2_8daaf6152771_d8a2da3f94cd".to_string(),
+            ja4_raw: "t13d1516h2".to_string(),
+            sni: Some("example.test".to_string()),
+            alpn: vec!["h2".to_string()],
+            legacy_version: "TLSv1_2".to_string(),
+            offered_versions: vec!["TLSv1_3".to_string()],
+            cipher_suites: vec!["0x1301".to_string()],
+            extensions: vec!["0x0010".to_string()],
+            supported_groups: vec!["0x001d".to_string()],
+            signature_algorithms: vec!["0x0804".to_string()],
+            grease: true,
+        };
+        let record = crate::tls_fingerprint::tunnel_fingerprint(inbound);
+        assert_eq!(
+            record.outbound.ja4.as_deref(),
+            Some(record.inbound.ja4.as_str()),
+            "pass-through sends the client's own ClientHello, so the sides cannot differ"
+        );
+    }
+
     fn mitm_fingerprint_never_preclaims_ja3_parity() {
         let inbound = crate::tls_fingerprint::ClientTlsFingerprint {
             ja3: "a".into(),
@@ -11720,5 +11759,426 @@ mod tests {
             akamai.ends_with("|m,a,s,p"),
             "the origin must see Chrome's h2 pseudo order through the MITM path, got {akamai}"
         );
+    }
+
+    /// The certificate authority the desktop app generated and the user installed,
+    /// read from its database. A browser only trusts the MITM leaf if it was
+    /// signed by this one.
+    #[cfg(test)]
+    fn installed_certificate_authority() -> Result<CertificateAuthority, String> {
+        let database = std::env::var("SHOWNET_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                // No dirs crate in this build, and HOME is set wherever a browser
+                // could be launched anyway.
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join("Library/Application Support/com.shownet.desktop/shownet.sqlite3")
+            });
+        if !database.is_file() {
+            return Err(format!("no ShowNet database at {}", database.display()));
+        }
+        let material = crate::storage::Storage::open(&database)?
+            .get_certificate_authority()?
+            .ok_or_else(|| "the database holds no certificate authority".to_string())?;
+        Ok(CertificateAuthority::load_or_create(Some(material))?.0)
+    }
+
+    /// Drives a real capture session end to end — production proxy, production
+    /// browser launch, a real site — and inspects what the origins were actually
+    /// sent.
+    ///
+    /// Both defects this covers were invisible to every other test because both
+    /// live in the seam between the launcher and the wire. The UA fix is a launch
+    /// flag, so a unit test on the string it builds proves nothing about whether
+    /// `launch` applies it; the WebSocket fix only shows up on a page that opens
+    /// one. Here the assertions read the capture sink, which is the same data the
+    /// product records, so they see exactly what the site saw.
+    ///
+    ///   PROXY=http://127.0.0.1:8080 npm run test:live-capture
+    #[tokio::test]
+    #[ignore = "network, an env upstream, and a locally installed Chrome; run via npm run test:live-capture"]
+    async fn a_live_capture_session_shows_the_site_a_consistent_browser() {
+        let upstream = effective_upstream_from_process_env()
+            .unwrap_or_else(|| panic!("live capture requires PROXY or HTTP(S)_PROXY / ALL_PROXY"));
+        // Overridable so this can be pointed at whatever site is being
+        // investigated without editing the test.
+        let target = std::env::var("SHOWNET_LIVE_TARGET")
+            .unwrap_or_else(|_| "https://www.lionairthai.com/".to_string());
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        // Ask for the engine the user's config asks for. Without this the run
+        // measures rustls egress even in a build that links wreq, because the
+        // engine is opt-in at runtime — the first version of this test did
+        // exactly that and its "outbound is not Chrome" reading was about the
+        // test, not the product.
+        let want_impersonate = std::env::var("SHOWNET_LIVE_IMPERSONATE").is_ok()
+            || crate::tls_outbound::real_impersonate_stack_available();
+        crate::tls_impersonate::set_impersonate_requested(want_impersonate);
+        eprintln!(
+            "LIVE_CAPTURE engine={} (impersonate requested={want_impersonate}, stack available={})",
+            crate::tls_outbound::active_engine().as_str(),
+            crate::tls_outbound::real_impersonate_stack_available()
+        );
+
+        // The generated test CA is trusted by nothing, so a real browser answers
+        // the MITM leaf with CertificateUnknown and the session is one failed
+        // CONNECT — the first run of this test hit exactly that. Reuse the CA the
+        // installed app already put in the trust store instead.
+        let authority = Arc::new(installed_certificate_authority().unwrap_or_else(|error| {
+            panic!(
+                "live capture needs the CA the desktop app installed, so the \
+                 launched browser trusts the MITM leaf: {error}"
+            )
+        }));
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-live-capture".to_string(),
+            upstream,
+            authority,
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .expect("ShowNet listener");
+        let port = handle.local_addr().port();
+
+        let data_dir = std::env::temp_dir().join(format!("shownet-live-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        // The production launcher, not a hand-rolled Chrome invocation — the
+        // point is to check what ShowNet actually starts.
+        let browser = crate::browser::ProxyBrowserHandle::launch(&data_dir, port)
+            .await
+            .expect("launch the capture browser");
+        let bus = browser.bus();
+
+        bus.navigate(&target).await.expect("navigate");
+        // Let the page settle: first paint, subresources, and whatever sockets it
+        // opens afterwards. Polled rather than slept so a quiet site does not pay
+        // the full wait.
+        // A real page load is dozens of requests. Requiring a floor before the
+        // quiet check matters: without it the loop settles on the handful that
+        // arrive while the renderer is still starting and the assertions below
+        // pass having inspected almost nothing — which is exactly what the first
+        // run of this test did, declaring success on one request.
+        const MIN_REQUESTS: usize = 10;
+        const QUIET_POLLS: u32 = 3;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        let mut settled = 0;
+        let mut quiet = 0;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let count = captured.lock().unwrap().len();
+            quiet = if count == settled { quiet + 1 } else { 0 };
+            settled = count;
+            if count >= MIN_REQUESTS && quiet >= QUIET_POLLS {
+                break;
+            }
+        }
+
+        let seen = captured.lock().unwrap().clone();
+        browser.stop().await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+        eprintln!("LIVE_CAPTURE recorded {} requests to {target}", seen.len());
+        for request in seen.iter().take(15) {
+            eprintln!(
+                "LIVE_CAPTURE   {} {} {}{} -> {}",
+                request.protocol, request.method, request.host, request.path, request.status
+            );
+        }
+        {
+            let errors = errors.lock().unwrap();
+            for error in errors.iter().take(10) {
+                eprintln!("LIVE_CAPTURE   error: {error}");
+            }
+        }
+        assert!(
+            seen.len() >= MIN_REQUESTS,
+            "only {} requests were captured, which is not a page load — the \
+             assertions below would pass without inspecting anything. Check the \
+             errors printed above",
+            seen.len()
+        );
+
+        // 1. No request may announce automation. This is the whole reason the UA
+        //    moved from a per-target CDP override to a launch flag: the override
+        //    covered the main document and left subresources and workers leaking.
+        let headless: Vec<String> = seen
+            .iter()
+            .filter(|request| {
+                request.request_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("user-agent")
+                        && header.value.contains("HeadlessChrome")
+                })
+            })
+            .map(|request| format!("{} {}{}", request.method, request.host, request.path))
+            .collect();
+        assert!(
+            headless.is_empty(),
+            "{} of {} requests announced HeadlessChrome, e.g. {:?}",
+            headless.len(),
+            seen.len(),
+            &headless[..headless.len().min(5)]
+        );
+
+        // 2. No WebSocket handshake may be rejected for the key the RFC 8441
+        //    downgrade has to mint. A site whose sockets 400 keeps retrying them,
+        //    which is what a challenge loop looks like from the outside.
+        let keyless: Vec<String> = seen
+            .iter()
+            .filter(|request| {
+                request.status == 400
+                    && request
+                        .response_body
+                        .as_deref()
+                        .is_some_and(|body| body.contains("Sec-WebSocket-Key"))
+            })
+            .map(|request| format!("{}{}", request.host, request.path))
+            .collect();
+        assert!(
+            keyless.is_empty(),
+            "{} WebSocket upgrades were rejected for a missing Sec-WebSocket-Key: {:?}",
+            keyless.len(),
+            &keyless[..keyless.len().min(5)]
+        );
+
+        // Reported, not asserted: whether a challenge appeared at all is the
+        // site's decision on the day, and failing the build on it would make this
+        // a weather report. The counts are what a human needs to judge a loop.
+        let challenges = seen
+            .iter()
+            .filter(|request| {
+                request.path.contains("/cdn-cgi/challenge-platform")
+                    || request.response_headers.iter().any(|header| {
+                        header.name.eq_ignore_ascii_case("cf-mitigated")
+                            && header.value.contains("challenge")
+                    })
+            })
+            .count();
+        eprintln!("LIVE_CAPTURE challenge requests: {challenges}");
+        // A challenge appearing once is the gate working. The same endpoint
+        // fetched over and over is the loop, and only the breakdown tells them
+        // apart, so print it rather than a single number.
+        let mut by_path: std::collections::BTreeMap<String, (usize, i64)> =
+            std::collections::BTreeMap::new();
+        for request in seen
+            .iter()
+            .filter(|request| request.path.contains("/cdn-cgi/"))
+        {
+            let entry = by_path
+                .entry(format!("{}{}", request.host, request.path))
+                .or_insert((0, request.status));
+            entry.0 += 1;
+            entry.1 = request.status;
+        }
+        for (path, (count, status)) in by_path.iter().take(12) {
+            eprintln!("LIVE_CAPTURE   challenge x{count} -> {status}  {path}");
+        }
+        // Whether the clearance cookie the server grants ever comes back is what
+        // separates "the gate keeps refusing us" from "we keep losing the pass".
+        let oneshots: Vec<&CapturedRequestInput> = seen
+            .iter()
+            .filter(|request| request.path.contains("/jsd/oneshot/"))
+            .collect();
+        let carrying = oneshots
+            .iter()
+            .filter(|request| {
+                request.request_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("cookie")
+                        && header.value.contains("cf_clearance")
+                })
+            })
+            .count();
+        let granting = oneshots
+            .iter()
+            .filter(|request| {
+                request.response_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("set-cookie")
+                        && header.value.contains("cf_clearance")
+                })
+            })
+            .count();
+        eprintln!(
+            "LIVE_CAPTURE   oneshot: {} total, {granting} granted cf_clearance, {carrying} sent it back",
+            oneshots.len()
+        );
+        // If the document itself is refetched over and over, the beacon count is
+        // a symptom and the reload is the disease.
+        let mut repeats: Vec<(usize, String)> = {
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for request in &seen {
+                *counts
+                    .entry(format!(
+                        "{} {}{}",
+                        request.method, request.host, request.path
+                    ))
+                    .or_default() += 1;
+            }
+            counts.into_iter().map(|(k, v)| (v, k)).collect()
+        };
+        repeats.sort_by(|a, b| b.0.cmp(&a.0));
+        for (count, what) in repeats.iter().take(8) {
+            eprintln!("LIVE_CAPTURE   x{count}  {}", &what[..what.len().min(110)]);
+        }
+        // What the product claims on the fingerprint panel, read off the same
+        // records it shows there: whether the handshake the browser made and the
+        // handshake ShowNet made on its behalf are the same client.
+        {
+            let mut pairs: std::collections::BTreeSet<(String, String, String)> =
+                Default::default();
+            for record in seen.iter().filter_map(|r| r.tls_fingerprint.as_ref()) {
+                let json = serde_json::to_value(record).unwrap_or_default();
+                let side = |name: &str, field: &str| {
+                    json.get(name)
+                        .and_then(|value| value.get(field))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("—")
+                        .to_string()
+                };
+                pairs.insert((
+                    side("inbound", "ja3"),
+                    side("outbound", "ja3"),
+                    format!("{} / {}", side("inbound", "ja4"), side("outbound", "ja4")),
+                ));
+            }
+            eprintln!("LIVE_CAPTURE   fingerprint pairs seen: {}", pairs.len());
+            for (inbound, outbound, ja4) in pairs.iter().take(4) {
+                eprintln!(
+                    "LIVE_CAPTURE     ja3 in={inbound}\nLIVE_CAPTURE     ja3 out={outbound}  {}",
+                    if inbound == outbound {
+                        "MATCH"
+                    } else {
+                        "DIFFER"
+                    }
+                );
+                eprintln!("LIVE_CAPTURE     ja4 in/out={ja4}");
+            }
+        }
+
+        // The document is what reloads, so what it gets back each time is the
+        // question: the real page, or a Cloudflare interstitial.
+        let documents: Vec<&CapturedRequestInput> = seen
+            .iter()
+            .filter(|request| {
+                request.method == "GET" && request.path == "/" && request.host.starts_with("www.")
+            })
+            .collect();
+        let with_clearance = documents
+            .iter()
+            .filter(|request| {
+                request.request_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("cookie")
+                        && header.value.contains("cf_clearance")
+                })
+            })
+            .count();
+        let mitigated = documents
+            .iter()
+            .filter(|request| {
+                request
+                    .response_headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("cf-mitigated"))
+            })
+            .count();
+        eprintln!(
+            "LIVE_CAPTURE   document: {} fetches, {with_clearance} carried cf_clearance, {mitigated} were cf-mitigated",
+            documents.len()
+        );
+        for request in documents
+            .iter()
+            .take(3)
+            .chain(documents.iter().rev().take(2))
+        {
+            eprintln!(
+                "LIVE_CAPTURE     doc -> {} {} bytes proto={}",
+                request.status, request.size_bytes, request.protocol
+            );
+        }
+
+        // "Unexpected token '<'" means a script fetch answered with markup. Find
+        // every request the browser asked for as a script whose response was not
+        // JavaScript — that is the one the page choked on.
+        for request in seen
+            .iter()
+            .filter(|request| {
+                request.request_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("sec-fetch-dest") && header.value == "script"
+                }) && request.response_headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("content-type")
+                        && header.value.contains("text/html")
+                })
+            })
+            .take(6)
+        {
+            eprintln!(
+                "LIVE_CAPTURE   script served HTML: {} {}{} -> {} {:?}",
+                request.method,
+                request.host,
+                &request.path[..request.path.len().min(70)],
+                request.status,
+                request
+                    .response_body
+                    .as_deref()
+                    .map(|b| &b[..b.len().min(120)])
+            );
+        }
+
+        // A page that reports its own errors is telling us what broke; read it
+        // rather than guess.
+        if let Some(reported) = seen
+            .iter()
+            .find(|request| request.path.contains("/track/error") && request.method == "POST")
+        {
+            eprintln!(
+                "LIVE_CAPTURE   site error report -> {} {:?}",
+                reported.status,
+                reported
+                    .request_body
+                    .as_deref()
+                    .map(|body| &body[..body.len().min(600)])
+            );
+        }
+        if let Some(sample) = oneshots.first() {
+            eprintln!(
+                "LIVE_CAPTURE   sample {} {} proto={} status={} size={}",
+                sample.method, sample.path, sample.protocol, sample.status, sample.size_bytes
+            );
+            for header in &sample.request_headers {
+                eprintln!("LIVE_CAPTURE     > {}: {}", header.name, header.value);
+            }
+            for header in &sample.response_headers {
+                eprintln!("LIVE_CAPTURE     < {}: {}", header.name, header.value);
+            }
+            eprintln!(
+                "LIVE_CAPTURE     body: {:?}",
+                sample
+                    .response_body
+                    .as_deref()
+                    .map(|body| &body[..body.len().min(200)])
+            );
+        }
+        let errors = errors.lock().unwrap();
+        eprintln!("LIVE_CAPTURE proxy errors: {}", errors.len());
+        let mut by_kind: std::collections::BTreeMap<String, usize> = Default::default();
+        for error in errors.iter() {
+            *by_kind
+                .entry(error.chars().take(70).collect::<String>())
+                .or_default() += 1;
+        }
+        let mut kinds: Vec<(usize, String)> = by_kind.into_iter().map(|(k, v)| (v, k)).collect();
+        kinds.sort_by(|a, b| b.0.cmp(&a.0));
+        for (count, kind) in kinds.iter().take(8) {
+            eprintln!("LIVE_CAPTURE   err x{count}  {kind}");
+        }
     }
 }

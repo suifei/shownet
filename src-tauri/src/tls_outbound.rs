@@ -15,7 +15,7 @@ use crate::tls_fingerprint::ClientTlsFingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio_rustls::rustls::crypto::{aws_lc_rs, CryptoProvider};
 use tokio_rustls::rustls::pki_types::CertificateDer;
@@ -501,15 +501,42 @@ pub fn build_client_config_http11_only(profile: OutboundTlsProfile) -> Arc<Clien
 /// an origin under load, a network that misbehaved for a minute — would cost a
 /// host its multiplexing until the app restarted, and nothing would ever
 /// re-check whether the condition still held.
-#[cfg(not(test))]
-const H2_DOWNGRADE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-/// Short under test so expiry can be exercised by waiting rather than by
-/// back-dating an `Instant`. `Instant` is monotonic-since-boot on every target,
-/// so subtracting half an hour from `now` yields `None` on a freshly booted
-/// machine — which is exactly what CI runners are, and the test would have
-/// panicked there while passing on any long-lived workstation.
+const H2_DOWNGRADE_TTL_DEFAULT_MS: u64 = 30 * 60 * 1000;
+
+/// Held as a value rather than a `#[cfg(test)]` constant so that test builds
+/// behave like production unless a test opts out.
+///
+/// This used to be 60ms under `cfg(test)`, which quietly broke the only kind of
+/// test that can observe this code doing its job: an integration test that
+/// drives a real browser through the proxy runs under `cfg(test)` too, so the
+/// downgrade expired between requests and the origin was re-learned on every
+/// one. Reading that output, the h2 refusal looked like a downgrade that never
+/// stuck and the page reload it caused looked like a product bug — neither was
+/// true of the shipped build. A test-only constant that changes behavior rather
+/// than timing is indistinguishable from a bug when something else is under
+/// investigation.
+static H2_DOWNGRADE_TTL_MS: AtomicU64 = AtomicU64::new(H2_DOWNGRADE_TTL_DEFAULT_MS);
+
+fn h2_downgrade_ttl() -> std::time::Duration {
+    std::time::Duration::from_millis(H2_DOWNGRADE_TTL_MS.load(Ordering::Relaxed))
+}
+
+/// Shortens the TTL so expiry can be exercised by waiting rather than by
+/// back-dating an `Instant` — `Instant` is monotonic-since-boot, so subtracting
+/// half an hour from `now` yields `None` on a freshly booted machine, which is
+/// exactly what a CI runner is. Only the tests that assert on expiry call this;
+/// everything else, including integration tests, sees the shipped TTL.
 #[cfg(test)]
-const H2_DOWNGRADE_TTL: std::time::Duration = std::time::Duration::from_millis(60);
+pub fn set_h2_downgrade_ttl_for_test(ttl: std::time::Duration) {
+    H2_DOWNGRADE_TTL_MS.store(ttl.as_millis() as u64, Ordering::Relaxed);
+}
+
+/// Puts the shipped TTL back, so one test's shortening cannot leak into the
+/// next — they share a process.
+#[cfg(test)]
+pub fn reset_h2_downgrade_ttl_for_test() {
+    H2_DOWNGRADE_TTL_MS.store(H2_DOWNGRADE_TTL_DEFAULT_MS, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy)]
 struct H2Rejections {
@@ -554,7 +581,7 @@ pub fn note_origin_http2_rejected(host: &str) -> bool {
     // TTL disarmed the feature instead of re-evaluating it.
     if entry
         .downgraded_at
-        .is_some_and(|at| at.elapsed() >= H2_DOWNGRADE_TTL)
+        .is_some_and(|at| at.elapsed() >= h2_downgrade_ttl())
     {
         entry.count = 0;
         entry.downgraded_at = None;
@@ -578,7 +605,7 @@ fn origin_http2_rejected(host: &str) -> bool {
             hosts.get(&key).is_some_and(|entry| {
                 entry
                     .downgraded_at
-                    .is_some_and(|at| at.elapsed() < H2_DOWNGRADE_TTL)
+                    .is_some_and(|at| at.elapsed() < h2_downgrade_ttl())
             })
         })
         .unwrap_or(false)
@@ -820,12 +847,15 @@ mod tests {
         // the tally stayed above the threshold, so the equality that arms it
         // never matched twice and one expiry disarmed the host for good.
         clear_origin_http2_rejections();
+        // Only this assertion needs a short TTL, so only this assertion asks for
+        // one — the shipped half hour stays in force everywhere else.
+        set_h2_downgrade_ttl_for_test(std::time::Duration::from_millis(60));
         assert!(!note_origin_http2_rejected(host));
         assert!(note_origin_http2_rejected(host));
         assert!(origin_force_http11_for_host(host));
-        // Waits out the (test-length) TTL rather than back-dating an Instant,
-        // which cannot be done on a machine that has not been up that long.
-        std::thread::sleep(H2_DOWNGRADE_TTL + std::time::Duration::from_millis(20));
+        // Waits out the shortened TTL rather than back-dating an Instant, which
+        // cannot be done on a machine that has not been up that long.
+        std::thread::sleep(h2_downgrade_ttl() + std::time::Duration::from_millis(20));
         assert!(!origin_force_http11_for_host(host), "downgrade expires");
         assert!(!note_origin_http2_rejected(host), "and starts over");
         assert!(
@@ -836,6 +866,7 @@ mod tests {
 
         clear_origin_http2_rejections();
         assert!(!origin_force_http11_for_host(host));
+        reset_h2_downgrade_ttl_for_test();
     }
 
     #[test]

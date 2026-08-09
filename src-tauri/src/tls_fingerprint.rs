@@ -43,6 +43,14 @@ pub struct OutboundTlsFingerprint {
     pub mode: String,
     pub profile: String,
     pub ja3: Option<String>,
+    /// The stable half of the pair, and the only one worth comparing against
+    /// `inbound.ja4`. JA3 covers the GREASE values Chrome randomises per
+    /// connection, so inbound JA3 differs on every handshake — measured on one
+    /// page load, sixteen distinct inbound JA3s carried one identical JA4. Until
+    /// this field existed the measurement was computed and then dropped into the
+    /// free-text note, so nothing could actually check the two sides matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ja4: Option<String>,
     pub note: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fidelity_label: Option<String>,
@@ -205,6 +213,7 @@ pub fn mitm_fingerprint_with_selection(
             profile: resolved.as_str().to_string(),
             // Measured after connect_verified_tls_measured; never pre-filled.
             ja3: None,
+            ja4: None,
             note: format!(
                 "{} 入站 ClientHello 用于分析与档位选择；目标站看到的是 ShowNet 出站握手（engine={}）。parity 仅在实测 JA3 与浏览器目标一致时为真。",
                 resolved.note(),
@@ -224,6 +233,10 @@ pub fn mitm_fingerprint_with_selection(
 
 pub fn tunnel_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord {
     let client_ja3 = inbound.ja3.clone();
+    // Pass-through means the origin receives the client's own ClientHello, so the
+    // two sides are the same handshake by definition — the one case where parity
+    // needs no measurement.
+    let client_ja4 = inbound.ja4.clone();
     TlsFingerprintRecord {
         capture_mode: "tunnel".to_string(),
         inbound,
@@ -231,6 +244,7 @@ pub fn tunnel_fingerprint(inbound: ClientTlsFingerprint) -> TlsFingerprintRecord
             mode: "pass-through".to_string(),
             profile: "client-pass-through".to_string(),
             ja3: Some(client_ja3),
+            ja4: Some(client_ja4),
             note: "目标站收到客户端原始 ClientHello；ShowNet 不终止 TLS，因此无法读取请求正文。"
                 .to_string(),
             fidelity_label: Some("pass-through-client-ja3".into()),

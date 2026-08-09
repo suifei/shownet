@@ -84,6 +84,10 @@ export interface TlsFingerprintRecord {
     mode: "pass-through" | "independent" | "mapped-from-inbound" | string;
     profile: string;
     ja3?: string;
+    /** The stable identifier — compare this with `inbound.ja4`, not the JA3s.
+     *  Chrome randomises the GREASE values JA3 covers on every connection, so
+     *  inbound JA3 never repeats while inbound JA4 stays fixed. */
+    ja4?: string;
     note: string;
     fidelityLabel?: string;
     engine?: string;

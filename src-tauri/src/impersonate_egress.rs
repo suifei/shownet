@@ -38,6 +38,14 @@ use wreq_util::Emulation;
 /// the actual installed browser by browser_and_egress_present_one_fingerprint.
 pub const EMULATION: Emulation = Emulation::Chrome137;
 
+/// The JA4 `EMULATION` puts on the wire. Fixed per emulation, so it is a constant
+/// rather than a per-handshake measurement — but it is a measured constant:
+/// wreq_egress_is_byte_exact_chrome reads it back off a live reflector, and
+/// browser_and_egress_present_one_fingerprint checks the installed browser
+/// presents the same one. Changing EMULATION without changing this is caught by
+/// both.
+pub const EGRESS_JA4: &str = "t13d1516h2_8daaf6152771_d8a2da3f94cd";
+
 /// A gathered response: everything the MITM path needs to relay it back to the
 /// calling browser.
 pub struct ImpersonateResponse {
