@@ -56,6 +56,7 @@
     "test:mitm-smoke": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml live_shownet_mitm_smoke -- --ignored --nocapture",
     "test:browser-ua": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml launch_user_agent_matches_the_browsers_own -- --ignored --nocapture",
     "test:live-capture:impersonate": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring a_live_capture_session_shows -- --ignored --nocapture",
+    "test:font-css": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml a_google_fonts_stylesheet_survives -- --ignored --nocapture",
     "test:live-capture": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml a_live_capture_session_shows -- --ignored --nocapture",
     "test:ja4-parity": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring browser_and_egress_present_one_fingerprint -- --ignored --nocapture",
     "test:impersonate-mitm": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring mitm_impersonate_presents_chrome -- --ignored --nocapture",

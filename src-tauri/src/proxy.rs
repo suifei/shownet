@@ -11783,6 +11783,87 @@ mod tests {
         Ok(CertificateAuthority::load_or_create(Some(material))?.0)
     }
 
+    /// Google Fonts through the MITM path, which is where a whole site can die on
+    /// a stylesheet.
+    ///
+    /// Measured on lionairthai: `fonts.googleapis.com/css2` answered 502 through
+    /// the proxy, the page's CSS preload rejected, React Router caught the
+    /// rejection during render, and `#root` stayed empty — a blank page whose
+    /// cause is three layers away from the request that failed. Nothing else on
+    /// that load failed; every other asset was 200.
+    ///
+    ///   PROXY=http://127.0.0.1:8080 npm run test:font-css
+    #[tokio::test]
+    #[ignore = "network + an env upstream; run via npm run test:font-css"]
+    async fn a_google_fonts_stylesheet_survives_the_mitm_path() {
+        let upstream = effective_upstream_from_process_env()
+            .unwrap_or_else(|| panic!("needs PROXY or HTTP(S)_PROXY / ALL_PROXY"));
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-font-css".to_string(),
+            upstream,
+            test_certificate_authority(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .expect("listener");
+        let listen = handle.local_addr();
+
+        // The MITM leaf is signed by a throwaway CA here; the point of the test is
+        // the status the origin path produces, not certificate trust.
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{listen}")).expect("proxy"))
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("client");
+
+        // The exact shape the site requests: two families, italic axis, several
+        // weights, and display=swap. A long query is the part that a rewriting
+        // proxy is most likely to mangle.
+        let url = "https://fonts.googleapis.com/css2\
+?family=Prompt:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400\
+&family=Outfit:wght@300;400;500;600;700&display=swap";
+        let response = client
+            .get(url.replace('\n', ""))
+            .header("referer", "https://www.lionairthai.com/")
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("request through the MITM failed: {error}"));
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        eprintln!("FONT_CSS status={status} bytes={}", body.len());
+        for error in errors.lock().unwrap().iter().take(5) {
+            eprintln!("FONT_CSS proxy error: {error}");
+        }
+
+        assert!(
+            status.is_success(),
+            "the stylesheet came back {status}; a site that preloads it renders \
+             blank, and the failure surfaces as a React render error rather than \
+             as a network problem. Body: {}",
+            &body[..body.len().min(300)]
+        );
+        assert!(
+            body.contains("font-face"),
+            "a 200 that is not CSS breaks the same way a 502 does: {}",
+            &body[..body.len().min(200)]
+        );
+    }
+
     /// Drives a real capture session end to end — production proxy, production
     /// browser launch, a real site — and inspects what the origins were actually
     /// sent.

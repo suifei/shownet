@@ -67,6 +67,20 @@ PrivacySandboxSettings4,PushMessaging,SafeBrowsingEnhancedProtection,\
 SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingRealTimeLookup,SigninPromo,\
 TlsMldsaSignatures,Translate";
 
+/// The capture window, and the screen it claims to be on.
+///
+/// The screen is not the window: headless Chrome hardcodes an 800x600 screen
+/// regardless of `--window-size`, so a page reading `screen.width` sees a display
+/// no real desktop has. `--screen-info` overrides it. The value is a common
+/// desktop resolution rather than the host's real one — ShowNet launches the
+/// browser without an app handle to query monitors, and any plausible desktop
+/// that comfortably contains the window is enough to stop the readout being an
+/// outlier.
+const WINDOW_WIDTH: u32 = 1440;
+const WINDOW_HEIGHT: u32 = 900;
+const SCREEN_WIDTH: u32 = 1920;
+const SCREEN_HEIGHT: u32 = 1080;
+
 /// Chrome's reduced User-Agent: every token but the major version is frozen per
 /// platform, which is what makes building the string before launch safe.
 fn frozen_user_agent(major: u32) -> String {
@@ -136,7 +150,15 @@ impl ProxyBrowserHandle {
             // about the capture depends on announcing it.
             .arg("--disable-blink-features=AutomationControlled")
             .arg("--incognito")
-            .arg("--window-size=1440,900")
+            .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
+            // Headless reports an 800x600 screen whatever --window-size says, and
+            // a desktop browser whose screen is smaller than common phones is a
+            // loud tell — bisecting the launch flags against a fingerprint probe,
+            // this was the only signal any of them produced once the User-Agent
+            // was fixed. Every other flag here (the debugging port, incognito, the
+            // disable-* block, the redirected Google endpoints) measured identical
+            // to a stock browser.
+            .arg(format!("--screen-info={{{SCREEN_WIDTH}x{SCREEN_HEIGHT}}}"))
             .arg("--gcm-checkin-url=http://127.0.0.1:9/disabled")
             .arg("--gcm-mcs-endpoint=127.0.0.1:9")
             .arg("--gcm-registration-url=http://127.0.0.1:9/disabled")
@@ -527,6 +549,7 @@ pub(crate) fn chrome_executable() -> Result<PathBuf, String> {
 mod tests {
     use super::{
         chrome_executable, chrome_major_version, frozen_user_agent, DISABLED_FEATURES, LAB_SCRIPT,
+        SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
     };
 
     /// The entry in `DISABLED_FEATURES` whose absence would silently cost JA4
@@ -606,6 +629,23 @@ mod tests {
             frozen_user_agent(151),
             frozen_user_agent(137),
             "the major version has to reach the string"
+        );
+    }
+
+    /// The window has to fit on the screen it claims. A screen smaller than the
+    /// window is the same class of tell as the 800x600 default it replaces.
+    #[test]
+    fn the_claimed_screen_can_contain_the_window() {
+        assert!(
+            SCREEN_WIDTH >= WINDOW_WIDTH && SCREEN_HEIGHT >= WINDOW_HEIGHT,
+            "window {WINDOW_WIDTH}x{WINDOW_HEIGHT} does not fit on the claimed \
+             screen {SCREEN_WIDTH}x{SCREEN_HEIGHT}"
+        );
+        // Headless's own default, which is the value this exists to replace.
+        assert_ne!(
+            (SCREEN_WIDTH, SCREEN_HEIGHT),
+            (800, 600),
+            "that is the headless default, not an override"
         );
     }
 

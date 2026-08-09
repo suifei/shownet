@@ -521,3 +521,51 @@ user-agent: Mozilla/5.0 (...) HeadlessChrome/151.0.0.0 Safari/537.36
 
 Cloudflare 循环是否因此消失,**尚未在真实站点上验证**。UA 泄露是有证据的缺陷且已修,
 但它是不是该循环的唯一原因还需要一次真实抓包确认。
+
+---
+
+## 12. 内嵌浏览器的自动化痕迹:逐标志二分(2026-08-09)
+
+### 12.1 先撤回一个错误结论
+
+调查 Cloudflare 挑战不通过时,曾判断 **「Cloudflare 检测到 CDP 调试器附着」**。
+**该结论不成立,不要据此改架构。** 当时的对比里变量没有隔离 —— ShowNet 的浏览器
+同时带着 headless、incognito、17 条 `--disable-*`、21 条 `--disable-features`、
+重定向的 Google 端点等约 30 个标志,而对照组接近默认 Chrome。
+
+隔离实验(同标志集,只变调试端口)显示:经典 CDP 探测手法(给 `Error.stack` 装
+getter,调试器序列化时触发)在**不开端口 / 开端口无客户端 / 开端口且客户端已
+`Runtime.enable`** 三种情况下**均未触发**。调试端口从页面里不可见。
+
+### 12.2 二分结果
+
+本地探针页测量检测器实际会读的信号(`navigator.webdriver`、UA、WebGL renderer、
+plugins/mimeTypes、`window.chrome`、permissions、screen/outer 尺寸、pdfViewer 等),
+以干净有头 Chrome 为基线,逐批加入 ShowNet 的启动标志:
+
+| 标志批次 | 与基线的差异 |
+|---|---|
+| `--remote-debugging-port` + `--remote-debugging-address` + `--remote-allow-origins` | 无 |
+| `--incognito` | 无 |
+| gcm / gaia / google-apis / google-base → `127.0.0.1:9` | 无 |
+| 17 条 `--disable-*`(component-update、field-trial-config、sync…) | 无 |
+| 21 条 `--disable-features` | 无 |
+| `--disable-blink-features=AutomationControlled` | 无 |
+| **`--headless=new`** | **UA 含 `HeadlessChrome`;`screen` 报 800x600** |
+
+**唯一泄露自动化痕迹的是 headless 本身。** 其余标志逐项与普通浏览器无异。
+
+### 12.3 两处都可修
+
+- **UA** —— 已由 `--user-agent`(§11.4)覆盖,启动即生效,无渲染器接缝。
+- **screen 800x600** —— headless 无视 `--window-size` 恒报此值,一个比常见手机还小的
+  桌面显示器是明显异常。`--screen-info={WxH}` 可覆盖,实测恢复为与基线一致。
+
+两者同时施加后,探针测得的每一项都与干净有头 Chrome 相同。
+
+### 12.4 仍未回答
+
+上述修复**是否足以通过 Cloudflare 托管挑战,尚未验证**。已知的是:在一个不带任何
+ShowNet 标志的普通 Chrome 上,该挑战会给出可点击的复选框,而复选框本身需要人操作。
+指纹层面的差异已消除,但挑战是否还依赖其它信号(行为、IP 信誉、Turnstile 内部检测)
+未知 —— 不要把 §12.3 当作"挑战已解决"。
