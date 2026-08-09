@@ -310,3 +310,48 @@ pub fn export(
         bytes_written,
     })
 }
+
+#[cfg(test)]
+mod real_session_tests {
+    /// Runs the whole capture-to-SDK pipeline against a real captured session,
+    /// which is the only way to see what it makes of traffic nobody curated.
+    /// Unit tests build their own fixtures and therefore only ever exercise
+    /// shapes the author already had in mind.
+    ///
+    ///   SHOWNET_SESSION=session-... npm run test:sdk-real
+    #[test]
+    #[ignore = "needs a real captured session; run via npm run test:sdk-real"]
+    fn export_a_real_session_and_describe_what_it_produced() {
+        let session = std::env::var("SHOWNET_SESSION")
+            .unwrap_or_else(|_| panic!("set SHOWNET_SESSION to a captured session id"));
+        let database = std::env::var("SHOWNET_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join("Library/Application Support/com.shownet.desktop/shownet.sqlite3")
+            });
+        let storage = crate::storage::Storage::open(&database).expect("open the app database");
+        let out = std::env::temp_dir().join("shownet-sdk-real");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).expect("output dir");
+
+        let result = super::export(&storage, &session, Some(&out)).expect("export");
+        eprintln!(
+            "SDK dir={} files={} bytes={}",
+            result.directory,
+            result.files.len(),
+            result.bytes_written
+        );
+        for file in &result.files {
+            let path = std::path::Path::new(&result.directory).join(file);
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            eprintln!("SDK   {file}  {size} bytes");
+        }
+        eprintln!("SDK readiness: {:?}", result.readiness);
+
+        assert!(
+            !result.files.is_empty(),
+            "an export with no files is not one"
+        );
+    }
+}

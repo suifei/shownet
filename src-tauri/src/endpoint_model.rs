@@ -268,15 +268,34 @@ fn identifier_shape(value: &str) -> Option<&'static str> {
         return Some("hex");
     }
     if value.len() >= 20
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=')
+        && value.chars().all(is_token_char)
         && value.chars().any(|c| c.is_ascii_digit())
     {
         return Some("token");
     }
+    // Charset-independent backstop. The rule above guesses at an alphabet, and
+    // guessing wrong costs an endpoint per request: a Cloudflare challenge token
+    // carries dots, missed the alphabet by one character, and 917 literal
+    // characters became a route — one method per request, each named after the
+    // token, in a client that reached 978 KB and 444 "endpoints" of which 30
+    // were real. Whatever the alphabet, a segment this long is not a route name;
+    // the longest in any real API is a couple of dozen characters.
+    if value.len() > MAX_ROUTE_SEGMENT_CHARS {
+        return Some("token");
+    }
     None
 }
+
+/// Characters a token-shaped segment may contain. Beyond alphanumerics: `-`,
+/// `_` and `=` for base64url and its padding, `.` because JWTs and Cloudflare's
+/// challenge tokens separate their parts with it, and `~` which is unreserved in
+/// RFC 3986 and appears in signed URLs.
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '.' | '~')
+}
+
+/// Above this, a path segment is opaque data rather than a name someone chose.
+const MAX_ROUTE_SEGMENT_CHARS: usize = 48;
 
 /// The route a path belongs to, with identifier-shaped segments blanked out.
 /// Requests are grouped by this before anything else, so `/api/v1/users/1001`
@@ -1219,6 +1238,60 @@ mod tests {
     }
 
     #[test]
+    /// A token the alphabet rule does not recognise still must not become a
+    /// route. Measured on a real capture: Cloudflare's challenge tokens carry
+    /// dots, fell outside the allowed characters, and each one became its own
+    /// endpoint — 444 "endpoints" of which 30 were real, in a 978 KB client
+    /// whose method names were the tokens themselves.
+    #[test]
+    fn an_opaque_path_segment_never_becomes_a_route() {
+        // The exact shape that produced the blowup: base64url with dots.
+        let cloudflare = "S5ZtxHBW6DikjeX1Gz.dLaMoxlkk1LoK1p08OEfLqHE-1786208700-1.3.1.1-qxrtT_I3JiBSqsDnrhsRlR2X43MOfb1l";
+        assert_eq!(super::identifier_shape(cloudflare), Some("token"));
+
+        // A JWT-ish segment, dots and all.
+        assert_eq!(
+            super::identifier_shape(
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP"
+            ),
+            Some("token")
+        );
+
+        // The backstop must catch what neither earlier rule can: no digits, and
+        // characters outside the token alphabet. Length alone decides.
+        let outside_alphabet = "zq%!".repeat(super::MAX_ROUTE_SEGMENT_CHARS / 4 + 1);
+        assert!(outside_alphabet.len() > super::MAX_ROUTE_SEGMENT_CHARS);
+        assert_eq!(super::identifier_shape(&outside_alphabet), Some("token"));
+
+        // And two different tokens must land on one route, which is the point.
+        assert_eq!(
+            super::route_signature(&format!("/cdn-cgi/challenge-platform/h/b/ci/{cloudflare}")),
+            super::route_signature("/cdn-cgi/challenge-platform/h/b/ci/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP")
+        );
+    }
+
+    /// The backstop must not swallow names people actually chose, or every long
+    /// route collapses into one method and the SDK loses endpoints instead.
+    #[test]
+    fn ordinary_route_names_stay_literal() {
+        for name in [
+            "challenge-platform",
+            "flightrr_api",
+            "available-dates",
+            "recent_search",
+            "api",
+            "v1",
+            "well-known",
+            "authorization-server-metadata",
+        ] {
+            assert_eq!(
+                super::identifier_shape(name),
+                None,
+                "{name} is a route name, not an identifier"
+            );
+        }
+    }
+
     fn a_paging_parameter_is_not_an_enum() {
         // Found by reading a dumped model, not by a failing assertion: page=1
         // then page=2 was being reported as enum ["1","2"], which becomes

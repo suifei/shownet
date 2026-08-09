@@ -35,6 +35,8 @@ const EXCLUDED: Record<string, string> = {
     "drives the full MITM path to a live reflector; run via npm run test:impersonate-mitm",
   launch_user_agent_matches_the_browsers_own_client_hints:
     "needs a locally installed Chrome; run via npm run test:browser-ua",
+  export_a_real_session_and_describe_what_it_produced:
+    "needs a real captured session in the app database; run via npm run test:sdk-real",
   a_google_fonts_stylesheet_survives_the_mitm_path:
     "needs network and an env upstream; run via npm run test:font-css",
   a_live_capture_session_shows_the_site_a_consistent_browser:
