@@ -2284,43 +2284,6 @@ fn set_outbound_tls_auto_from_inbound(
 }
 
 #[tauri::command]
-fn set_outbound_impersonate(enabled: bool, state: State<'_, AppState>) -> Result<Value, String> {
-    // Impersonate is not optional when the stack is linked: turning it off would
-    // send rustls ClientHellos to origins and break inbound/outbound JA4 parity.
-    // Keep the command for older UI builds, but refuse disable and always report
-    // the engine that is actually active.
-    if !enabled && tls_outbound::real_impersonate_stack_available() {
-        return Err(
-            "已链接浏览器级出站引擎时不能关闭逐字节 Chrome 出站：入站/出站 JA4 必须一致，rustls 回退已移除"
-                .into(),
-        );
-    }
-    if enabled && !tls_outbound::real_impersonate_stack_available() {
-        return Err(
-            "当前构建未链接 impersonate 出站引擎，无法启用浏览器级 JA4。请使用 --features impersonate-boring 的正式包"
-                .into(),
-        );
-    }
-    let mut payload = state
-        .storage
-        .load_app_setting_json("outbound_tls")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
-    if let Some(obj) = payload.as_object_mut() {
-        // Persist true only; false is rejected above when the stack exists.
-        obj.insert(
-            "impersonate".into(),
-            json!(tls_outbound::real_impersonate_stack_available()),
-        );
-    }
-    state
-        .storage
-        .save_app_setting_json("outbound_tls", &payload)?;
-    Ok(tls_outbound::status_json())
-}
-
-#[tauri::command]
 fn get_px_settings() -> Result<Value, String> {
     Ok(px_analysis::settings_json())
 }
@@ -3796,7 +3759,7 @@ pub fn run() {
             get_outbound_tls_profile,
             set_outbound_tls_profile,
             set_outbound_tls_auto_from_inbound,
-            set_outbound_impersonate,
+
             get_px_settings,
             set_px_settings,
             list_px_evidence,
