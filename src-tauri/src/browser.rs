@@ -207,8 +207,7 @@ impl ProxyBrowserHandle {
         let target = match wait_for_page_target(debug_port, &mut child).await {
             Ok(target) => target,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_chrome_child(&mut child);
                 let _ = lab_shutdown.send(());
                 lab_task.abort();
                 cleanup_browser_profile(&profile_dir);
@@ -263,8 +262,7 @@ impl ProxyBrowserHandle {
 
     pub async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_chrome_child(&mut child);
         }
         if let Some(shutdown) = self.lab_shutdown.take() {
             let _ = shutdown.send(());
@@ -276,6 +274,24 @@ impl ProxyBrowserHandle {
             cleanup_browser_profile(&profile_dir);
         }
     }
+}
+
+fn stop_chrome_child(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &pid, "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn chrome_command(
@@ -366,8 +382,7 @@ fn chrome_command(
 impl Drop for ProxyBrowserHandle {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_chrome_child(child);
         }
         if let Some(shutdown) = self.lab_shutdown.take() {
             let _ = shutdown.send(());
@@ -433,13 +448,22 @@ fn write_browser_json(path: &Path, value: &serde_json::Value) -> Result<(), Stri
 }
 
 fn cleanup_browser_profile(profile_dir: &Path) {
-    if let Err(error) = std::fs::remove_dir_all(profile_dir) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            eprintln!(
-                "failed to remove temporary ShowNet browser profile {}: {error}",
-                profile_dir.display()
-            );
+    let mut last_error = None;
+    for attempt in 0..10 {
+        match std::fs::remove_dir_all(profile_dir) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => last_error = Some(error),
         }
+        if attempt < 9 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if let Some(error) = last_error {
+        eprintln!(
+            "failed to remove temporary ShowNet browser profile {}: {error}",
+            profile_dir.display()
+        );
     }
 }
 
@@ -886,6 +910,13 @@ mod tests {
             .contains("Headless"));
 
         browser.stop().await;
+        let profiles_dir = data_dir.join("browser-profiles");
+        assert!(
+            std::fs::read_dir(&profiles_dir)
+                .map(|mut profiles| profiles.next().is_none())
+                .unwrap_or(true),
+            "temporary Chrome profiles should be removed after browser stop"
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }
