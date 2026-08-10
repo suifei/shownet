@@ -147,6 +147,7 @@ Chrome/{major}.0.0.0 Safari/537.36"
 /// Reads the major version straight off the binary that is about to be launched,
 /// so the UA below describes the browser that actually runs rather than whatever
 /// version this build was written against.
+#[cfg(not(target_os = "windows"))]
 fn chrome_major_version(chrome: &Path) -> Option<u32> {
     let output = Command::new(chrome).arg("--version").output().ok()?;
     // "Google Chrome 151.0.7922.109", "Chromium 151.0.7922.109",
@@ -155,6 +156,53 @@ fn chrome_major_version(chrome: &Path) -> Option<u32> {
     String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .find_map(|token| token.split('.').next()?.parse::<u32>().ok())
+}
+
+#[cfg(target_os = "windows")]
+fn chrome_major_version(chrome: &Path) -> Option<u32> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+
+    let path = chrome
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut ignored_handle = 0;
+    let size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), &mut ignored_handle) };
+    if size == 0 {
+        return None;
+    }
+
+    let mut data = vec![0u8; size as usize];
+    if unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, data.as_mut_ptr().cast::<c_void>()) }
+        == 0
+    {
+        return None;
+    }
+
+    let root = ['\\' as u16, 0];
+    let mut fixed_info = std::ptr::null_mut::<c_void>();
+    let mut fixed_info_len = 0;
+    if unsafe {
+        VerQueryValueW(
+            data.as_ptr().cast::<c_void>(),
+            root.as_ptr(),
+            &mut fixed_info,
+            &mut fixed_info_len,
+        )
+    } == 0
+        || fixed_info.is_null()
+        || fixed_info_len < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
+    {
+        return None;
+    }
+
+    let fixed_info = unsafe { &*fixed_info.cast::<VS_FIXEDFILEINFO>() };
+    (fixed_info.dwSignature == 0xFEEF_04BD).then_some(fixed_info.dwFileVersionMS >> 16)
 }
 
 impl ProxyBrowserHandle {
@@ -902,9 +950,14 @@ mod tests {
     async fn a_real_embedded_browser_stays_headless_and_applies_its_language() {
         let data_dir =
             std::env::temp_dir().join(format!("shownet-browser-launch-{}", std::process::id()));
+        eprintln!(
+            "launching isolated Chrome from {}",
+            chrome_executable().unwrap().display()
+        );
         let mut browser = super::ProxyBrowserHandle::launch(&data_dir, 9, Some("th-TH"))
             .await
             .expect("launch an isolated headless Chrome");
+        eprintln!("Chrome launched; reading page identity");
         let status = browser.status();
         let identity = browser
             .bus()
@@ -936,7 +989,9 @@ mod tests {
             .unwrap_or_default()
             .contains("Headless"));
 
+        eprintln!("page identity verified; stopping Chrome");
         browser.stop().await;
+        eprintln!("Chrome stopped; verifying temporary profile cleanup");
         let profiles_dir = data_dir.join("browser-profiles");
         assert!(
             std::fs::read_dir(&profiles_dir)
