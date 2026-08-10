@@ -73,6 +73,7 @@ jobs:
       # Launches the installed Chrome through the production browser launcher,
       # then verifies it stays headless and applies page/request language.
       - run: npm run test:browser-launch
+        timeout-minutes: 5
       # BoringSSL's x86_64 assembly is NASM syntax, so boring-sys cannot build on
       # Windows without it. Verified locally: the cross build fails with "No
       # CMAKE_ASM_NASM_COMPILER could be found" and succeeds once nasm is on

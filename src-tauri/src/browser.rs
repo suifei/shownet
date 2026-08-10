@@ -11,6 +11,7 @@ use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout, Duration};
@@ -283,15 +284,41 @@ fn stop_chrome_child(child: &mut Child) {
 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let pid = child.id().to_string();
-        let _ = Command::new("taskkill.exe")
+        if let Ok(mut taskkill) = Command::new("taskkill.exe")
             .args(["/PID", &pid, "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .spawn()
+        {
+            if !wait_for_child_exit(&mut taskkill, Duration::from_secs(5)) {
+                let _ = taskkill.kill();
+                let _ = wait_for_child_exit(&mut taskkill, Duration::from_secs(1));
+            }
+        }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    if !wait_for_child_exit(child, Duration::from_secs(2)) {
+        eprintln!(
+            "Chrome process {} did not exit before the shutdown deadline",
+            child.id()
+        );
+    }
+}
+
+fn wait_for_child_exit(child: &mut Child, deadline_after: Duration) -> bool {
+    let deadline = Instant::now() + deadline_after;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn chrome_command(
