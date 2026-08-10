@@ -53,7 +53,7 @@ import {
 } from "../browserBus";
 import { formatClock } from "../format";
 import { trackNavigation } from "../reloadLoop";
-import type { BrowserHookEvent, ProxyBrowserStatus } from "../types";
+import type { BrowserHookEvent, OutboundTlsProfileStatus, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
   /** When false the view stays mounted (keep-alive) but is not the active workspace. */
@@ -83,6 +83,9 @@ function navigatorPlatform(): string {
 
 const CDP_BINDING = "__SHOWNET_CDP_BINDING__";
 const LAB_BINDING = "__SHOWNET_LAB_BINDING__";
+/** Must match `browser.rs` SCREEN_WIDTH / SCREEN_HEIGHT and `--screen-info`. */
+const BROWSER_SCREEN_WIDTH = 1920;
+const BROWSER_SCREEN_HEIGHT = 1080;
 /** sessionStorage key for last navigated URL (P2 optional keep-alive restore). */
 const LAST_URL_STORAGE_KEY = "shownet.browser.lastUrl";
 
@@ -267,13 +270,17 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         if (!surface.clientWidth || !surface.clientHeight) return;
         const width = Math.max(320, Math.floor(surface.clientWidth));
         const height = Math.max(240, Math.floor(surface.clientHeight));
+        // Viewport follows the ShowNet pane; screen stays a common desktop size
+        // (matches browser.rs SCREEN_* / --screen-info). Feeding the small pane
+        // into screenWidth/Height undoes that override and reintroduces the
+        // 800x600-class automation tell Cloudflare-class detectors score.
         cdpSendRef.current?.("Emulation.setDeviceMetricsOverride", {
           width,
           height,
           deviceScaleFactor: 1,
           mobile: false,
-          screenWidth: width,
-          screenHeight: height,
+          screenWidth: BROWSER_SCREEN_WIDTH,
+          screenHeight: BROWSER_SCREEN_HEIGHT,
         });
       }, 80);
     };
@@ -610,8 +617,8 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             height,
             deviceScaleFactor: 1,
             mobile: false,
-            screenWidth: width,
-            screenHeight: height,
+            screenWidth: BROWSER_SCREEN_WIDTH,
+            screenHeight: BROWSER_SCREEN_HEIGHT,
           });
         }
         send("Page.startScreencast", { format: "jpeg", quality: 78, maxWidth: 1800, maxHeight: 1200, everyNthFrame: 1 });
@@ -808,7 +815,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
    */
   async function startProxyChrome(
     destination?: string,
-    options?: { browserLanguage?: string; tlsBypassHost?: string },
+    options?: { browserLanguage?: string },
   ) {
     if (!desktop || browserConnecting) return;
     setBrowserConnecting(true);
@@ -817,7 +824,6 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
       const status = await invoke<ProxyBrowserStatus>("launch_proxy_browser", {
         sessionId,
         browserLanguage: options?.browserLanguage ?? browserLanguage,
-        tlsBypassHost: options?.tlsBypassHost || null,
       });
       const busStatus = await getProxyBrowserStatus().catch(() => null);
       const resolved = busStatus?.running ? busStatus : status;
@@ -1220,14 +1226,35 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     const host = challengeHost;
     if (!host || browserConnecting) return;
     const destination = currentUrl;
+    // Keep MITM decryption. Temporary TLS bypass was the 0.4.16 workaround and
+    // it dropped body capture on the challenge host. The durable path is:
+    //   1) ensure wreq Chrome egress (JA4 matches the capture browser)
+    //   2) drop page Hooks that rewrite SubtleCrypto / fetch (Turnstile-hostile)
+    //   3) reload under the same intercepting proxy
     hooksEnabledRef.current = false;
     setHooksEnabled(false);
-    setBusNote(`正在为 ${host} 切换验证兼容模式`);
+    setBusNote(`正在为 ${host} 关闭 Hook 并确认 Chrome 出站指纹（保持 MITM 抓包）`);
     try {
+      const status = await invoke<OutboundTlsProfileStatus>("set_outbound_impersonate", {
+        enabled: true,
+      });
+      if (!status.realImpersonateStackAvailable) {
+        setBrowserError(
+          "当前构建未链接 impersonate 出站引擎，无法在 MITM 下对齐浏览器 JA4。请使用带 impersonate-boring 的正式包，或在高级控制台确认出站引擎。",
+        );
+        return;
+      }
+      if (!status.impersonateRequested || status.engine !== "impersonate") {
+        setBrowserError(
+          `未能启用逐字节 Chrome 出站（engine=${status.engine ?? "unknown"}）。请在高级控制台打开「用逐字节 Chrome 出站」后重试。`,
+        );
+        return;
+      }
       await stopProxyChrome();
-      await startProxyChrome(destination, { tlsBypassHost: host });
+      await startProxyChrome(destination);
+      setBusNote(`${host}：Hook 已关 · MITM 保持 · 出站 engine=impersonate，请再完成真人验证`);
     } catch (error) {
-      setBrowserError(`切换验证兼容模式失败：${error instanceof Error ? error.message : String(error)}`);
+      setBrowserError(`验证兼容重试失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -1419,16 +1446,24 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                   <span><ShieldCheck size={18} /></span>
                   <div>
                     <strong>检测到 Cloudflare 真人验证</strong>
-                    <small>{challengeHost} 需要浏览器原生 TLS，并关闭页面 Hook 后重试。</small>
+                    <small>
+                      {challengeHost}：保持 HTTPS 解密抓包，确认出站 JA4 与浏览器一致，并关闭页面 Hook
+                      （Hook 会改写 SubtleCrypto/fetch，干扰 Turnstile）。不会临时绕过 TLS 拦截。
+                    </small>
                   </div>
-                  <button type="button" onClick={() => void retryCloudflareChallenge()} disabled={browserConnecting}>兼容模式重试</button>
+                  <button type="button" onClick={() => void retryCloudflareChallenge()} disabled={browserConnecting}>
+                    关闭 Hook 并重试
+                  </button>
                 </div>
               ) : reloadLoopHost && (
                 <div className="browser-reload-loop" role="alert">
                   <span><CircleAlert size={18} /></span>
                   <div>
                     <strong>{reloadLoopHost} 正在反复刷新</strong>
-                    <small>该站点的风控挑战没有通过。多数情况是 MITM 解密改变了 TLS 指纹：在「设置 → HTTPS 解密」把该域名加入绕行清单后重试，绕行域名仍会被抓包，只是不再解密正文。</small>
+                    <small>
+                      该站点的风控挑战没有通过。优先在高级控制台确认「用逐字节 Chrome 出站」已开启
+                      （入站/出站 JA4 应对齐），并关闭页面 Hook；不要用 TLS 绕行换验证通过，否则会丢解密正文。
+                    </small>
                   </div>
                   <button type="button" onClick={dismissReloadLoop}>知道了</button>
                 </div>
@@ -1454,10 +1489,12 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
           <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
           <span title="浏览器页面与请求使用同一语言"><Globe2 size={13} />{proxyBrowser?.browserLanguage || browserLanguage}</span>
-          {proxyBrowser?.tlsBypassHost && <span title="该验证域名当前使用 Chrome 原生端到端 TLS"><ShieldCheck size={13} />验证兼容</span>}
+          {!hooksEnabled && proxyBrowser?.running && (
+            <span title="页面 Hook 已关：仍经 MITM 解密抓包，仅不注入 JS 运行时"><ShieldCheck size={13} />Hook 关 · MITM 开</span>
+          )}
           {(reloadLoopHost || /baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl)) && (
-            <span className="browser-statusbar__hint" title="若页面反复刷新或图裂：设置 → HTTPS 解密 → 为该域名启用绕行">
-              {reloadLoopHost ? `${reloadLoopHost} 反复刷新，试试解密绕行` : "图裂时启用静态 CDN 绕行"}
+            <span className="browser-statusbar__hint" title={reloadLoopHost ? "确认逐字节 Chrome 出站并关闭 Hook；图裂时才用静态 CDN 绕行" : "图裂时：设置 → HTTPS 解密 → 静态 CDN 绕行"}>
+              {reloadLoopHost ? `${reloadLoopHost} 反复刷新：查 JA4/关 Hook` : "图裂时启用静态 CDN 绕行"}
             </span>
           )}
           <span className="browser-statusbar__right">100%</span>

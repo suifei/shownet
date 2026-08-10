@@ -1,8 +1,11 @@
-## 0.4.16 更新
+## 0.4.17 更新
 
-- 修复内嵌浏览器在部分 Chrome 版本上弹出本地窗口、ShowNet 一直停在“正在连接”的问题；Chrome 提前退出时现在会快速给出错误。
-- Cloudflare 挑战页新增“兼容模式重试”：关闭页面 Hook，并只对当前验证域名临时使用浏览器原生 TLS；停止浏览器或抓包后自动清理。
-- 内嵌浏览器菜单新增语言设置，支持 `th-TH`、`zh-Hans-CN` 等合法 BCP 47 标签，并统一页面语言与 `Accept-Language`。
+- **Cloudflare 验证不再临时绕过 TLS。** 检测到挑战页后改为「关闭 Hook 并重试」：保持 HTTPS 解密抓包，确认逐字节 Chrome 出站（入站/出站 JA4 对齐），仅关闭会干扰 Turnstile 的页面 Hook。
+- **正式包默认启用 wreq Chrome 出站。** 链接 `impersonate-boring` 且未显式关闭时默认 `engine=impersonate`，避免静默走 rustls 导致 JA4 不一致、挑战循环。
+- **屏指纹不再被窗格尺寸覆盖。** CDP `screenWidth/Height` 固定桌面分辨率，与启动参数 `--screen-info` 一致。
+- 继承 0.4.16：内嵌浏览器跨 Chrome 版本无头启动、语言设置（BCP 47）、Chrome 提前退出时的明确错误提示。
+
+升级到 0.4.17 后，在 lionairthai 等站点遇到真人验证时：保持抓包与 MITM，点「关闭 Hook 并重试」，再手动完成验证。若高级控制台曾手动关闭「用逐字节 Chrome 出站」，请重新打开。
 
 ## 安装
 

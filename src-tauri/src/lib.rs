@@ -97,10 +97,7 @@ use storage::Storage;
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State};
-use tls_interception::{
-    normalize_tls_interception_settings, TlsInterceptionDecision, TlsInterceptionMode,
-    TlsInterceptionSettings,
-};
+use tls_interception::{TlsInterceptionDecision, TlsInterceptionSettings};
 
 #[cfg(desktop)]
 fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -274,7 +271,6 @@ impl Default for CaptureRuntime {
 pub struct AppState {
     analysis: Mutex<AnalysisRuntime>,
     pub(crate) browser: Mutex<Option<browser::ProxyBrowserHandle>>,
-    pub(crate) browser_tls_bypass_host: Mutex<Option<String>>,
     pub(crate) breakpoints: Arc<BreakpointCoordinator>,
     capture: Mutex<CaptureRuntime>,
     mcp: Mutex<McpRuntime>,
@@ -298,56 +294,16 @@ impl AppState {
         authority_host: &str,
         client_hello_sni: Option<&str>,
     ) -> Result<TlsInterceptionDecision, String> {
-        let temporary_host = self
-            .browser_tls_bypass_host
-            .lock()
-            .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())?
-            .clone();
-        if let Some(temporary) = temporary_browser_tls_interception_decision(
-            temporary_host.as_deref(),
-            authority_host,
-            client_hello_sni,
-        ) {
-            return Ok(temporary);
-        }
+        // Challenge compatibility must never temporarily bypass MITM: that path
+        // trades away TLS body capture. Cloudflare-class gates are handled by
+        // keeping interception on, defaulting the linked impersonate engine so
+        // egress JA4 matches the capture browser, and only disabling page Hooks
+        // (SubtleCrypto / fetch rewrites) on the challenge surface.
         Ok(self
             .storage
             .get_tls_interception_settings()?
             .decision(authority_host, client_hello_sni))
     }
-}
-
-fn temporary_browser_tls_interception_decision(
-    temporary_host: Option<&str>,
-    authority_host: &str,
-    client_hello_sni: Option<&str>,
-) -> Option<TlsInterceptionDecision> {
-    let host = temporary_host?;
-    let decision = TlsInterceptionSettings {
-        mode: TlsInterceptionMode::BypassSelected,
-        bypass: vec![host.to_string()],
-        show_bypassed_connections: true,
-    }
-    .decision(authority_host, client_hello_sni);
-    decision.bypass.then_some(decision)
-}
-
-fn normalize_browser_tls_bypass_host(host: Option<String>) -> Result<Option<String>, String> {
-    let Some(host) = host
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    if host.contains(['*', '?']) {
-        return Err("验证兼容模式只接受当前页面的精确域名".to_string());
-    }
-    let settings = normalize_tls_interception_settings(TlsInterceptionSettings {
-        mode: TlsInterceptionMode::BypassSelected,
-        bypass: vec![host],
-        show_bypassed_connections: true,
-    })?;
-    Ok(settings.bypass.into_iter().next())
 }
 
 fn resolve_data_directory(
@@ -641,7 +597,6 @@ impl RequestQueryRuntime {
 async fn launch_proxy_browser(
     session_id: String,
     browser_language: Option<String>,
-    tls_bypass_host: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProxyBrowserStatus, String> {
@@ -665,27 +620,13 @@ async fn launch_proxy_browser(
     if let Some(previous) = previous {
         previous.stop().await;
     }
-    let tls_bypass_host = normalize_browser_tls_bypass_host(tls_bypass_host)?;
-    *state
-        .browser_tls_bypass_host
-        .lock()
-        .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = tls_bypass_host.clone();
-    let mut handle = match browser::ProxyBrowserHandle::launch(
+    let mut handle = browser::ProxyBrowserHandle::launch(
         &state.data_directory,
         state.proxy_port,
         browser_language.as_deref(),
     )
-    .await
-    {
-        Ok(handle) => handle,
-        Err(error) => {
-            if let Ok(mut host) = state.browser_tls_bypass_host.lock() {
-                *host = None;
-            }
-            return Err(error);
-        }
-    };
-    handle.set_tls_bypass_host(tls_bypass_host);
+    .await?;
+    // status() may refresh `running` from the child process.
     let status = handle.status();
     state
         .browser
@@ -709,10 +650,6 @@ async fn stop_proxy_browser(
     if let Some(handle) = handle {
         handle.stop().await;
     }
-    *state
-        .browser_tls_bypass_host
-        .lock()
-        .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = None;
     // Same payload type as the start path. Emitting a bare `false` here would
     // mean one event channel carrying two incompatible shapes, so any listener
     // written against the struct would break the moment the browser stops.
@@ -2912,10 +2849,6 @@ async fn set_capture_running(
             .lock()
             .map_err(|_| "浏览器运行状态已损坏".to_string())?
             .take();
-        *state
-            .browser_tls_bypass_host
-            .lock()
-            .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = None;
         let (proxy, stopped_session_id) = {
             let mut capture = state
                 .capture
@@ -3658,13 +3591,25 @@ pub fn run() {
                 // it keeps the false-positive impossible even if that gate ever
                 // loosened. With wreq linked, this is what lets
                 // a user's saved choice actually take effect.
+                //
+                // Default is ON when the stack is present and the key was never
+                // written. A release build that ships impersonate-boring but
+                // leaves the toggle false-by-default silently egresses through
+                // rustls: origins see a non-Chrome JA4/h2 fingerprint while the
+                // capture browser's inbound JA4 is Chrome-shaped, so Cloudflare
+                // and similar gates loop even though `test:ja4-parity` is green.
+                // Explicit `impersonate: false` still wins for users who opted out.
                 let wants_impersonate = value
                     .get("impersonate")
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                    .unwrap_or_else(tls_outbound::real_impersonate_stack_available);
                 tls_impersonate::set_impersonate_requested(
                     wants_impersonate && tls_outbound::real_impersonate_stack_available(),
                 );
+            } else if tls_outbound::real_impersonate_stack_available() {
+                // No outbound_tls row yet: same default as above so a fresh
+                // install with a linked stack does not MITM through rustls.
+                tls_impersonate::set_impersonate_requested(true);
             }
             if let Ok(Some(value)) = storage.load_app_setting_json("px_console") {
                 if let Some(v) = value.get("decryptEnabled").and_then(|v| v.as_bool()) {
@@ -3701,7 +3646,7 @@ pub fn run() {
             app.manage(AppState {
                 analysis: Mutex::new(AnalysisRuntime::default()),
                 browser: Mutex::new(None),
-                browser_tls_bypass_host: Mutex::new(None),
+
                 breakpoints,
                 capture: Mutex::new(CaptureRuntime::default()),
                 mcp: Mutex::new(McpRuntime::default()),
@@ -3929,29 +3874,25 @@ mod tests {
     }
 
     #[test]
-    fn browser_challenge_bypass_is_exact_and_temporary() {
-        assert_eq!(
-            normalize_browser_tls_bypass_host(Some(" Shield.LionAirThai.com ".into())).unwrap(),
-            Some("shield.lionairthai.com".into())
-        );
-        assert!(normalize_browser_tls_bypass_host(Some("*.lionairthai.com".into())).is_err());
-
-        let matching = temporary_browser_tls_interception_decision(
-            Some("shield.lionairthai.com"),
-            "shield.lionairthai.com",
-            None,
-        )
-        .expect("challenge host should bypass MITM");
-        assert!(matching.bypass);
-        assert!(temporary_browser_tls_interception_decision(
-            Some("shield.lionairthai.com"),
-            "www.lionairthai.com",
-            None,
-        )
-        .is_none());
+    fn challenge_compatibility_never_installs_a_temporary_tls_bypass() {
+        // Source-level invariant: Cloudflare-class challenges are solved by
+        // impersonate egress + optional Hook off, not by dropping MITM for the
+        // challenge host. Split marker strings so this assertion does not match
+        // itself when scanning the same file.
+        let lib = include_str!("lib.rs");
+        let temporary_fn = ["temporary_browser_tls_", "interception_decision"].concat();
+        let bypass_field = ["browser_tls_", "bypass_host"].concat();
         assert!(
-            temporary_browser_tls_interception_decision(None, "shield.lionairthai.com", None,)
-                .is_none()
+            !lib.contains(&temporary_fn),
+            "temporary MITM bypass for challenge hosts was removed; do not reintroduce it"
+        );
+        assert!(
+            !lib.contains(&bypass_field),
+            "temporary challenge-host bypass field must stay gone so HTTPS stays decrypted"
+        );
+        assert!(
+            lib.contains("Challenge compatibility must never temporarily bypass MITM"),
+            "tls_interception_decision must keep the no-temporary-bypass contract documented"
         );
     }
 

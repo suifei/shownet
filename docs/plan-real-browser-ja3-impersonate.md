@@ -569,3 +569,24 @@ plugins/mimeTypes、`window.chrome`、permissions、screen/outer 尺寸、pdfVie
 ShowNet 标志的普通 Chrome 上,该挑战会给出可点击的复选框,而复选框本身需要人操作。
 指纹层面的差异已消除,但挑战是否还依赖其它信号(行为、IP 信誉、Turnstile 内部检测)
 未知 —— 不要把 §12.3 当作"挑战已解决"。
+
+### 12.5 回归：默认未开 impersonate + 临时 TLS 绕过（2026-08-10）
+
+issue #8 再次出现后，0.4.16 用「验证域名临时 bypass MITM」当兼容模式，会**丢失该域名的 TLS 解密抓包**，方向错误。
+
+根因核对：
+
+| 项 | 实测 |
+|---|---|
+| 抓包浏览器入站 JA4（关 ML-DSA） | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| wreq 出站 JA4 | **相同**（`test:ja4-parity` 仍绿） |
+| 正式包是否链接 wreq | 是（`--features impersonate-boring`） |
+| 运行时是否默认走 wreq | **否** —— `outbound_tls.impersonate` 缺省为 `false`，静默 rustls |
+| 页面 Hook | 改写 SubtleCrypto/fetch，干扰 Turnstile；可关，且**不**需要 bypass TLS |
+
+正确修复（非临时绕过）：
+
+1. 链接栈存在且用户未显式关闭时，**默认** `impersonate=true`。
+2. 挑战 UI：「关闭 Hook 并重试」→ `set_outbound_impersonate(true)` + 关 Hook + 重载；**保持 MITM**。
+3. CDP `setDeviceMetricsOverride` 的 `screenWidth/Height` 固定桌面分辨率，不再用内嵌窗格尺寸覆盖 `--screen-info`。
+4. 删除 `browser_tls_bypass_host` / 临时 interception 决策。

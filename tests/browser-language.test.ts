@@ -38,16 +38,23 @@ describe("Cloudflare challenge detection", () => {
     }), "");
   });
 
-  it("wires compatibility mode through the browser launch and proxy decision", async () => {
+  it("keeps MITM and arms Chrome egress instead of temporary TLS bypass", async () => {
     const [view, lib, proxy] = await Promise.all([
       readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8"),
       readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
       readFile(new URL("../src-tauri/src/proxy.rs", import.meta.url), "utf8"),
     ]);
     assert.match(view, /cloudflareChallengeHost/);
-    assert.match(view, /tlsBypassHost:\s*host/);
     assert.match(view, /hooksEnabledRef\.current = false/);
-    assert.match(lib, /temporary_browser_tls_interception_decision/);
+    assert.match(view, /set_outbound_impersonate/);
+    assert.match(view, /关闭 Hook 并重试/);
+    assert.doesNotMatch(view, /tlsBypassHost/);
+    assert.doesNotMatch(lib, /temporary_browser_tls_interception_decision/);
+    assert.match(lib, /Challenge compatibility must never temporarily bypass MITM/);
     assert.match(proxy, /state\.tls_interception_decision\(host, sni\)/);
+    // Viewport must not overwrite the desktop screen fingerprint with the pane size.
+    assert.match(view, /BROWSER_SCREEN_WIDTH/);
+    assert.match(view, /screenWidth:\s*BROWSER_SCREEN_WIDTH/);
+    assert.match(view, /screenHeight:\s*BROWSER_SCREEN_HEIGHT/);
   });
 });

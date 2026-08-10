@@ -305,10 +305,6 @@ impl ProxyBrowserHandle {
         Arc::clone(&self.bus)
     }
 
-    pub fn set_tls_bypass_host(&mut self, host: Option<String>) {
-        self.status.tls_bypass_host = host.unwrap_or_default();
-    }
-
     pub async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             stop_chrome_child(&mut child);

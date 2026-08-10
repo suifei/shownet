@@ -773,7 +773,7 @@ export function AdvancedConsoleView({
                       checked={Boolean(outboundTls?.impersonateRequested)}
                       onChange={(e) => void setImpersonate(e.target.checked)}
                     />
-                    用逐字节 Chrome 出站（wreq：真实 BoringSSL + Chrome h2 伪头顺序）
+                    用逐字节 Chrome 出站（wreq：真实 BoringSSL + Chrome h2 伪头顺序；正式包默认开启）
                   </label>
                 ) : null}
                 <p className="hint">
@@ -796,12 +796,13 @@ export function AdvancedConsoleView({
                       抓包浏览器已关闭 ML-DSA 签名算法(<code>TlsMldsaSignatures</code>),
                       握手指纹与上面这串一致,因此 <code>ja3Parity</code> 反映的是真实差异
                       而不是一个出站栈永远补不上的固定差值。注意浏览器的握手只到 ShowNet
-                      自己的监听端口,源站看到的始终是上面这份出站指纹。
+                      自己的监听端口,源站看到的始终是上面这份出站指纹。Cloudflare 等闸门应靠此
+                      对齐通过，不要对验证域名临时绕过 TLS 拦截（会丢解密抓包）。
                     </>
                   ) : (
                     <>
-                      开启后出站握手切到 wreq(逐字节 Chrome)。当前 engine=
-                      {outboundTls?.engine ?? "rustls"}。版本预置仍会改变 rustls 路径的可测配方 / JA3。
+                      关闭后出站回退 rustls（非浏览器 JA4）。正式包在未显式关闭时默认开启 wreq。
+                      当前 engine={outboundTls?.engine ?? "rustls"}。版本预置仍会改变 rustls 路径的可测配方 / JA3。
                     </>
                   )}
                 </p>

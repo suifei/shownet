@@ -86,8 +86,6 @@ pub struct ProxyBrowserStatus {
     pub browser_language: String,
     /// Weighted value shared by Chrome preferences and CDP's network override.
     pub accept_language: String,
-    /// Temporary end-to-end TLS host used by challenge compatibility mode.
-    pub tls_bypass_host: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
