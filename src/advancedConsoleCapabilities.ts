@@ -407,7 +407,9 @@ export function honestyBanner(
   status?: { engine?: string; ja3Parity?: boolean } | null,
 ): string {
   const engine =
-    status?.engine === "impersonate" ? "wreq 的逐字节 Chrome 配方" : "rustls 配方";
+    status?.engine === "impersonate"
+      ? "wreq 的逐字节 Chrome 配方（产品固定，不可切回非浏览器出站）"
+      : "rustls 配方（仅未链接 impersonate 的开发构建）";
   const parity = status?.ja3Parity === true ? "true" : "false";
   return `出站 TLS 为 ${engine}（ja3Parity=${parity}）；PX 解码为结构解析，非无密钥硬破。`;
 }

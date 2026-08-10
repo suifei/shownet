@@ -236,7 +236,7 @@ export const mcpToolPreview: ToolDefinition[] = [
   readTool("shownet_get_tls_fingerprints", "读取 JA3/JA4、HTTP/2 SETTINGS/窗口/优先级与出站 TLS 说明（分析取证）"),
   readTool(
     "shownet_get_outbound_tls_status",
-    "读取出站 TLS 预置、engine、ja3Parity 诚实边界（rustls，不宣称位级浏览器全量对齐）",
+    "读取出站 TLS 预置、engine、ja3Parity；正式包固定 wreq Chrome，入站/出站 JA4 应对齐",
   ),
   readTool("shownet_list_px_evidence", "列出会话 PerimeterX/ecData 证据摘要（结构线索，非硬破）"),
   readTool("shownet_decode_px_payload", "单条 PX 相关载荷结构解码（非无密钥硬破）"),

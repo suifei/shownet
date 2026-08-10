@@ -189,13 +189,27 @@ pub fn impersonate_unavailable_reason() -> &'static str {
     "no linked BoringSSL/curl-impersonate (or equivalent) stack in this build; MITM uses rustls"
 }
 
-/// Active outbound engine. Impersonate only when a real stack is available **and** requested.
+/// Active outbound engine for MITM origin egress.
+///
+/// When a real stack is linked, this is **always** Impersonate — there is no
+/// product toggle back to rustls. rustls ClientHello / hyper h2 are not
+/// browser-shaped (JA4 and pseudo-header order both fail strict gates); a path
+/// that could silently fall back to them reintroduced Cloudflare loops even
+/// after JA4 parity was measured green under impersonate. Builds without the
+/// linked stack still report Rustls so unit tests and portable `cargo build`
+/// keep working, but they must not be shipped as a capture product.
 pub fn active_engine() -> OutboundTlsEngine {
-    if real_impersonate_stack_available() && crate::tls_impersonate::impersonate_requested() {
+    if real_impersonate_stack_available() {
         OutboundTlsEngine::Impersonate
     } else {
         OutboundTlsEngine::Rustls
     }
+}
+
+/// Product builds must present browser-matching origin TLS. True only when the
+/// impersonate stack is linked and selected (which is automatic once linked).
+pub fn browser_matching_egress_required_and_active() -> bool {
+    matches!(active_engine(), OutboundTlsEngine::Impersonate)
 }
 
 /// Apply catalog HTTP/2 recipe to a hyper origin client http2::Builder.
@@ -955,22 +969,31 @@ mod tests {
     #[test]
     fn never_claims_full_browser_ja3_without_real_stack() {
         let _guard = preset_lock();
-        // Linked exactly when the feature is compiled in. Impersonate is not
-        // requested here, so the active engine stays rustls either way.
+        // Linked exactly when the feature is compiled in. With the stack,
+        // engine is mandatory Impersonate; without it, rustls for dev only.
         assert_eq!(
             real_impersonate_stack_available(),
             cfg!(feature = "impersonate-boring")
         );
-        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
-        assert!(!active_engine().supports_full_browser_ja3());
         let status = status_json();
+        // status_json parity still requires a measured golden match, so it
+        // stays false without a live sample even when the stack is linked.
         assert_eq!(status["ja3Parity"], false);
-        assert_eq!(status["supportsFullBrowserJa3"], false);
-        assert_eq!(status["engine"], "rustls");
         assert_eq!(
             status["realImpersonateStackAvailable"],
             cfg!(feature = "impersonate-boring")
         );
+        if cfg!(feature = "impersonate-boring") {
+            assert_eq!(active_engine(), OutboundTlsEngine::Impersonate);
+            assert!(active_engine().supports_full_browser_ja3());
+            assert_eq!(status["engine"], "impersonate");
+            assert_eq!(status["supportsFullBrowserJa3"], true);
+        } else {
+            assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+            assert!(!active_engine().supports_full_browser_ja3());
+            assert_eq!(status["engine"], "rustls");
+            assert_eq!(status["supportsFullBrowserJa3"], false);
+        }
     }
 
     /// The cargo feature compiles the impersonate lane in; it links nothing.
@@ -1246,15 +1269,17 @@ mod tests {
         set_active_preset("chrome150").unwrap();
         let st = status_json();
         assert!(st["documentedJa3"].as_str().unwrap().len() == 32);
+        // Catalog documentation alone never flips measured parity — that still
+        // requires a live evaluate_measured match. supportsFullBrowserJa3 follows
+        // the linked stack, not the documented string.
         assert_eq!(st["ja3Parity"], false);
-        assert_eq!(st["supportsFullBrowserJa3"], false);
-        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
-        // The invariant under test is that a documented JA3 alone never turns
-        // parity on — asserted above. Whether the stack is "unavailable" is a
-        // separate axis: empty reason once the connector is linked.
         if cfg!(feature = "impersonate-boring") {
+            assert_eq!(active_engine(), OutboundTlsEngine::Impersonate);
+            assert!(active_engine().supports_full_browser_ja3());
             assert!(impersonate_unavailable_reason().is_empty());
         } else {
+            assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+            assert!(!active_engine().supports_full_browser_ja3());
             assert!(!impersonate_unavailable_reason().is_empty());
         }
     }
@@ -1263,32 +1288,35 @@ mod tests {
     #[cfg(not(feature = "impersonate-boring"))]
     fn impersonate_engine_stays_rustls_without_linked_stack() {
         let _guard = preset_lock();
-        crate::tls_impersonate::set_impersonate_requested(true);
         assert!(!real_impersonate_stack_available());
         assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
         assert!(!active_engine().supports_full_browser_ja3());
         let st = status_json();
         assert_eq!(st["supportsFullBrowserJa3"], false);
-        assert_eq!(st["impersonateRequested"], true);
+        assert_eq!(st["impersonateRequested"], false);
         assert!(st["impersonateUnavailableReason"]
             .as_str()
             .unwrap()
             .contains("no linked"));
-        crate::tls_impersonate::set_impersonate_requested(false);
     }
 
     #[test]
     #[cfg(feature = "impersonate-boring")]
-    fn impersonate_engine_activates_when_linked_and_requested() {
-        // The mirror of the test above: with a connector linked and impersonate
-        // requested, the engine switches. Whether a given handshake earns
-        // browser parity is still decided per-measurement against a golden.
+    fn impersonate_engine_is_mandatory_when_linked() {
+        // Product policy: linked stack ⇒ always Impersonate. There is no
+        // runtime switch back to rustls (that reintroduced JA4 drift).
         let _guard = preset_lock();
-        crate::tls_impersonate::set_impersonate_requested(true);
         assert!(real_impersonate_stack_available());
         assert_eq!(active_engine(), OutboundTlsEngine::Impersonate);
+        assert!(active_engine().supports_full_browser_ja3());
         crate::tls_impersonate::set_impersonate_requested(false);
-        // And it falls back the moment the request is withdrawn.
-        assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
+        assert_eq!(
+            active_engine(),
+            OutboundTlsEngine::Impersonate,
+            "set_impersonate_requested(false) must not re-enable rustls egress"
+        );
+        let st = status_json();
+        assert_eq!(st["engine"], "impersonate");
+        assert_eq!(st["impersonateRequested"], true);
     }
 }

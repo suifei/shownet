@@ -1840,11 +1840,13 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   {outboundTls.browserFamily
                     ? ` · ${outboundTls.browserFamily}${outboundTls.browserMajorVersion ? ` ${outboundTls.browserMajorVersion}` : ""}`
                     : ""}{" "}
-                  · {outboundTls.note} · engine={outboundTls.engine ?? "rustls"} · 浏览器 JA3
+                  · {outboundTls.note} · engine={outboundTls.engine ?? "unknown"} · 浏览器 JA3
                   全量对齐：
                   {outboundTls.supportsFullBrowserJa3 && outboundTls.ja3Parity
-                    ? "是"
-                    : "否（rustls 配方差异化；非 BoringSSL/curl-impersonate）"}
+                    ? "是（正式包固定 wreq Chrome 出站）"
+                    : outboundTls.realImpersonateStackAvailable
+                      ? "否（栈已链接但尚未测到与金标一致的握手）"
+                      : "否（当前构建未链接 impersonate；正式包必须带 impersonate-boring）"}
                 </small>
               )}
               <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12 }}>

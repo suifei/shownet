@@ -114,7 +114,7 @@ pub fn read_tool_definitions() -> Vec<ToolDefinition> {
         ),
         tool(
             "shownet_get_outbound_tls_status",
-            "读取当前 MITM 出站 TLS 预置、engine、ja3Parity、supportsFullBrowserJa3 与诚实说明（rustls 配方，不宣称位级浏览器 JA3 全量对齐；分析取证只读）",
+            "读取当前 MITM 出站 TLS 预置、engine、ja3Parity、supportsFullBrowserJa3（正式包固定 wreq Chrome；入站/出站 JA4 应对齐；分析取证只读）",
             json!({
                 "type": "object",
                 "properties": {},

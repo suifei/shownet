@@ -586,7 +586,17 @@ issue #8 再次出现后，0.4.16 用「验证域名临时 bypass MITM」当兼�
 
 正确修复（非临时绕过）：
 
-1. 链接栈存在且用户未显式关闭时，**默认** `impersonate=true`。
-2. 挑战 UI：「关闭 Hook 并重试」→ `set_outbound_impersonate(true)` + 关 Hook + 重载；**保持 MITM**。
+1. 链接栈存在时 **强制** `engine=impersonate`，删除产品侧 rustls 出站回退与用户开关。
+2. 挑战 UI：「关闭 Hook 并重试」→ 校验 engine=impersonate + 关 Hook + 重载；**保持 MITM**。
 3. CDP `setDeviceMetricsOverride` 的 `screenWidth/Height` 固定桌面分辨率，不再用内嵌窗格尺寸覆盖 `--screen-info`。
 4. 删除 `browser_tls_bypass_host` / 临时 interception 决策。
+
+### 12.6 产品策略：无 rustls 出站（2026-08-11）
+
+入站与出站指纹必须一致。rustls + hyper 的 JA4/h2 伪头顺序无法对齐 Chrome；任何
+「可选 rustls 回退」都会在用户关开关或默认 false 时再次引入 Cloudflare 循环。
+
+- `active_engine()`：栈链接 ⇒ **恒为** Impersonate；`set_impersonate_requested(false)` 无效。
+- 正式包 CONNECT 主路径与 dedicated 重连（`prefer_http2`）只走 wreq。
+- WebSocket `Connection: Upgrade` 仍需原始 TLS 流（协议特例，非产品回退开关）。
+- 无 `impersonate-boring` 的 portable `cargo build` 仍可用 rustls 跑测试，不可当抓包产品发布。

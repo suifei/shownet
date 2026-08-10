@@ -2285,13 +2285,22 @@ fn set_outbound_tls_auto_from_inbound(
 
 #[tauri::command]
 fn set_outbound_impersonate(enabled: bool, state: State<'_, AppState>) -> Result<Value, String> {
-    // The request only takes hold when a real connector is linked; without one
-    // the flag is inert (active_engine gates on the stack) and setting it would
-    // be a lie the status page would then have to walk back. Persist the user's
-    // intent regardless, so a later feature build honors it, but only arm the
-    // runtime flag when the stack is actually present.
-    let armed = enabled && tls_outbound::real_impersonate_stack_available();
-    tls_impersonate::set_impersonate_requested(armed);
+    // Impersonate is not optional when the stack is linked: turning it off would
+    // send rustls ClientHellos to origins and break inbound/outbound JA4 parity.
+    // Keep the command for older UI builds, but refuse disable and always report
+    // the engine that is actually active.
+    if !enabled && tls_outbound::real_impersonate_stack_available() {
+        return Err(
+            "已链接浏览器级出站引擎时不能关闭逐字节 Chrome 出站：入站/出站 JA4 必须一致，rustls 回退已移除"
+                .into(),
+        );
+    }
+    if enabled && !tls_outbound::real_impersonate_stack_available() {
+        return Err(
+            "当前构建未链接 impersonate 出站引擎，无法启用浏览器级 JA4。请使用 --features impersonate-boring 的正式包"
+                .into(),
+        );
+    }
     let mut payload = state
         .storage
         .load_app_setting_json("outbound_tls")
@@ -2299,7 +2308,11 @@ fn set_outbound_impersonate(enabled: bool, state: State<'_, AppState>) -> Result
         .flatten()
         .unwrap_or_else(|| json!({ "profile": tls_outbound::global_profile().as_str() }));
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("impersonate".into(), json!(enabled));
+        // Persist true only; false is rejected above when the stack exists.
+        obj.insert(
+            "impersonate".into(),
+            json!(tls_outbound::real_impersonate_stack_available()),
+        );
     }
     state
         .storage
@@ -3585,31 +3598,22 @@ pub fn run() {
                 if let Some(auto) = value.get("autoFromInbound").and_then(|v| v.as_bool()) {
                     tls_outbound::set_auto_from_inbound(auto);
                 }
-                // Honor the persisted impersonate flag only when a real
-                // connector is linked. Without one the request is inert anyway —
-                // active_engine() gates on the stack too — but refusing to set
-                // it keeps the false-positive impossible even if that gate ever
-                // loosened. With wreq linked, this is what lets
-                // a user's saved choice actually take effect.
-                //
-                // Default is ON when the stack is present and the key was never
-                // written. A release build that ships impersonate-boring but
-                // leaves the toggle false-by-default silently egresses through
-                // rustls: origins see a non-Chrome JA4/h2 fingerprint while the
-                // capture browser's inbound JA4 is Chrome-shaped, so Cloudflare
-                // and similar gates loop even though `test:ja4-parity` is green.
-                // Explicit `impersonate: false` still wins for users who opted out.
-                let wants_impersonate = value
-                    .get("impersonate")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or_else(tls_outbound::real_impersonate_stack_available);
-                tls_impersonate::set_impersonate_requested(
-                    wants_impersonate && tls_outbound::real_impersonate_stack_available(),
-                );
-            } else if tls_outbound::real_impersonate_stack_available() {
-                // No outbound_tls row yet: same default as above so a fresh
-                // install with a linked stack does not MITM through rustls.
-                tls_impersonate::set_impersonate_requested(true);
+                // Engine selection is stack presence only. Rewrite any legacy
+                // `impersonate: false` so a previous opt-out cannot re-enable
+                // rustls egress after that path was removed from the product.
+                if tls_outbound::real_impersonate_stack_available() {
+                    if value
+                        .get("impersonate")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                    {
+                        let mut fixed = value.clone();
+                        if let Some(obj) = fixed.as_object_mut() {
+                            obj.insert("impersonate".into(), json!(true));
+                        }
+                        let _ = storage.save_app_setting_json("outbound_tls", &fixed);
+                    }
+                }
             }
             if let Ok(Some(value)) = storage.load_app_setting_json("px_console") {
                 if let Some(v) = value.get("decryptEnabled").and_then(|v| v.as_bool()) {

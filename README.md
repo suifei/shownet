@@ -64,7 +64,7 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 #### 内嵌浏览器启动、Cloudflare 验证与语言设置（0.4.16+）
 
 - **启动不再弹出本地 Chrome 窗口。** 内嵌浏览器改用跨 Chrome 版本兼容的无头启动参数；若 Chrome 在 CDP 连接前退出，ShowNet 会立即显示明确错误，不再一直停在“正在连接”。
-- **Cloudflare 真人验证保持 MITM 抓包。** 正式包默认启用 wreq 逐字节 Chrome 出站，使出站 JA4 与抓包浏览器入站 JA4 一致（`t13d1516h2_8daaf6152771_d8a2da3f94cd`）。检测到挑战页后可「关闭 Hook 并重试」：只关掉会改写 SubtleCrypto/fetch 的页面 Hook，**不会**临时绕过 TLS 拦截，验证域名仍可解密抓包。
+- **入站/出站 JA4 必须一致。** 正式包（`impersonate-boring`）MITM 出站**固定** wreq 逐字节 Chrome，**不再提供 rustls 出站回退或开关**；出站 JA4 与抓包浏览器入站 JA4 对齐（`t13d1516h2_8daaf6152771_d8a2da3f94cd`）。检测到 Cloudflare 挑战可「关闭 Hook 并重试」：只关会改写 SubtleCrypto/fetch 的页面 Hook，**不会**临时绕过 TLS 拦截。
 - **浏览器语言可自由设置。** 在内嵌浏览器右上角菜单输入 `th-TH`、`zh-Hans-CN` 等 BCP 47 语言标签并应用。ShowNet 会统一页面语言、Chrome Profile 与 `Accept-Language`，保存选择，并在运行中修改时自动重启浏览器。
 
 #### API SDK：把一次抓包变成一个客户端（0.4.14 新增）

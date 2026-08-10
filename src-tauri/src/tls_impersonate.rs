@@ -1,16 +1,13 @@
 //! Offline ClientHello JA3 math helpers (not the MITM wire path).
 //!
-//! MITM egress always uses rustls `tls_outbound::build_client_config` unless a real
-//! BoringSSL/curl-impersonate stack is linked (`real_impersonate_stack_available`).
-//! This module builds deterministic handshake templates for unit tests of the JA3
-//! parser / parity predicate only — it does **not** claim browser JA3 on the wire.
+//! Product MITM origin egress uses the linked impersonate stack (wreq) whenever
+//! `real_impersonate_stack_available()` is true — rustls is not a selectable
+//! product engine. This module still builds deterministic handshake templates
+//! for unit tests of the JA3 parser / parity predicate only.
 
 use crate::tls_fingerprint::{self, ClientTlsFingerprint};
 use crate::tls_outbound::OutboundTlsProfile;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static IMPERSONATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,12 +19,15 @@ pub struct ImpersonateProfileSpec {
     pub alpn: Vec<String>,
 }
 
-pub fn set_impersonate_requested(enabled: bool) {
-    IMPERSONATE_REQUESTED.store(enabled, Ordering::Relaxed);
+/// Historical setting name. Product builds with a linked stack always arm
+/// impersonate; disabling is not supported (would reintroduce rustls JA4 drift).
+pub fn set_impersonate_requested(_enabled: bool) {
+    // no-op: engine selection is stack presence only (see `active_engine`)
 }
 
+/// True when the product will use browser-matching origin egress.
 pub fn impersonate_requested() -> bool {
-    IMPERSONATE_REQUESTED.load(Ordering::Relaxed)
+    crate::tls_outbound::real_impersonate_stack_available()
         || std::env::var("SHOWNET_TLS_ENGINE")
             .map(|v| {
                 let v = v.to_ascii_lowercase();

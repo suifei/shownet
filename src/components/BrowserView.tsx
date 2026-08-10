@@ -1226,33 +1226,23 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     const host = challengeHost;
     if (!host || browserConnecting) return;
     const destination = currentUrl;
-    // Keep MITM decryption. Temporary TLS bypass was the 0.4.16 workaround and
-    // it dropped body capture on the challenge host. The durable path is:
-    //   1) ensure wreq Chrome egress (JA4 matches the capture browser)
-    //   2) drop page Hooks that rewrite SubtleCrypto / fetch (Turnstile-hostile)
-    //   3) reload under the same intercepting proxy
+    // Keep MITM decryption. Outbound is always wreq Chrome when the stack is
+    // linked (no rustls product path). Challenge retry only drops page Hooks
+    // that rewrite SubtleCrypto / fetch (Turnstile-hostile), then reloads.
     hooksEnabledRef.current = false;
     setHooksEnabled(false);
-    setBusNote(`正在为 ${host} 关闭 Hook 并确认 Chrome 出站指纹（保持 MITM 抓包）`);
+    setBusNote(`正在为 ${host} 关闭 Hook 后重试（MITM + Chrome 出站 JA4 保持）`);
     try {
-      const status = await invoke<OutboundTlsProfileStatus>("set_outbound_impersonate", {
-        enabled: true,
-      });
-      if (!status.realImpersonateStackAvailable) {
+      const status = await invoke<OutboundTlsProfileStatus>("get_outbound_tls_profile");
+      if (!status.realImpersonateStackAvailable || status.engine !== "impersonate") {
         setBrowserError(
-          "当前构建未链接 impersonate 出站引擎，无法在 MITM 下对齐浏览器 JA4。请使用带 impersonate-boring 的正式包，或在高级控制台确认出站引擎。",
-        );
-        return;
-      }
-      if (!status.impersonateRequested || status.engine !== "impersonate") {
-        setBrowserError(
-          `未能启用逐字节 Chrome 出站（engine=${status.engine ?? "unknown"}）。请在高级控制台打开「用逐字节 Chrome 出站」后重试。`,
+          `当前构建未提供浏览器级出站（engine=${status.engine ?? "unknown"}）。请使用带 impersonate-boring 的正式包；产品路径已移除 rustls 出站回退。`,
         );
         return;
       }
       await stopProxyChrome();
       await startProxyChrome(destination);
-      setBusNote(`${host}：Hook 已关 · MITM 保持 · 出站 engine=impersonate，请再完成真人验证`);
+      setBusNote(`${host}：Hook 已关 · MITM + engine=impersonate，请再完成真人验证`);
     } catch (error) {
       setBrowserError(`验证兼容重试失败：${error instanceof Error ? error.message : String(error)}`);
     }

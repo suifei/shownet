@@ -232,25 +232,6 @@ export function AdvancedConsoleView({
     }
   };
 
-  const setImpersonate = async (enabled: boolean) => {
-    if (!isTauri()) return;
-    try {
-      const status = await invoke<OutboundTlsProfileStatus>("set_outbound_impersonate", { enabled });
-      setOutboundTls(status);
-      // Report what actually armed, not what was asked: the flag only takes
-      // hold when a real stack is linked, and the status is the source of truth.
-      onNotify(
-        status.impersonateRequested
-          ? "出站已切到 wreq 逐字节 Chrome（JA4 t13d1516h2 · h2 伪头 m,a,s,p）"
-          : enabled
-            ? "已记录，但当前构建未链接真实栈，仍走 rustls"
-            : "出站已切回 rustls",
-      );
-    } catch (error) {
-      onNotify(String(error));
-    }
-  };
-
   const goPhase = (phase: WorkflowPhaseId) => {
     const map: Record<WorkflowPhaseId, ConsoleTabId> = {
       capture: "capture",
@@ -760,49 +741,28 @@ export function AdvancedConsoleView({
                     checked={Boolean(outboundTls?.autoFromInbound)}
                     onChange={(e) => void setAutoInbound(e.target.checked)}
                   />
-                  根据入站 JA3/JA4 自动选择出站预置（真实变更 rustls 套件顺序）
+                  根据入站 JA3/JA4 自动选择出站预置（仅影响未链接 impersonate 的开发构建）
                 </label>
-                {/* Only shown when the wreq impersonate engine is linked. In the
-                    default rustls build there is nothing to turn on, so a toggle
-                    would be a dead control that implies a capability the build
-                    does not have. */}
-                {outboundTls?.realImpersonateStackAvailable ? (
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(outboundTls?.impersonateRequested)}
-                      onChange={(e) => void setImpersonate(e.target.checked)}
-                    />
-                    用逐字节 Chrome 出站（wreq：真实 BoringSSL + Chrome h2 伪头顺序；正式包默认开启）
-                  </label>
-                ) : null}
                 <p className="hint">
-                  {outboundTls?.impersonateRequested ? (
+                  {outboundTls?.realImpersonateStackAvailable ? (
                     <>
-                      当前出站 <strong>engine={outboundTls?.engine ?? "rustls"}</strong>：wreq 的
-                      Chrome 137 配方 —— JA4 <code>t13d1516h2_8daaf6152771_d8a2da3f94cd</code>
-                      (16 扩展,含 ALPS/ECH/后量子曲线),HTTP/2 伪头顺序 <code>m,a,s,p</code>。
-                      <strong>
-                        {" "}
-                        supportsFullBrowserJa3=
-                        {String(outboundTls?.supportsFullBrowserJa3 ?? false)}、ja3Parity=
-                        {String(outboundTls?.ja3Parity ?? false)}
-                      </strong>
-                      。
+                      出站引擎<strong>固定</strong>为 wreq 逐字节 Chrome（不可关闭）：
+                      <strong>engine={outboundTls?.engine ?? "impersonate"}</strong>，JA4{" "}
+                      <code>t13d1516h2_8daaf6152771_d8a2da3f94cd</code>，HTTP/2 伪头{" "}
+                      <code>m,a,s,p</code>。
+                      supportsFullBrowserJa3=
+                      {String(outboundTls?.supportsFullBrowserJa3 ?? false)}、ja3Parity=
+                      {String(outboundTls?.ja3Parity ?? false)}。
                       <br />
-                      上面的版本预置<strong>不影响这条主路径</strong>,它只作用于 rustls
-                      回退(流式 SSE / WebSocket);主路径固定用上面这份配方。
-                      <br />
-                      抓包浏览器已关闭 ML-DSA 签名算法(<code>TlsMldsaSignatures</code>),
-                      握手指纹与上面这串一致,因此 <code>ja3Parity</code> 反映的是真实差异
-                      而不是一个出站栈永远补不上的固定差值。注意浏览器的握手只到 ShowNet
-                      自己的监听端口,源站看到的始终是上面这份出站指纹。Cloudflare 等闸门应靠此
-                      对齐通过，不要对验证域名临时绕过 TLS 拦截（会丢解密抓包）。
+                      入站 ClientHello 终止在 ShowNet；源站只看出站指纹。抓包浏览器关闭
+                      ML-DSA 后，入站 JA4 与上式一致。产品路径<strong>不再提供 rustls 出站回退</strong>
+                      （曾导致 JA4 分裂与 Cloudflare 循环）。WebSocket 升级仍需原始 TLS 流，为协议特例。
                     </>
                   ) : (
                     <>
-                      关闭后出站回退 rustls（非浏览器 JA4）。正式包在未显式关闭时默认开启 wreq。
-                      当前 engine={outboundTls?.engine ?? "rustls"}。版本预置仍会改变 rustls 路径的可测配方 / JA3。
+                      当前构建未链接 impersonate 栈（engine={outboundTls?.engine ?? "rustls"}），
+                      仅适合开发测试；正式包必须带 <code>impersonate-boring</code>，否则无法保证
+                      入站/出站 JA4 一致。
                     </>
                   )}
                 </p>

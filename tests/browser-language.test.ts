@@ -46,12 +46,15 @@ describe("Cloudflare challenge detection", () => {
     ]);
     assert.match(view, /cloudflareChallengeHost/);
     assert.match(view, /hooksEnabledRef\.current = false/);
-    assert.match(view, /set_outbound_impersonate/);
+    assert.match(view, /get_outbound_tls_profile/);
     assert.match(view, /关闭 Hook 并重试/);
     assert.doesNotMatch(view, /tlsBypassHost/);
+    assert.doesNotMatch(view, /set_outbound_impersonate/);
     assert.doesNotMatch(lib, /temporary_browser_tls_interception_decision/);
     assert.match(lib, /Challenge compatibility must never temporarily bypass MITM/);
     assert.match(proxy, /state\.tls_interception_decision\(host, sni\)/);
+    // Product MITM with the stack linked must not gate on a user request flag.
+    assert.match(proxy, /Product MITM origin egress is impersonate-only/);
     // Viewport must not overwrite the desktop screen fingerprint with the pane size.
     assert.match(view, /BROWSER_SCREEN_WIDTH/);
     assert.match(view, /screenWidth:\s*BROWSER_SCREEN_WIDTH/);

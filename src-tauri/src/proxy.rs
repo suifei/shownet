@@ -1697,61 +1697,48 @@ async fn handle_connect(
         let dedicated_sender_factory =
             dedicated_request_sender_factory(upstream.clone(), outbound_profile);
         let prefer_origin_h2 = !force_http11;
-        // active_engine() is Impersonate only in a feature build with a linked
-        // stack and the user's request; false everywhere else, so the branch is
-        // dead in the default build and the wreq references never compile there.
+        // Product MITM origin egress is impersonate-only when the stack is
+        // linked. rustls ClientHello + hyper h2 are not browser-shaped; a
+        // selectable rustls fallback is what made inbound/outbound JA4 diverge
+        // after parity had already been proven under wreq.
         #[cfg(feature = "impersonate-boring")]
-        let impersonate_active =
-            tls_outbound::active_engine() == tls_outbound::OutboundTlsEngine::Impersonate;
+        let (sender, outbound_tls, negotiated_alpn) = {
+            let _ = (prefer_origin_h2, force_http11, outbound_profile);
+            drop(upstream_stream);
+            let client = match crate::impersonate_egress::build_client(&upstream) {
+                Ok(client) => client,
+                Err(error) => {
+                    error_sink(format!("构建 wreq 出站失败: {error}"));
+                    return;
+                }
+            };
+            let base = if port == 443 {
+                format!("https://{tls_identity_host}")
+            } else {
+                format!("https://{tls_identity_host}:{port}")
+            };
+            let egress_ja4 = crate::impersonate_egress::EGRESS_JA4;
+            fingerprint.outbound.negotiated_alpn = Some("h2".to_string());
+            fingerprint.outbound.application_protocol = Some("h2".to_string());
+            fingerprint.outbound.engine = Some("impersonate".into());
+            fingerprint.outbound.ja4 = Some(egress_ja4.to_string());
+            let parity = fingerprint.inbound.ja4 == egress_ja4;
+            fingerprint.outbound.ja3_parity = Some(parity);
+            fingerprint.outbound.note = format!(
+                "{} wreq Chrome egress (JA4 {egress_ja4}, h2 pseudo m,a,s,p); inbound JA4 {} — parity={parity}",
+                fingerprint.outbound.note,
+                fingerprint.inbound.ja4
+            );
+            (
+                HttpsRequestSender::Impersonate { client, base },
+                "TLS 1.3 (wreq/Chrome)".to_string(),
+                Some("h2".to_string()),
+            )
+        };
         #[cfg(not(feature = "impersonate-boring"))]
-        let impersonate_active = false;
-
-        let (sender, outbound_tls, negotiated_alpn) = if impersonate_active {
-            // wreq owns the whole origin round-trip and its own connection, so
-            // the tunnel ShowNet opened is not used here.
-            #[cfg(feature = "impersonate-boring")]
-            {
-                drop(upstream_stream);
-                let client = match crate::impersonate_egress::build_client(&upstream) {
-                    Ok(client) => client,
-                    Err(error) => {
-                        error_sink(format!("构建 wreq 出站失败: {error}"));
-                        return;
-                    }
-                };
-                let base = if port == 443 {
-                    format!("https://{tls_identity_host}")
-                } else {
-                    format!("https://{tls_identity_host}:{port}")
-                };
-                // wreq presents one fixed ClientHello per emulation, so unlike the
-                // rustls path there is nothing to measure per handshake — but the
-                // value is known and is checked against a live reflector by
-                // wreq_egress_is_byte_exact_chrome. Recording it makes the panel's
-                // parity claim a comparison against the inbound handshake rather
-                // than an assertion, which is what it read as before: parity was
-                // set true here with no fingerprint stored beside it.
-                let egress_ja4 = crate::impersonate_egress::EGRESS_JA4;
-                fingerprint.outbound.negotiated_alpn = Some("h2".to_string());
-                fingerprint.outbound.application_protocol = Some("h2".to_string());
-                fingerprint.outbound.engine = Some("impersonate".into());
-                fingerprint.outbound.ja4 = Some(egress_ja4.to_string());
-                let parity = fingerprint.inbound.ja4 == egress_ja4;
-                fingerprint.outbound.ja3_parity = Some(parity);
-                fingerprint.outbound.note = format!(
-                    "{} wreq Chrome egress (JA4 {egress_ja4}, h2 pseudo m,a,s,p); inbound JA4 {} — parity={parity}",
-                    fingerprint.outbound.note,
-                    fingerprint.inbound.ja4
-                );
-                (
-                    HttpsRequestSender::Impersonate { client, base },
-                    "TLS 1.3 (wreq/Chrome)".to_string(),
-                    Some("h2".to_string()),
-                )
-            }
-            #[cfg(not(feature = "impersonate-boring"))]
-            unreachable!("impersonate active without the feature")
-        } else {
+        let (sender, outbound_tls, negotiated_alpn) = {
+            // Portable / test builds only. Shipped packages compile with
+            // impersonate-boring and never take this arm.
             let verified = match connect_verified_tls_measured(
                 upstream_stream,
                 &tls_identity_host,
@@ -1814,33 +1801,25 @@ async fn handle_connect(
                     .to_string(),
             );
             if let Some(measured) = verified.measured_ja3 {
-                // Parity needs both halves: a real impersonate stack must be active, and
-                // the measured ClientHello must match a golden captured from the target
-                // client. Match JA3 when stable; fall back to JA4 because modern Chrome
-                // permutes extension order (JA3 drifts, JA4 stays stable).
                 let preset_id = crate::tls_outbound::preset_id_for_profile(outbound_profile);
                 let measured_ja4 = verified.measured_ja4.as_deref();
                 let alignment =
                     crate::tls_golden::evaluate_measured(&preset_id, &measured, measured_ja4);
-                let parity = crate::tls_outbound::real_impersonate_stack_available()
-                    && alignment.is_matched();
                 fingerprint.outbound.ja3 = Some(measured.clone());
                 fingerprint.outbound.ja4 = measured_ja4.map(str::to_owned);
-                fingerprint.outbound.ja3_parity = Some(parity);
-                fingerprint.outbound.engine =
-                    Some(crate::tls_outbound::active_engine().as_str().into());
+                fingerprint.outbound.ja3_parity = Some(false);
+                fingerprint.outbound.engine = Some("rustls".into());
                 fingerprint.outbound.note = format!(
-                    "{} measuredJa3={measured} measuredJa4={} profile={} preset={preset_id} alignment={} wireDiffers=true browserParity={}",
+                    "{} measuredJa3={measured} measuredJa4={} profile={} preset={preset_id} alignment={} (dev build without impersonate-boring; product requires wreq)",
                     fingerprint.outbound.note,
                     measured_ja4.unwrap_or("-"),
                     outbound_profile.as_str(),
                     alignment.as_str(),
-                    parity
                 );
             } else {
                 fingerprint.outbound.ja3_parity = Some(false);
                 fingerprint.outbound.note = format!(
-                    "{} (outbound ClientHello measure unavailable)",
+                    "{} (outbound ClientHello measure unavailable; dev rustls path)",
                     fingerprint.outbound.note
                 );
             }
@@ -2296,10 +2275,22 @@ fn dedicated_request_sender_factory(
         Box::pin(async move {
             let profile = route.tls_profile;
             let _ = default_profile;
+            // Normal HTTPS reconnects use wreq so they keep the same Chrome JA4
+            // as the shared tunnel. WebSocket upgrades still need a raw TLS
+            // stream for Connection: Upgrade; that narrow arm stays on the
+            // rustls connector only when prefer_http2 is false.
+            #[cfg(feature = "impersonate-boring")]
+            if route.scheme == "https" && route.prefer_http2 {
+                let client = crate::impersonate_egress::build_client(&upstream)?;
+                let base = if route.port == 443 {
+                    format!("https://{}", route.tls_identity_host)
+                } else {
+                    format!("https://{}:{}", route.tls_identity_host, route.port)
+                };
+                return Ok(HttpsRequestSender::Impersonate { client, base });
+            }
             let stream = connect_destination(&upstream, &route.connection_host, route.port).await?;
             let stream = if route.scheme == "https" {
-                // ALPN must agree with the HTTP handshake chosen below. The
-                // stream is already boxed by connect_verified_tls_measured.
                 connect_verified_tls_measured(
                     stream,
                     &route.tls_identity_host,
@@ -2312,13 +2303,6 @@ fn dedicated_request_sender_factory(
                 stream
             };
             if route.scheme == "https" {
-                // Stream is already TLS; re-handshake at HTTP layer.
-                // BoxedIo of TlsStream — dedicated path connected TLS above.
-                // For https we wrapped TlsStream in BoxedIo; handshake needs the TLS stream type.
-                // Reconstruct by treating BoxedIo as generic IO for http1 only when not prefer h2
-                // actually we lost TlsStream type. Use http1 on BoxedIo for dedicated always when
-                // prefer_http2 is false; when true, we need typed TLS for ALPN read.
-                // Simpler: dedicated path always uses http1 for websocket upgrades (prefer_http2=false).
                 if !route.prefer_http2 {
                     let (sender, connection) = hyper::client::conn::http1::handshake::<
                         _,
@@ -2331,9 +2315,6 @@ fn dedicated_request_sender_factory(
                     });
                     return Ok(HttpsRequestSender::Http1(sender));
                 }
-                // prefer h2: try http2 on the already-TLS stream without re-reading ALPN
-                // (ALPN was negotiated in connect_verified_tls).
-                // We cannot read ALPN from BoxedIo; attempt h2 handshake and fall back to h1.
                 let mut h2_builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
                 tls_outbound::apply_http2_recipe_to_builder(
                     &mut h2_builder,
@@ -2350,7 +2331,6 @@ fn dedicated_request_sender_factory(
                         Ok(HttpsRequestSender::Http2(sender))
                     }
                     Err(_) => {
-                        // stream consumed on failed h2 handshake — cannot fallback; reconnect
                         let stream =
                             connect_destination(&upstream, &route.connection_host, route.port)
                                 .await?;
@@ -4828,16 +4808,48 @@ async fn forward_http(
         .unwrap_or(&host);
     let mut sender = if scheme == "https" {
         let force_http11 = tls_outbound::origin_force_http11_for_host(tls_identity_host);
-        let profile = tls_outbound::global_profile();
-        let verified =
-            connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11).await?;
-        let alpn = verified.negotiated_alpn.clone();
-        handshake_origin_https(
-            verified.stream,
-            alpn.as_deref(),
-            !websocket && !force_http11,
-        )
-        .await?
+        #[cfg(feature = "impersonate-boring")]
+        {
+            if websocket {
+                // Upgrade needs a raw TLS stream; wreq cannot terminate
+                // Connection: Upgrade. Prefer MITM tunnel's dedicated path.
+                let profile = tls_outbound::global_profile();
+                let verified = connect_verified_tls_measured(
+                    stream,
+                    tls_identity_host,
+                    profile,
+                    true,
+                )
+                .await?;
+                handshake_origin_https(verified.stream, verified.negotiated_alpn.as_deref(), false)
+                    .await?
+            } else {
+                // Explicit / replay HTTPS must match MITM Chrome JA4.
+                drop(stream);
+                let _ = force_http11;
+                let client = crate::impersonate_egress::build_client(&upstream)?;
+                let base = if port == 443 {
+                    format!("https://{tls_identity_host}")
+                } else {
+                    format!("https://{tls_identity_host}:{port}")
+                };
+                HttpsRequestSender::Impersonate { client, base }
+            }
+        }
+        #[cfg(not(feature = "impersonate-boring"))]
+        {
+            let profile = tls_outbound::global_profile();
+            let verified =
+                connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11)
+                    .await?;
+            let alpn = verified.negotiated_alpn.clone();
+            handshake_origin_https(
+                verified.stream,
+                alpn.as_deref(),
+                !websocket && !force_http11,
+            )
+            .await?
+        }
     } else {
         let (http1_sender, connection) =
             hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
@@ -11964,16 +11976,9 @@ mod tests {
             let errors = errors.clone();
             Arc::new(move |error| errors.lock().unwrap().push(error))
         };
-        // Ask for the engine the user's config asks for. Without this the run
-        // measures rustls egress even in a build that links wreq, because the
-        // engine is opt-in at runtime — the first version of this test did
-        // exactly that and its "outbound is not Chrome" reading was about the
-        // test, not the product.
-        let want_impersonate = std::env::var("SHOWNET_LIVE_IMPERSONATE").is_ok()
-            || crate::tls_outbound::real_impersonate_stack_available();
-        crate::tls_impersonate::set_impersonate_requested(want_impersonate);
+        // Linked stack ⇒ engine is always impersonate (no product opt-out).
         eprintln!(
-            "LIVE_CAPTURE engine={} (impersonate requested={want_impersonate}, stack available={})",
+            "LIVE_CAPTURE engine={} (stack available={})",
             crate::tls_outbound::active_engine().as_str(),
             crate::tls_outbound::real_impersonate_stack_available()
         );
