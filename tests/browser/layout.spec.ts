@@ -47,7 +47,7 @@ test("the embedded browser language menu stays usable", async ({ page }) => {
 
   const menu = page.locator(".browser-menu-popover");
   await expect(menu).toBeVisible();
-  await expect(page.getByLabel("浏览器语言")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "浏览器语言" })).toBeVisible();
   expect(await findOffscreenLayers(page)).toEqual([]);
   expect(await findCrushedText(page)).toEqual([]);
 });
