@@ -82,6 +82,12 @@ pub struct ProxyBrowserStatus {
     /// navigation so the override is in place for the main document — the one
     /// request a bot manager actually scores. Empty when it was already honest.
     pub honest_user_agent: String,
+    /// Canonical BCP 47 language applied at launch. Empty means Chrome default.
+    pub browser_language: String,
+    /// Weighted value shared by Chrome preferences and CDP's network override.
+    pub accept_language: String,
+    /// Temporary end-to-end TLS host used by challenge compatibility mode.
+    pub tls_bypass_host: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

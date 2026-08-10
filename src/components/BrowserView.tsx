@@ -15,6 +15,7 @@ import {
   EyeOff,
   FileUp,
   FlaskConical,
+  Globe2,
   KeyRound,
   Lock,
   MoreHorizontal,
@@ -33,6 +34,14 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
+import {
+  BROWSER_LANGUAGE_STORAGE_KEY,
+  BROWSER_LANGUAGE_SUGGESTIONS,
+  browserAcceptLanguage,
+  cloudflareChallengeHost,
+  initialBrowserLanguage,
+  normalizeBrowserLanguage,
+} from "../browserLanguage";
 import { useDismissibleLayer } from "../useDismissibleLayer";
 import {
   browserInstallLab,
@@ -70,16 +79,6 @@ function navigatorPlatform(): string {
   if (/Mac/i.test(ua)) return "MacIntel";
   if (/Win/i.test(ua)) return "Win32";
   return "Linux x86_64";
-}
-
-/** A weighted Accept-Language list, the shape a real browser sends. */
-function acceptLanguageHeader(): string {
-  const primary = navigator.language || "en-US";
-  const base = primary.split("-")[0];
-  const parts = [primary];
-  if (base && base !== primary) parts.push(`${base};q=0.9`);
-  if (base !== "en") parts.push("en;q=0.8");
-  return parts.join(",");
 }
 
 const CDP_BINDING = "__SHOWNET_CDP_BINDING__";
@@ -160,6 +159,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const [probePanelOpen, setProbePanelOpen] = useState(false);
   const [probeJsonOpen, setProbeJsonOpen] = useState(false);
   const [browserMenuOpen, setBrowserMenuOpen] = useState(false);
+  const [browserLanguage, setBrowserLanguage] = useState(() => initialBrowserLanguage(globalThis.localStorage));
+  const [browserLanguageDraft, setBrowserLanguageDraft] = useState(() => initialBrowserLanguage(globalThis.localStorage));
+  const [browserLanguageError, setBrowserLanguageError] = useState("");
+  const [challengeHost, setChallengeHost] = useState("");
   const [selectedHookId, setSelectedHookId] = useState("");
   const [busNote, setBusNote] = useState("");
   const [reloadLoopHost, setReloadLoopHost] = useState("");
@@ -188,6 +191,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const nativeDropPathsRef = useRef<string[]>([]);
   const nativeDropPointRef = useRef<{ x: number; y: number } | null>(null);
   const nativeDropClearTimerRef = useRef(0);
+  const challengeProbeTimerRef = useRef(0);
   const windowScaleFactorRef = useRef(window.devicePixelRatio || 1);
   const desktop = isTauri();
 
@@ -589,7 +593,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             //
             // A bare single token with no q-values is itself anomalous; real
             // Chrome always sends a weighted list.
-            acceptLanguage: acceptLanguageHeader(),
+            acceptLanguage: status.acceptLanguage || browserAcceptLanguage(status.browserLanguage || browserLanguage),
             platform: navigatorPlatform(),
           });
         }
@@ -674,15 +678,42 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         if (packet.method === "Page.loadEventFired") {
           setBrowserLoading(false);
           setReloading(false);
-          cdpSendRef.current?.("Runtime.evaluate", { expression: "document.title", returnByValue: true }, (result) => {
+          const send = cdpSendRef.current;
+          send?.("Runtime.evaluate", { expression: "document.title", returnByValue: true }, (result) => {
             const value = (result.result as { value?: unknown } | undefined)?.value;
             if (typeof value === "string" && value.trim()) setPageTitle(value.trim());
           });
+          window.clearTimeout(challengeProbeTimerRef.current);
+          const inspectChallenge = (attempt: number) => {
+            send?.("Runtime.evaluate", {
+              expression: `JSON.stringify({
+                url: location.href,
+                title: document.title,
+                text: (document.body?.innerText || "").slice(0, 4000),
+                cloudflareMarker: !!document.querySelector('script[src*="/cdn-cgi/challenge-platform/"], iframe[src*="challenges.cloudflare.com"], .cf-turnstile')
+              })`,
+              returnByValue: true,
+            }, (result) => {
+              const value = (result.result as { value?: unknown } | undefined)?.value;
+              if (typeof value !== "string") return;
+              try {
+                const host = cloudflareChallengeHost(JSON.parse(value));
+                setChallengeHost(host);
+                if (!host && attempt < 3) {
+                  challengeProbeTimerRef.current = window.setTimeout(() => inspectChallenge(attempt + 1), 900);
+                }
+              } catch {
+                setChallengeHost("");
+              }
+            });
+          };
+          challengeProbeTimerRef.current = window.setTimeout(() => inspectChallenge(1), 700);
           return;
         }
         if (packet.method === "Page.frameNavigated") {
           const frame = packet.params?.frame as { url?: unknown; parentId?: unknown } | undefined;
           if (frame && !frame.parentId && typeof frame.url === "string") {
+            setChallengeHost("");
             setAddress(frame.url);
             setCurrentUrl(frame.url);
             writeStoredBrowserUrl(frame.url);
@@ -751,6 +782,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
 
   /** Tears the embedded browser down. Safe to call when it is not running. */
   async function stopProxyChrome() {
+    window.clearTimeout(challengeProbeTimerRef.current);
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
     cdpSocketRef.current = null;
@@ -761,6 +793,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     screencastFrameRef.current = null;
     setScreencastFrame(null);
     setBrowserError("");
+    setChallengeHost("");
     setBusNote("已停止内嵌浏览器");
   }
 
@@ -773,12 +806,19 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
    * starting it — leaving the user on a dead surface, which is exactly the
    * bug the restart was meant to avoid.
    */
-  async function startProxyChrome(destination?: string) {
+  async function startProxyChrome(
+    destination?: string,
+    options?: { browserLanguage?: string; tlsBypassHost?: string },
+  ) {
     if (!desktop || browserConnecting) return;
     setBrowserConnecting(true);
     setBrowserError("");
     try {
-      const status = await invoke<ProxyBrowserStatus>("launch_proxy_browser", { sessionId });
+      const status = await invoke<ProxyBrowserStatus>("launch_proxy_browser", {
+        sessionId,
+        browserLanguage: options?.browserLanguage ?? browserLanguage,
+        tlsBypassHost: options?.tlsBypassHost || null,
+      });
       const busStatus = await getProxyBrowserStatus().catch(() => null);
       const resolved = busStatus?.running ? busStatus : status;
       setProxyBrowser(resolved);
@@ -1151,6 +1191,46 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     return !query || `${event.name} ${event.method ?? ""} ${event.url ?? ""}`.toLowerCase().includes(query);
   }), [hookEvents, hookFilter, hookQuery]);
 
+  const applyBrowserLanguage = async (event: FormEvent) => {
+    event.preventDefault();
+    const normalized = normalizeBrowserLanguage(browserLanguageDraft);
+    if (!normalized) {
+      setBrowserLanguageError("请输入有效语言，例如 th-TH");
+      return;
+    }
+    setBrowserLanguage(normalized);
+    setBrowserLanguageDraft(normalized);
+    setBrowserLanguageError("");
+    globalThis.localStorage?.setItem(BROWSER_LANGUAGE_STORAGE_KEY, normalized);
+    setBrowserMenuOpen(false);
+    if (!proxyBrowser?.running) {
+      setBusNote(`浏览器语言已设为 ${normalized}`);
+      return;
+    }
+    const destination = currentUrl;
+    try {
+      await stopProxyChrome();
+      await startProxyChrome(destination, { browserLanguage: normalized });
+    } catch (error) {
+      setBrowserError(`应用浏览器语言失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const retryCloudflareChallenge = async () => {
+    const host = challengeHost;
+    if (!host || browserConnecting) return;
+    const destination = currentUrl;
+    hooksEnabledRef.current = false;
+    setHooksEnabled(false);
+    setBusNote(`正在为 ${host} 切换验证兼容模式`);
+    try {
+      await stopProxyChrome();
+      await startProxyChrome(destination, { tlsBypassHost: host });
+    } catch (error) {
+      setBrowserError(`切换验证兼容模式失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const copyCurrentAddress = async () => {
     if (!currentUrl) return;
     if (desktop) await writeText(currentUrl);
@@ -1202,6 +1282,24 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             {browserMenuOpen && <div className="browser-menu-popover" role="menu">
               <button role="menuitem" onClick={() => void copyCurrentAddress()} disabled={!currentUrl}><Copy size={14} />复制当前地址</button>
               <button role="menuitem" onClick={() => { setHookPanel((open) => !open); setProbePanelOpen(false); setBrowserMenuOpen(false); }}><Braces size={14} />{hookPanel && !probePanelOpen ? "收起 Hook 面板" : "打开 Hook 面板"}</button>
+              <form className="browser-language-control" onSubmit={(event) => void applyBrowserLanguage(event)}>
+                <label htmlFor="browser-language"><Globe2 size={14} />浏览器语言</label>
+                <span>
+                  <input
+                    id="browser-language"
+                    list="browser-language-suggestions"
+                    value={browserLanguageDraft}
+                    onChange={(event) => { setBrowserLanguageDraft(event.target.value); setBrowserLanguageError(""); }}
+                    aria-invalid={Boolean(browserLanguageError)}
+                    placeholder="th-TH"
+                  />
+                  <button type="submit" title="应用浏览器语言" aria-label="应用浏览器语言"><Check size={14} /></button>
+                </span>
+                {browserLanguageError && <small>{browserLanguageError}</small>}
+                <datalist id="browser-language-suggestions">
+                  {BROWSER_LANGUAGE_SUGGESTIONS.map((language) => <option key={language} value={language} />)}
+                </datalist>
+              </form>
               <button role="menuitem" onClick={closeCurrentPage} disabled={!proxyBrowser?.running && !externalPage}><X size={14} />关闭当前页面</button>
             </div>}
           </div>
@@ -1316,7 +1414,16 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                 </div>
               )}
               {browserLoading && proxyBrowser?.running && <div className="browser-loading-indicator"><RefreshCw className="spin" size={13} /></div>}
-              {reloadLoopHost && (
+              {challengeHost ? (
+                <div className="browser-reload-loop browser-challenge" role="alert">
+                  <span><ShieldCheck size={18} /></span>
+                  <div>
+                    <strong>检测到 Cloudflare 真人验证</strong>
+                    <small>{challengeHost} 需要浏览器原生 TLS，并关闭页面 Hook 后重试。</small>
+                  </div>
+                  <button type="button" onClick={() => void retryCloudflareChallenge()} disabled={browserConnecting}>兼容模式重试</button>
+                </div>
+              ) : reloadLoopHost && (
                 <div className="browser-reload-loop" role="alert">
                   <span><CircleAlert size={18} /></span>
                   <div>
@@ -1346,6 +1453,8 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <span><FlaskConical size={13} />{labState === "complete" ? "已转交内置 Agent" : labState === "error" ? "场景验证失败" : labState === "running" ? "加密场景运行中" : "Crypto Lab"}</span>
           <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
           <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
+          <span title="浏览器页面与请求使用同一语言"><Globe2 size={13} />{proxyBrowser?.browserLanguage || browserLanguage}</span>
+          {proxyBrowser?.tlsBypassHost && <span title="该验证域名当前使用 Chrome 原生端到端 TLS"><ShieldCheck size={13} />验证兼容</span>}
           {(reloadLoopHost || /baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl)) && (
             <span className="browser-statusbar__hint" title="若页面反复刷新或图裂：设置 → HTTPS 解密 → 为该域名启用绕行">
               {reloadLoopHost ? `${reloadLoopHost} 反复刷新，试试解密绕行` : "图裂时启用静态 CDN 绕行"}

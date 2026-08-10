@@ -97,7 +97,10 @@ use storage::Storage;
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State};
-use tls_interception::TlsInterceptionSettings;
+use tls_interception::{
+    normalize_tls_interception_settings, TlsInterceptionDecision, TlsInterceptionMode,
+    TlsInterceptionSettings,
+};
 
 #[cfg(desktop)]
 fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -271,6 +274,7 @@ impl Default for CaptureRuntime {
 pub struct AppState {
     analysis: Mutex<AnalysisRuntime>,
     pub(crate) browser: Mutex<Option<browser::ProxyBrowserHandle>>,
+    pub(crate) browser_tls_bypass_host: Mutex<Option<String>>,
     pub(crate) breakpoints: Arc<BreakpointCoordinator>,
     capture: Mutex<CaptureRuntime>,
     mcp: Mutex<McpRuntime>,
@@ -286,6 +290,64 @@ pub struct AppState {
     certificate_authority: Arc<CertificateAuthority>,
     certificate_path: PathBuf,
     ca_installed: AtomicBool,
+}
+
+impl AppState {
+    pub(crate) fn tls_interception_decision(
+        &self,
+        authority_host: &str,
+        client_hello_sni: Option<&str>,
+    ) -> Result<TlsInterceptionDecision, String> {
+        let temporary_host = self
+            .browser_tls_bypass_host
+            .lock()
+            .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())?
+            .clone();
+        if let Some(temporary) = temporary_browser_tls_interception_decision(
+            temporary_host.as_deref(),
+            authority_host,
+            client_hello_sni,
+        ) {
+            return Ok(temporary);
+        }
+        Ok(self
+            .storage
+            .get_tls_interception_settings()?
+            .decision(authority_host, client_hello_sni))
+    }
+}
+
+fn temporary_browser_tls_interception_decision(
+    temporary_host: Option<&str>,
+    authority_host: &str,
+    client_hello_sni: Option<&str>,
+) -> Option<TlsInterceptionDecision> {
+    let host = temporary_host?;
+    let decision = TlsInterceptionSettings {
+        mode: TlsInterceptionMode::BypassSelected,
+        bypass: vec![host.to_string()],
+        show_bypassed_connections: true,
+    }
+    .decision(authority_host, client_hello_sni);
+    decision.bypass.then_some(decision)
+}
+
+fn normalize_browser_tls_bypass_host(host: Option<String>) -> Result<Option<String>, String> {
+    let Some(host) = host
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if host.contains(['*', '?']) {
+        return Err("验证兼容模式只接受当前页面的精确域名".to_string());
+    }
+    let settings = normalize_tls_interception_settings(TlsInterceptionSettings {
+        mode: TlsInterceptionMode::BypassSelected,
+        bypass: vec![host],
+        show_bypassed_connections: true,
+    })?;
+    Ok(settings.bypass.into_iter().next())
 }
 
 fn resolve_data_directory(
@@ -578,6 +640,8 @@ impl RequestQueryRuntime {
 #[tauri::command]
 async fn launch_proxy_browser(
     session_id: String,
+    browser_language: Option<String>,
+    tls_bypass_host: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProxyBrowserStatus, String> {
@@ -601,8 +665,27 @@ async fn launch_proxy_browser(
     if let Some(previous) = previous {
         previous.stop().await;
     }
-    let mut handle =
-        browser::ProxyBrowserHandle::launch(&state.data_directory, state.proxy_port).await?;
+    let tls_bypass_host = normalize_browser_tls_bypass_host(tls_bypass_host)?;
+    *state
+        .browser_tls_bypass_host
+        .lock()
+        .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = tls_bypass_host.clone();
+    let mut handle = match browser::ProxyBrowserHandle::launch(
+        &state.data_directory,
+        state.proxy_port,
+        browser_language.as_deref(),
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            if let Ok(mut host) = state.browser_tls_bypass_host.lock() {
+                *host = None;
+            }
+            return Err(error);
+        }
+    };
+    handle.set_tls_bypass_host(tls_bypass_host);
     let status = handle.status();
     state
         .browser
@@ -626,6 +709,10 @@ async fn stop_proxy_browser(
     if let Some(handle) = handle {
         handle.stop().await;
     }
+    *state
+        .browser_tls_bypass_host
+        .lock()
+        .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = None;
     // Same payload type as the start path. Emitting a bare `false` here would
     // mean one event channel carrying two incompatible shapes, so any listener
     // written against the struct would break the moment the browser stops.
@@ -2820,6 +2907,15 @@ async fn set_capture_running(
             .lock()
             .map_err(|_| "免代理入口运行状态已损坏".to_string())?
             .take();
+        let browser = state
+            .browser
+            .lock()
+            .map_err(|_| "浏览器运行状态已损坏".to_string())?
+            .take();
+        *state
+            .browser_tls_bypass_host
+            .lock()
+            .map_err(|_| "浏览器验证兼容模式状态已损坏".to_string())? = None;
         let (proxy, stopped_session_id) = {
             let mut capture = state
                 .capture
@@ -2837,6 +2933,9 @@ async fn set_capture_running(
             state.breakpoints.cancel_session(session_id, "抓包已停止");
         }
         let session_cleared = state.storage.set_active_session(None);
+        if let Some(browser) = browser {
+            browser.stop().await;
+        }
         if let Some(proxy) = proxy {
             proxy.stop().await;
         }
@@ -3602,6 +3701,7 @@ pub fn run() {
             app.manage(AppState {
                 analysis: Mutex::new(AnalysisRuntime::default()),
                 browser: Mutex::new(None),
+                browser_tls_bypass_host: Mutex::new(None),
                 breakpoints,
                 capture: Mutex::new(CaptureRuntime::default()),
                 mcp: Mutex::new(McpRuntime::default()),
@@ -3826,6 +3926,33 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn browser_challenge_bypass_is_exact_and_temporary() {
+        assert_eq!(
+            normalize_browser_tls_bypass_host(Some(" Shield.LionAirThai.com ".into())).unwrap(),
+            Some("shield.lionairthai.com".into())
+        );
+        assert!(normalize_browser_tls_bypass_host(Some("*.lionairthai.com".into())).is_err());
+
+        let matching = temporary_browser_tls_interception_decision(
+            Some("shield.lionairthai.com"),
+            "shield.lionairthai.com",
+            None,
+        )
+        .expect("challenge host should bypass MITM");
+        assert!(matching.bypass);
+        assert!(temporary_browser_tls_interception_decision(
+            Some("shield.lionairthai.com"),
+            "www.lionairthai.com",
+            None,
+        )
+        .is_none());
+        assert!(
+            temporary_browser_tls_interception_decision(None, "shield.lionairthai.com", None,)
+                .is_none()
+        );
     }
 
     #[test]

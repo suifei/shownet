@@ -1255,6 +1255,9 @@ export interface ProxyBrowserStatus {
   sourceInstanceId: string;
   labUrl: string;
   honestUserAgent: string;
+  browserLanguage: string;
+  acceptLanguage: string;
+  tlsBypassHost: string;
 }
 
 export type UpstreamProxyMode = "direct" | "http" | "https" | "socks5";

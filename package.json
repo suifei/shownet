@@ -1,7 +1,7 @@
 {
   "name": "shownet",
   "private": true,
-  "version": "0.4.15",
+  "version": "0.4.16",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
@@ -55,6 +55,7 @@
     "test:egress": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml live_upstream_proxy_from_env -- --ignored --nocapture",
     "test:mitm-smoke": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml live_shownet_mitm_smoke -- --ignored --nocapture",
     "test:browser-ua": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml launch_user_agent_matches_the_browsers_own -- --ignored --nocapture",
+    "test:browser-launch": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml a_real_embedded_browser_stays_headless -- --ignored --nocapture",
     "test:live-capture:impersonate": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features impersonate-boring a_live_capture_session_shows -- --ignored --nocapture",
     "test:sdk-real": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml export_a_real_session_and_describe -- --ignored --nocapture",
     "test:font-css": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml a_google_fonts_stylesheet_survives -- --ignored --nocapture",

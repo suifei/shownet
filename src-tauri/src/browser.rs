@@ -81,6 +81,52 @@ const WINDOW_HEIGHT: u32 = 900;
 const SCREEN_WIDTH: u32 = 1920;
 const SCREEN_HEIGHT: u32 = 1080;
 
+fn normalize_browser_language(language: Option<&str>) -> Result<Option<String>, String> {
+    let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if language.len() > 35
+        || !language.is_ascii()
+        || language.starts_with('-')
+        || language.ends_with('-')
+        || language
+            .split('-')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        return Err("浏览器语言格式无效，请使用 en-US、zh-CN 这样的语言标签".to_string());
+    }
+    let mut parts = language.split('-');
+    let primary = parts.next().unwrap_or_default().to_ascii_lowercase();
+    if !(2..=8).contains(&primary.len()) || !primary.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return Err("浏览器语言格式无效，请使用 en-US、zh-CN 这样的语言标签".to_string());
+    }
+    let normalized = std::iter::once(primary)
+        .chain(parts.map(|part| {
+            if part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                part.to_ascii_uppercase()
+            } else if part.len() == 4 && part.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                let mut chars = part.chars();
+                let first = chars.next().unwrap().to_ascii_uppercase();
+                format!("{first}{}", chars.as_str().to_ascii_lowercase())
+            } else {
+                part.to_ascii_lowercase()
+            }
+        }))
+        .collect::<Vec<_>>()
+        .join("-");
+    Ok(Some(normalized))
+}
+
+fn accept_language_for(language: &str) -> String {
+    let base = language.split('-').next().unwrap_or(language);
+    if base.eq_ignore_ascii_case(language) {
+        language.to_string()
+    } else {
+        format!("{language},{base};q=0.9")
+    }
+}
+
 /// Chrome's reduced User-Agent: every token but the major version is frozen per
 /// platform, which is what makes building the string before launch safe.
 fn frozen_user_agent(major: u32) -> String {
@@ -111,9 +157,14 @@ fn chrome_major_version(chrome: &Path) -> Option<u32> {
 }
 
 impl ProxyBrowserHandle {
-    pub async fn launch(data_dir: &Path, proxy_port: u16) -> Result<Self, String> {
+    pub async fn launch(
+        data_dir: &Path,
+        proxy_port: u16,
+        browser_language: Option<&str>,
+    ) -> Result<Self, String> {
         let chrome = chrome_executable()?;
         let honest_launch_user_agent = chrome_major_version(&chrome).map(frozen_user_agent);
+        let browser_language = normalize_browser_language(browser_language)?;
         cleanup_browser_profile(&data_dir.join("browser-profile"));
         let (lab_address, lab_shutdown, lab_task) = start_lab_server().await?;
         let debug_port = match reserve_loopback_port() {
@@ -127,79 +178,20 @@ impl ProxyBrowserHandle {
         let profile_dir = data_dir
             .join("browser-profiles")
             .join(Uuid::new_v4().to_string());
-        if let Err(error) = prepare_browser_profile(&profile_dir) {
+        if let Err(error) = prepare_browser_profile(&profile_dir, browser_language.as_deref()) {
             let _ = lab_shutdown.send(());
             lab_task.abort();
             return Err(error);
         }
 
-        let mut command = Command::new(chrome);
-        command
-            .arg(format!("--user-data-dir={}", profile_dir.to_string_lossy()))
-            .arg(format!("--remote-debugging-port={debug_port}"))
-            .arg("--remote-debugging-address=127.0.0.1")
-            .arg("--remote-allow-origins=tauri://localhost,http://tauri.localhost")
-            .arg(format!("--proxy-server=http://127.0.0.1:{proxy_port}"))
-            .arg("--proxy-bypass-list=localhost;127.0.0.1;[::1]")
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--no-service-autorun")
-            .arg("--headless=new")
-            // Without this Blink advertises `navigator.webdriver = true`, which
-            // is the single cheapest automation tell a page can read. Nothing
-            // about the capture depends on announcing it.
-            .arg("--disable-blink-features=AutomationControlled")
-            .arg("--incognito")
-            .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
-            // Headless reports an 800x600 screen whatever --window-size says, and
-            // a desktop browser whose screen is smaller than common phones is a
-            // loud tell — bisecting the launch flags against a fingerprint probe,
-            // this was the only signal any of them produced once the User-Agent
-            // was fixed. Every other flag here (the debugging port, incognito, the
-            // disable-* block, the redirected Google endpoints) measured identical
-            // to a stock browser.
-            .arg(format!("--screen-info={{{SCREEN_WIDTH}x{SCREEN_HEIGHT}}}"))
-            .arg("--gcm-checkin-url=http://127.0.0.1:9/disabled")
-            .arg("--gcm-mcs-endpoint=127.0.0.1:9")
-            .arg("--gcm-registration-url=http://127.0.0.1:9/disabled")
-            .arg("--gaia-url=http://127.0.0.1:9")
-            .arg("--google-apis-url=http://127.0.0.1:9")
-            .arg("--google-base-url=http://127.0.0.1:9")
-            .arg("--disable-background-networking")
-            .arg("--disable-background-mode")
-            .arg("--disable-breakpad")
-            .arg("--disable-client-side-phishing-detection")
-            .arg("--disable-component-update")
-            .arg("--disable-component-extensions-with-background-pages")
-            .arg("--disable-default-apps")
-            .arg("--disable-domain-reliability")
-            .arg("--disable-extensions")
-            .arg("--disable-field-trial-config")
-            .arg("--disable-notifications")
-            .arg("--disable-search-engine-choice-screen")
-            .arg("--disable-sync")
-            .arg("--metrics-recording-only")
-            .arg("--password-store=basic")
-            .arg("--safebrowsing-disable-auto-update")
-            .arg("--use-mock-keychain")
-            .arg(format!("--disable-features={DISABLED_FEATURES}"))
-            .arg("about:blank");
-        // Headless Chrome announces itself in the User-Agent — `HeadlessChrome/151`
-        // — which is the loudest automation tell there is, and no amount of TLS
-        // fingerprint work survives it. The renderer-level CDP override that used
-        // to be the only defense reaches the page it is attached to and nothing
-        // else: measured over one real session, the main document went out
-        // rewritten while 17,763 subresource and worker requests still announced
-        // HeadlessChrome to their origins. A launch flag has no such seam.
-        //
-        // Chrome derives its client hints from the running build, not from this
-        // string, so overriding only the UA leaves Sec-CH-UA agreeing with it —
-        // whereas the CDP override had to restate the brand list and drifted from
-        // what the browser actually sends. Verified by
-        // launch_user_agent_matches_the_browsers_own_client_hints.
-        if let Some(user_agent) = &honest_launch_user_agent {
-            command.arg(format!("--user-agent={user_agent}"));
-        }
+        let mut command = chrome_command(
+            &chrome,
+            &profile_dir,
+            debug_port,
+            proxy_port,
+            honest_launch_user_agent.as_deref(),
+            browser_language.as_deref(),
+        );
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -212,7 +204,7 @@ impl ProxyBrowserHandle {
         };
         let source_instance_id = format!("chrome-cdp:{}", child.id());
 
-        let target = match wait_for_page_target(debug_port).await {
+        let target = match wait_for_page_target(debug_port, &mut child).await {
             Ok(target) => target,
             Err(error) => {
                 let _ = child.kill();
@@ -227,11 +219,17 @@ impl ProxyBrowserHandle {
         let status = ProxyBrowserStatus {
             running: true,
             honest_user_agent,
+            browser_language: browser_language.clone().unwrap_or_default(),
+            accept_language: browser_language
+                .as_deref()
+                .map(accept_language_for)
+                .unwrap_or_default(),
             debug_port,
             target_id: target.id,
             web_socket_debugger_url: target.web_socket_debugger_url.clone(),
             source_instance_id,
             lab_url: format!("http://{lab_address}/lab/index.html?autorun=1"),
+            ..Default::default()
         };
         let bus = Arc::new(BrowserBus::new(target.web_socket_debugger_url));
         Ok(Self {
@@ -259,6 +257,10 @@ impl ProxyBrowserHandle {
         Arc::clone(&self.bus)
     }
 
+    pub fn set_tls_bypass_host(&mut self, host: Option<String>) {
+        self.status.tls_bypass_host = host.unwrap_or_default();
+    }
+
     pub async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -274,6 +276,91 @@ impl ProxyBrowserHandle {
             cleanup_browser_profile(&profile_dir);
         }
     }
+}
+
+fn chrome_command(
+    chrome: &Path,
+    profile_dir: &Path,
+    debug_port: u16,
+    proxy_port: u16,
+    user_agent: Option<&str>,
+    browser_language: Option<&str>,
+) -> Command {
+    let mut command = Command::new(chrome);
+    command
+        .arg(format!("--user-data-dir={}", profile_dir.to_string_lossy()))
+        .arg(format!("--remote-debugging-port={debug_port}"))
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg("--remote-allow-origins=tauri://localhost,http://tauri.localhost")
+        .arg(format!("--proxy-server=http://127.0.0.1:{proxy_port}"))
+        .arg("--proxy-bypass-list=localhost;127.0.0.1;[::1]")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--no-service-autorun")
+        // `--headless=new` is ignored by older Chrome builds and can fall
+        // through to a visible browser window. Plain `--headless` selects
+        // the current implementation on modern Chrome and the supported
+        // implementation on older builds, so it never degrades to headed.
+        .arg("--headless")
+        // Without this Blink advertises `navigator.webdriver = true`, which
+        // is the single cheapest automation tell a page can read. Nothing
+        // about the capture depends on announcing it.
+        .arg("--disable-blink-features=AutomationControlled")
+        .arg("--incognito")
+        .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
+        // Headless reports an 800x600 screen whatever --window-size says, and
+        // a desktop browser whose screen is smaller than common phones is a
+        // loud tell — bisecting the launch flags against a fingerprint probe,
+        // this was the only signal any of them produced once the User-Agent
+        // was fixed. Every other flag here (the debugging port, incognito, the
+        // disable-* block, the redirected Google endpoints) measured identical
+        // to a stock browser.
+        .arg(format!("--screen-info={{{SCREEN_WIDTH}x{SCREEN_HEIGHT}}}"))
+        .arg("--gcm-checkin-url=http://127.0.0.1:9/disabled")
+        .arg("--gcm-mcs-endpoint=127.0.0.1:9")
+        .arg("--gcm-registration-url=http://127.0.0.1:9/disabled")
+        .arg("--gaia-url=http://127.0.0.1:9")
+        .arg("--google-apis-url=http://127.0.0.1:9")
+        .arg("--google-base-url=http://127.0.0.1:9")
+        .arg("--disable-background-networking")
+        .arg("--disable-background-mode")
+        .arg("--disable-breakpad")
+        .arg("--disable-client-side-phishing-detection")
+        .arg("--disable-component-update")
+        .arg("--disable-component-extensions-with-background-pages")
+        .arg("--disable-default-apps")
+        .arg("--disable-domain-reliability")
+        .arg("--disable-extensions")
+        .arg("--disable-field-trial-config")
+        .arg("--disable-notifications")
+        .arg("--disable-search-engine-choice-screen")
+        .arg("--disable-sync")
+        .arg("--metrics-recording-only")
+        .arg("--password-store=basic")
+        .arg("--safebrowsing-disable-auto-update")
+        .arg("--use-mock-keychain")
+        .arg(format!("--disable-features={DISABLED_FEATURES}"));
+    // Headless Chrome announces itself in the User-Agent — `HeadlessChrome/151`
+    // — which is the loudest automation tell there is, and no amount of TLS
+    // fingerprint work survives it. The renderer-level CDP override that used
+    // to be the only defense reaches the page it is attached to and nothing
+    // else: measured over one real session, the main document went out
+    // rewritten while 17,763 subresource and worker requests still announced
+    // HeadlessChrome to their origins. A launch flag has no such seam.
+    //
+    // Chrome derives its client hints from the running build, not from this
+    // string, so overriding only the UA leaves Sec-CH-UA agreeing with it —
+    // whereas the CDP override had to restate the brand list and drifted from
+    // what the browser actually sends. Verified by
+    // launch_user_agent_matches_the_browsers_own_client_hints.
+    if let Some(user_agent) = user_agent {
+        command.arg(format!("--user-agent={user_agent}"));
+    }
+    if let Some(language) = browser_language {
+        command.arg(format!("--lang={language}"));
+    }
+    command.arg("about:blank");
+    command
 }
 
 impl Drop for ProxyBrowserHandle {
@@ -294,12 +381,15 @@ impl Drop for ProxyBrowserHandle {
     }
 }
 
-fn prepare_browser_profile(profile_dir: &Path) -> Result<(), String> {
+fn prepare_browser_profile(
+    profile_dir: &Path,
+    browser_language: Option<&str>,
+) -> Result<(), String> {
     let default_dir = profile_dir.join("Default");
     std::fs::create_dir_all(&default_dir)
         .map_err(|error| format!("创建 ShowNet 浏览器配置失败: {error}"))?;
 
-    let preferences = serde_json::json!({
+    let mut preferences = serde_json::json!({
         "alternate_error_pages": { "enabled": false },
         "autofill": {
             "credit_card_enabled": false,
@@ -322,6 +412,11 @@ fn prepare_browser_profile(profile_dir: &Path) -> Result<(), String> {
         "sync": { "suppress_start": true },
         "translate": { "enabled": false }
     });
+    if let Some(language) = browser_language {
+        preferences["intl"] = serde_json::json!({
+            "accept_languages": accept_language_for(language)
+        });
+    }
     let local_state = serde_json::json!({
         "background_mode": { "enabled": false },
         "hardware_acceleration_mode": { "enabled": false }
@@ -429,7 +524,7 @@ struct ChromeTarget {
     web_socket_debugger_url: String,
 }
 
-async fn wait_for_page_target(debug_port: u16) -> Result<ChromeTarget, String> {
+async fn wait_for_page_target(debug_port: u16, child: &mut Child) -> Result<ChromeTarget, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
@@ -438,6 +533,14 @@ async fn wait_for_page_target(debug_port: u16) -> Result<ChromeTarget, String> {
     let endpoint = format!("http://127.0.0.1:{debug_port}/json/list");
     let mut last_error = "Chrome CDP 尚未就绪".to_string();
     for _ in 0..80 {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("读取 Chrome 进程状态失败: {error}"))?
+        {
+            return Err(format!(
+                "Chrome 在内嵌连接建立前退出（{status}）。请升级 Chrome 后重试"
+            ));
+        }
         match client.get(&endpoint).send().await {
             Ok(response) => match response.json::<Vec<ChromeTarget>>().await {
                 Ok(targets) => {
@@ -548,9 +651,11 @@ pub(crate) fn chrome_executable() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chrome_executable, chrome_major_version, frozen_user_agent, DISABLED_FEATURES, LAB_SCRIPT,
+        accept_language_for, chrome_command, chrome_executable, chrome_major_version,
+        frozen_user_agent, normalize_browser_language, DISABLED_FEATURES, LAB_SCRIPT,
         SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
     };
+    use std::path::Path;
 
     /// The entry in `DISABLED_FEATURES` whose absence would silently cost JA4
     /// parity with the egress. Named here rather than beside the list because the
@@ -632,6 +737,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn browser_language_is_canonical_and_keeps_request_and_page_identity_aligned() {
+        assert_eq!(
+            normalize_browser_language(Some(" zh-hans-cn ")).unwrap(),
+            Some("zh-Hans-CN".to_string())
+        );
+        assert_eq!(
+            normalize_browser_language(Some("TH-th")).unwrap(),
+            Some("th-TH".to_string())
+        );
+        assert_eq!(normalize_browser_language(None).unwrap(), None);
+        assert_eq!(accept_language_for("th-TH"), "th-TH,th;q=0.9");
+        assert!(normalize_browser_language(Some("zh_CN")).is_err());
+        assert!(normalize_browser_language(Some("-en-US")).is_err());
+    }
+
+    #[test]
+    fn launch_command_never_falls_through_to_a_visible_chrome_window() {
+        let command = chrome_command(
+            Path::new("chrome"),
+            Path::new("browser-profile"),
+            9222,
+            8080,
+            Some("Mozilla/5.0 Chrome/151.0.0.0"),
+            Some("th-TH"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.iter().any(|arg| arg == "--headless"));
+        assert!(!args.iter().any(|arg| arg == "--headless=new"));
+        assert!(args.iter().any(|arg| arg == "--lang=th-TH"));
+        assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
+
     /// The window has to fit on the screen it claims. A screen smaller than the
     /// window is the same class of tell as the 800x600 default it replaces.
     #[test]
@@ -702,5 +844,48 @@ mod tests {
             reported.contains(&major.to_string()),
             "parsed major {major} is not in the browser's own --version output: {reported}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a locally installed Chrome; run via npm run test:browser-launch"]
+    async fn a_real_embedded_browser_stays_headless_and_applies_its_language() {
+        let data_dir =
+            std::env::temp_dir().join(format!("shownet-browser-launch-{}", std::process::id()));
+        let mut browser = super::ProxyBrowserHandle::launch(&data_dir, 9, Some("th-TH"))
+            .await
+            .expect("launch an isolated headless Chrome");
+        let status = browser.status();
+        let identity = browser
+            .bus()
+            .evaluate(
+                "JSON.stringify({language: navigator.language, languages: navigator.languages, ua: navigator.userAgent})",
+                false,
+            )
+            .await
+            .expect("read browser identity");
+        let identity: serde_json::Value = serde_json::from_str(
+            identity
+                .value
+                .as_str()
+                .expect("identity expression returns JSON"),
+        )
+        .expect("valid browser identity JSON");
+
+        assert!(status.running);
+        assert_eq!(status.browser_language, "th-TH");
+        assert_eq!(status.accept_language, "th-TH,th;q=0.9");
+        assert_eq!(identity["language"], "th-TH");
+        assert!(identity["languages"]
+            .as_array()
+            .is_some_and(
+                |languages| languages.first().and_then(|value| value.as_str()) == Some("th-TH")
+            ));
+        assert!(!identity["ua"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Headless"));
+
+        browser.stop().await;
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

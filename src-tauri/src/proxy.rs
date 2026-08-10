@@ -774,10 +774,7 @@ fn app_proxy_sinks(app: tauri::AppHandle) -> (CaptureSink, RuleEngine, EventSink
     let tls_interception_app = app.clone();
     let tls_interception: TlsInterceptionEngine = Arc::new(move |host, sni| {
         let state = tls_interception_app.state::<crate::AppState>();
-        Ok(state
-            .storage
-            .get_tls_interception_settings()?
-            .decision(host, sni))
+        state.tls_interception_decision(host, sni)
     });
     let mirror_app = app.clone();
     let mirror: MirrorRuleEngine = Arc::new(move |request| {
@@ -12008,7 +12005,7 @@ mod tests {
         std::fs::create_dir_all(&data_dir).expect("data dir");
         // The production launcher, not a hand-rolled Chrome invocation — the
         // point is to check what ShowNet actually starts.
-        let browser = crate::browser::ProxyBrowserHandle::launch(&data_dir, port)
+        let browser = crate::browser::ProxyBrowserHandle::launch(&data_dir, port, None)
             .await
             .expect("launch the capture browser");
         let bus = browser.bus();

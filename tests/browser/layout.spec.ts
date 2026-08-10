@@ -40,6 +40,18 @@ test("floating layers stay inside the window", async ({ page }) => {
   expect(await findOffscreenLayers(page)).toEqual([]);
 });
 
+test("the embedded browser language menu stays usable", async ({ page }) => {
+  await gotoApp(page);
+  await openView(page, "浏览器");
+  await page.getByTitle("浏览器菜单").click();
+
+  const menu = page.locator(".browser-menu-popover");
+  await expect(menu).toBeVisible();
+  await expect(page.getByLabel("浏览器语言")).toBeVisible();
+  expect(await findOffscreenLayers(page)).toEqual([]);
+  expect(await findCrushedText(page)).toEqual([]);
+});
+
 test("the collection overflow menu keeps its rows on one line", async ({ page }) => {
   // The regression this whole layer exists for: an icon-sizing rule matched the
   // labelled buttons and wrapped every menu row to one character per line.
