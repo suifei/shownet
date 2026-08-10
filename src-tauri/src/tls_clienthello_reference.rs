@@ -386,7 +386,11 @@ mod tests {
             let status = tls_outbound::status_json();
             assert_eq!(status["presetId"], id);
             assert_eq!(status["ja3Parity"], false);
-            assert_eq!(status["supportsFullBrowserJa3"], false);
+            assert_eq!(
+                status["supportsFullBrowserJa3"],
+                cfg!(feature = "impersonate-boring"),
+                "supportsFullBrowserJa3 tracks the linked stack, not the preset catalog"
+            );
         }
         tls_outbound::set_active_preset("chrome150").unwrap();
     }

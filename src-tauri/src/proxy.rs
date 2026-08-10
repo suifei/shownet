@@ -8667,7 +8667,13 @@ mod tests {
             tls_outbound::real_impersonate_stack_available(),
             cfg!(feature = "impersonate-boring")
         );
-        assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
+        // Product policy: linked stack ⇒ full-browser engine is active.
+        // This helper only measures rustls builder JA3 recipes; it does not
+        // claim product MITM uses rustls when impersonate is linked.
+        assert_eq!(
+            tls_outbound::active_engine().supports_full_browser_ja3(),
+            cfg!(feature = "impersonate-boring")
+        );
         ja3
     }
 

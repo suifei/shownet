@@ -1067,7 +1067,11 @@ mod tests {
                 }
             }
             assert_eq!(status["ja3Parity"], false);
-            assert_eq!(status["supportsFullBrowserJa3"], false);
+            assert_eq!(
+                status["supportsFullBrowserJa3"],
+                cfg!(feature = "impersonate-boring"),
+                "supportsFullBrowserJa3 follows the linked stack, not catalog goldens"
+            );
             assert_eq!(status["goldenPlatform"], platform);
         }
         set_active_preset("chrome150").unwrap();
@@ -1095,7 +1099,10 @@ mod tests {
         assert_eq!(status["browserMajorVersion"], 150);
         assert_eq!(status["browserFamily"], "chrome");
         assert_eq!(status["ja3Parity"], false);
-        assert_eq!(status["supportsFullBrowserJa3"], false);
+        assert_eq!(
+            status["supportsFullBrowserJa3"],
+            cfg!(feature = "impersonate-boring")
+        );
         let presets = status["presets"].as_array().expect("presets array");
         assert!(presets.len() >= 20);
     }
@@ -1127,14 +1134,20 @@ mod tests {
         assert_eq!(s1["presetId"], "chrome149");
         assert_eq!(s1["browserMajorVersion"], 149);
         assert_eq!(s1["ja3Parity"], false);
-        assert_eq!(s1["supportsFullBrowserJa3"], false);
+        assert_eq!(
+            s1["supportsFullBrowserJa3"],
+            cfg!(feature = "impersonate-boring")
+        );
 
         set_active_preset("firefox133").unwrap();
         let s2 = status_json();
         assert_eq!(s2["presetId"], "firefox133");
         assert_eq!(s2["browserFamily"], "firefox");
         assert_eq!(s2["ja3Parity"], false);
-        assert_eq!(s2["supportsFullBrowserJa3"], false);
+        assert_eq!(
+            s2["supportsFullBrowserJa3"],
+            cfg!(feature = "impersonate-boring")
+        );
 
         // "restart simulation": re-apply stored preset id like load_app_setting path
         let stored = s2["presetId"].as_str().unwrap().to_string();
@@ -1244,7 +1257,10 @@ mod tests {
         let st = status_json();
         assert_eq!(st["documentedJa3"], "ab063844a93885b408c5a0bfcb2444c6");
         assert_eq!(st["ja3Parity"], false);
-        assert_eq!(st["supportsFullBrowserJa3"], false);
+        assert_eq!(
+            st["supportsFullBrowserJa3"],
+            cfg!(feature = "impersonate-boring")
+        );
         assert_eq!(
             st["realImpersonateStackAvailable"],
             cfg!(feature = "impersonate-boring")
