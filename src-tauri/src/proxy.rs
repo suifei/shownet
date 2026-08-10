@@ -4814,13 +4814,8 @@ async fn forward_http(
                 // Upgrade needs a raw TLS stream; wreq cannot terminate
                 // Connection: Upgrade. Prefer MITM tunnel's dedicated path.
                 let profile = tls_outbound::global_profile();
-                let verified = connect_verified_tls_measured(
-                    stream,
-                    tls_identity_host,
-                    profile,
-                    true,
-                )
-                .await?;
+                let verified =
+                    connect_verified_tls_measured(stream, tls_identity_host, profile, true).await?;
                 handshake_origin_https(verified.stream, verified.negotiated_alpn.as_deref(), false)
                     .await?
             } else {

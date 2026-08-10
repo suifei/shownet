@@ -3565,11 +3565,7 @@ pub fn run() {
                 // `impersonate: false` so a previous opt-out cannot re-enable
                 // rustls egress after that path was removed from the product.
                 if tls_outbound::real_impersonate_stack_available() {
-                    if value
-                        .get("impersonate")
-                        .and_then(|v| v.as_bool())
-                        != Some(true)
-                    {
+                    if value.get("impersonate").and_then(|v| v.as_bool()) != Some(true) {
                         let mut fixed = value.clone();
                         if let Some(obj) = fixed.as_object_mut() {
                             obj.insert("impersonate".into(), json!(true));
@@ -3759,7 +3755,6 @@ pub fn run() {
             get_outbound_tls_profile,
             set_outbound_tls_profile,
             set_outbound_tls_auto_from_inbound,
-
             get_px_settings,
             set_px_settings,
             list_px_evidence,
