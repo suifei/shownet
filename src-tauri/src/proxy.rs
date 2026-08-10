@@ -8576,13 +8576,17 @@ mod tests {
     async fn connect_verified_tls_measures_outbound_client_hello_ja3() {
         let ja3 = measure_profile_ja3(OutboundTlsProfile::ChromeLike, "ja3.measure.test").await;
         assert_eq!(ja3.len(), 32);
-        // The stack is linked exactly when the feature is compiled in; parity is
-        // a separate, per-measurement decision made against a golden.
+        // The stack is linked exactly when the feature is compiled in; engine
+        // follows the stack. Measured ja3Parity is still a separate, per-sample
+        // golden decision and is not asserted here.
         assert_eq!(
             tls_outbound::real_impersonate_stack_available(),
             cfg!(feature = "impersonate-boring")
         );
-        assert!(!tls_outbound::active_engine().supports_full_browser_ja3());
+        assert_eq!(
+            tls_outbound::active_engine().supports_full_browser_ja3(),
+            cfg!(feature = "impersonate-boring")
+        );
     }
 
     #[tokio::test]
