@@ -9,6 +9,9 @@ use crate::algorithm_reconstruction::{self, AlgorithmReconstruction};
 use crate::protection_analysis;
 use crate::signature_adapter::{self, SignatureAdapterHarness};
 use crate::storage::Storage;
+use crate::verification_manifest::{
+    self, ArtifactVerificationManifest, GeneratedFileDigest, ManifestInput, VerificationVerdict,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,6 +62,10 @@ pub struct AlgorithmReplayPackage {
     /// treating the whole replay file as a single opaque blob.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verified_steps: Vec<VerifiedStep>,
+    /// Pipeline steps that have no verified implementation in this package's
+    /// language. They are named for downstream generators, never emitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_steps: Vec<String>,
     pub can_emit_runnable_crypto: bool,
     /// Whether the emitted crypto was executed against captured values and
     /// reproduced them. Distinct from `can_emit_runnable_crypto`, which only
@@ -70,6 +77,7 @@ pub struct AlgorithmReplayPackage {
     pub required_inputs: Vec<String>,
     pub evidence_gaps: Vec<String>,
     pub validation_checklist: Vec<String>,
+    pub verification_manifest: ArtifactVerificationManifest,
     pub files: Vec<ReplayFile>,
     pub notes: Vec<String>,
 }
@@ -82,6 +90,7 @@ pub struct AlgorithmReplayExportResult {
     pub directory: String,
     pub files: Vec<String>,
     pub package_hash: String,
+    pub gate_verdict: VerificationVerdict,
     pub bytes_written: usize,
 }
 
@@ -220,8 +229,14 @@ pub fn build_algorithm_replay_for_report(
                 .into(),
         );
     }
+    evidence_gaps = complete_evidence_gaps(
+        &evidence_gaps,
+        &reconstruction,
+        &language,
+        &harness.dynamic_fields,
+    );
 
-    let files = build_files(
+    let (files, verification_manifest) = build_files(
         session_id,
         &language,
         &harness,
@@ -234,8 +249,13 @@ pub fn build_algorithm_replay_for_report(
     )?;
 
     let package_hash = package_hash(session_id, &language, &harness.evidence_hash, &files);
-    let validation_checklist =
-        validation_checklist(&harness, &protocol_schemas, &evidence_gaps, &reconstruction);
+    let validation_checklist = validation_checklist(
+        &harness,
+        &protocol_schemas,
+        &evidence_gaps,
+        &reconstruction,
+        &language,
+    );
     let mut notes = notes(&harness, report_id.is_some(), &reconstruction);
     notes.extend(reconstruction.notes.iter().cloned());
 
@@ -248,7 +268,13 @@ pub fn build_algorithm_replay_for_report(
             source: source.to_string(),
             entry_point: entry_point.to_string(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let unverified_steps = unverified_algorithm_step_names(&reconstruction, &language)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let crypto_verified =
+        crypto_verified_for_package(&reconstruction, &language, &harness.dynamic_fields);
 
     Ok(AlgorithmReplayPackage {
         session_id: session_id.to_string(),
@@ -263,14 +289,16 @@ pub fn build_algorithm_replay_for_report(
         reconstruction_mode: reconstruction.reconstruction_mode.clone(),
         reconstruction_confidence: reconstruction.confidence.clone(),
         verified_steps,
+        unverified_steps,
         can_emit_runnable_crypto: reconstruction.can_emit_runnable_crypto,
-        crypto_verified: reconstruction.crypto_verified,
+        crypto_verified,
         provider_candidates,
         protocol_schemas,
         algorithm_reconstruction: reconstruction_value,
         required_inputs: harness.required_inputs,
         evidence_gaps,
         validation_checklist,
+        verification_manifest,
         files,
         notes,
     })
@@ -315,7 +343,8 @@ pub fn export_algorithm_replay_for_report(
         written.push(path.to_string_lossy().to_string());
     }
 
-    // Sidecar index for tooling.
+    // Sidecar index for tooling. It is created after the package and therefore
+    // intentionally sits outside VERIFICATION_MANIFEST.json's file digests.
     let index = json!({
         "sessionId": package.session_id,
         "language": package.language,
@@ -323,6 +352,7 @@ pub fn export_algorithm_replay_for_report(
         "vendor": package.vendor,
         "evidenceHash": package.evidence_hash,
         "packageHash": package.package_hash,
+        "gateVerdict": package.verification_manifest.gate.verdict,
         "files": package.files.iter().map(|file| {
             json!({
                 "name": file.name,
@@ -345,12 +375,14 @@ pub fn export_algorithm_replay_for_report(
         directory: directory.to_string_lossy().to_string(),
         files: written,
         package_hash: package.package_hash,
+        gate_verdict: package.verification_manifest.gate.verdict,
         bytes_written,
     })
 }
 
 fn package_subdirectory(parent: &Path, session_id: &str, language: &str) -> PathBuf {
     let stamp = now_ms();
+    let nonce = uuid::Uuid::new_v4().simple();
     let safe_session = session_id
         .chars()
         .map(|ch| {
@@ -362,7 +394,7 @@ fn package_subdirectory(parent: &Path, session_id: &str, language: &str) -> Path
         })
         .collect::<String>();
     parent.join(format!(
-        "shownet-algorithm-replay-{safe_session}-{language}-{stamp}"
+        "shownet-algorithm-replay-{safe_session}-{language}-{stamp}-{nonce}"
     ))
 }
 
@@ -392,7 +424,13 @@ fn build_files(
     evidence_gaps: &[String],
     report_markdown: &str,
     reconstruction: &AlgorithmReconstruction,
-) -> Result<Vec<ReplayFile>, String> {
+) -> Result<(Vec<ReplayFile>, ArtifactVerificationManifest), String> {
+    let evidence_gaps = complete_evidence_gaps(
+        evidence_gaps,
+        reconstruction,
+        language,
+        &harness.dynamic_fields,
+    );
     let reconstruction_json =
         serde_json::to_value(reconstruction).map_err(|error| error.to_string())?;
     let manifest = json!({
@@ -412,7 +450,7 @@ fn build_files(
         "providerCandidates": provider_candidates,
         "protocolSchemas": protocol_schemas,
         "algorithmReconstruction": reconstruction_json,
-        "evidenceGaps": evidence_gaps,
+        "evidenceGaps": &evidence_gaps,
         "evidenceDiscipline": evidence_discipline,
     });
     let manifest_pretty =
@@ -428,17 +466,25 @@ fn build_files(
     // Shipped as its own file rather than buried in ALGORITHM_SPEC.json: this is
     // the answer to "is this code right", and the operator should not have to
     // find it inside a document that describes what the code is supposed to do.
+    let language_reports = reconstruction
+        .verification
+        .iter()
+        .filter(|report| report.language.eq_ignore_ascii_case(language))
+        .collect::<Vec<_>>();
+    let language_crypto_verified =
+        crypto_verified_for_package(reconstruction, language, &harness.dynamic_fields);
     let verification_pretty = serde_json::to_string_pretty(&json!({
-        "cryptoVerified": reconstruction.crypto_verified,
-        "claimBasis": if reconstruction.crypto_verified {
-            "each emitted agent step reproduced values recorded in this capture"
-        } else if reconstruction.verification.is_empty() {
-            "no agent-written code was supplied, so nothing was executed; template steps are unverified by construction"
+        "language": language,
+        "cryptoVerified": language_crypto_verified,
+        "claimBasis": if language_crypto_verified {
+            format!("every emitted {language} agent step reproduced values recorded in this capture, and no pipeline step was withheld")
+        } else if language_reports.is_empty() {
+            format!("no {language} candidate implementation was supplied, so nothing was executed and no executable algorithm claim is made")
         } else {
-            "agent-written code was executed and did not earn the claim — see runs[]"
+            format!("at least one {language} pipeline step was not verified and emitted — see runs[] and evidenceGaps")
         },
-        "runs": reconstruction.verification,
-        "note": "`canEmitRunnableCrypto` says ShowNet has a template for these step names. `cryptoVerified` says the emitted code produced the values the site actually returned. Only the second is evidence about the site.",
+        "runs": language_reports,
+        "note": format!("`canEmitRunnableCrypto` describes template availability. `cryptoVerified` is scoped to this {language} package and requires every emitted algorithm step to have reproduced captured values, with no withheld pipeline step."),
     }))
     .map_err(|error| error.to_string())?;
 
@@ -447,12 +493,24 @@ fn build_files(
         language,
         harness,
         protocol_schemas,
-        evidence_gaps,
+        &evidence_gaps,
         reconstruction,
     )?;
-    let readme = render_readme(session_id, language, harness, evidence_gaps, reconstruction);
-    let checklist =
-        validation_checklist(harness, protocol_schemas, evidence_gaps, reconstruction).join("\n- ");
+    let readme = render_readme(
+        session_id,
+        language,
+        harness,
+        &evidence_gaps,
+        reconstruction,
+    );
+    let checklist = validation_checklist(
+        harness,
+        protocol_schemas,
+        &evidence_gaps,
+        reconstruction,
+        language,
+    )
+    .join("\n- ");
 
     let mut files = vec![
         file(
@@ -532,7 +590,49 @@ fn build_files(
         ));
     }
 
-    Ok(files)
+    let mut evidence_identifiers = verification_manifest::evidence_identifiers_for_language(
+        &reconstruction.verification,
+        language,
+    );
+    evidence_identifiers.extend(
+        harness
+            .matched_requests
+            .iter()
+            .map(|request| format!("request:{}", request.request_id)),
+    );
+    let mut evidence_hashes =
+        verification_manifest::evidence_hashes_for_language(&reconstruction.verification, language);
+    evidence_hashes.push(harness.evidence_hash.clone());
+    let verification_manifest = ArtifactVerificationManifest::build(ManifestInput {
+        kind: "algorithm-replay".to_string(),
+        session_id: session_id.to_string(),
+        language: language.to_string(),
+        evidence_identifiers,
+        evidence_hashes,
+        runtimes: verification_manifest::runtime_verifications_for_language(
+            &reconstruction.verification,
+            language,
+        )?,
+        generated_files: files
+            .iter()
+            .map(|file| GeneratedFileDigest::from_content(&file.name, &file.role, &file.content))
+            .collect(),
+        gaps: evidence_gaps,
+        executable_verified_logic_emitted: !verified_agent_steps(reconstruction, language)
+            .is_empty(),
+        package_runtime_required: false,
+        package_runtime_verified: false,
+    });
+    let manifest_pretty =
+        serde_json::to_string_pretty(&verification_manifest).map_err(|error| error.to_string())?;
+    files.push(file(
+        "VERIFICATION_MANIFEST.json",
+        "verification-manifest",
+        None,
+        &manifest_pretty,
+    ));
+
+    Ok((files, verification_manifest))
 }
 
 fn file(name: &str, role: &str, language: Option<String>, content: &str) -> ReplayFile {
@@ -588,14 +688,14 @@ Adapter: `{adapter}` ({vendor})
 Evidence hash: `{hash}`
 Adapter confidence: `{confidence}`
 Reconstruction mode: `{recon_mode}` (confidence `{recon_conf}`)
-Runnable reconstructed crypto: `{runnable}`
+Verified executable steps emitted: `{verified_step_count}`
 
 ## Purpose
 
 This package **restores algorithms from analysis evidence**, not blank stubs:
 
 1. Read `ALGORITHM_RECONSTRUCTION.md` / `ALGORITHM_SPEC.json` for the pipeline.
-2. Run `{replay}` which implements **reconstructed** steps (HMAC / NetworkBandwidth / telemetry chain, etc.).
+2. Run `{replay}` which executes only agent-written steps verified against this capture in `{language}`.
 3. Use `validate_against_capture()` to check field shapes against capture before authorized live tests.
 4. For **VMP / custom VM / heavily mutated JS**, only hybrid/trace-driven steps are claimed — static full decompilation is not invented.
 
@@ -628,7 +728,7 @@ This package **restores algorithms from analysis evidence**, not blank stubs:
 ## Safety
 
 - Secrets / tokens / AES keys are never embedded; use env vars listed above.
-- Only steps marked `reconstructed` are claimed runnable from evidence.
+- A pipeline label such as `reconstructed` is descriptive, not a runtime pass. Only steps listed in `VERIFICATION.json` as verified for `{language}` are emitted as executable logic.
 - VMP code requires Hook traces or authorized runtime capture — do not expect a pure static dump.
 - Use only against systems you are authorized to test.
 
@@ -647,7 +747,7 @@ This package **restores algorithms from analysis evidence**, not blank stubs:
         confidence = harness.confidence,
         recon_mode = reconstruction.reconstruction_mode,
         recon_conf = reconstruction.confidence,
-        runnable = reconstruction.can_emit_runnable_crypto,
+        verified_step_count = verified_agent_steps(reconstruction, language).len(),
         replay = replay_filename(language),
         pipeline = if pipeline.is_empty() {
             "- (empty)".to_string()
@@ -680,6 +780,7 @@ fn validation_checklist(
     protocol_schemas: &Value,
     evidence_gaps: &[String],
     reconstruction: &AlgorithmReconstruction,
+    language: &str,
 ) -> Vec<String> {
     let mut items = vec![
         "Read ALGORITHM_SPEC.json and confirm each reconstructed step formula matches the report.".to_string(),
@@ -687,9 +788,9 @@ fn validation_checklist(
         "Secrets only via env; never paste production tokens into source.".to_string(),
         "For VMP/custom VM steps, attach Hook I/O traces before claiming pass.".to_string(),
     ];
-    if reconstruction.can_emit_runnable_crypto {
+    if !verified_agent_steps(reconstruction, language).is_empty() {
         items.push(
-            "Execute reconstructed crypto helpers (HMAC / PoW / telemetry) and compare outputs' formats to capture."
+            format!("Execute the emitted {language} agent steps and compare their outputs to the captured values.")
                 .to_string(),
         );
     }
@@ -769,14 +870,29 @@ fn package_hash(
     files: &[ReplayFile],
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(session_id.as_bytes());
-    hasher.update(language.as_bytes());
-    hasher.update(evidence_hash.as_bytes());
+    hasher.update(b"shownet-algorithm-replay-package-v1\0");
+    hash_framed(&mut hasher, session_id.as_bytes());
+    hash_framed(&mut hasher, language.as_bytes());
+    hash_framed(&mut hasher, evidence_hash.as_bytes());
+    hasher.update((files.len() as u64).to_be_bytes());
     for file in files {
-        hasher.update(file.name.as_bytes());
-        hasher.update(file.content.as_bytes());
+        hash_framed(&mut hasher, file.name.as_bytes());
+        hash_framed(&mut hasher, file.role.as_bytes());
+        match &file.language {
+            Some(language) => {
+                hasher.update([1]);
+                hash_framed(&mut hasher, language.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        hash_framed(&mut hasher, file.content.as_bytes());
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn hash_framed(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 fn now_ms() -> u128 {
@@ -796,7 +912,7 @@ fn now_ms() -> u128 {
 /// unreviewed model output is not run by the operator on the strength of the
 /// model's own confidence, only on the strength of it having reproduced values
 /// the site really returned.
-fn verified_agent_steps<'a>(
+fn strictly_verified_agent_steps<'a>(
     reconstruction: &'a AlgorithmReconstruction,
     language: &str,
 ) -> Vec<(&'a str, &'a str, &'a str)> {
@@ -804,24 +920,222 @@ fn verified_agent_steps<'a>(
         .pipeline
         .iter()
         .filter_map(|step| {
-            let implementation = step
+            if step.status != "reconstructed"
+                || reconstruction
+                    .pipeline
+                    .iter()
+                    .filter(|candidate| candidate.id == step.id)
+                    .count()
+                    != 1
+                || reconstruction
+                    .pipeline
+                    .iter()
+                    .filter(|candidate| candidate.name == step.name)
+                    .count()
+                    != 1
+            {
+                return None;
+            }
+
+            let mut implementations = step
                 .implementations
                 .iter()
-                .find(|item| item.language.eq_ignore_ascii_case(language))?;
-            // The step's own verification run must have passed, in this
-            // language. A JS pass does not license emitting Python.
-            let verified = reconstruction.verification.iter().any(|report| {
-                report.step_id == step.id
-                    && report.language.eq_ignore_ascii_case(language)
-                    && report.is_verified()
+                .filter(|item| item.normalized_language() == language);
+            let implementation = implementations.next()?;
+            if implementations.next().is_some() {
+                return None;
+            }
+
+            // A report currently identifies an implementation by step and
+            // language. Requiring exactly one of each keeps that association
+            // one-to-one; otherwise a passing sibling could license different
+            // source from the same step.
+            let mut reports = reconstruction.verification.iter().filter(|report| {
+                report.step_id == step.id && report.language.eq_ignore_ascii_case(language)
             });
-            verified.then_some((
+            let report = reports.next()?;
+            if reports.next().is_some()
+                || report.step_name != step.name
+                || report.implementation_sha256 != implementation.sha256()
+                || !report.is_verified()
+            {
+                return None;
+            }
+
+            Some((
                 step.name.as_str(),
                 implementation.source.as_str(),
                 implementation.entry_point.as_str(),
             ))
         })
         .collect()
+}
+
+fn verified_agent_steps<'a>(
+    reconstruction: &'a AlgorithmReconstruction,
+    language: &str,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let steps = strictly_verified_agent_steps(reconstruction, language);
+    // Each compiled candidate was verified as its own compilation unit. Putting
+    // multiple units that all declare Candidate/ComputeSignature into one
+    // package changes that environment and can produce duplicate symbols. Keep
+    // the package closed until those units can be isolated without rewriting
+    // code that was already verified.
+    if (matches!(language, "go" | "java" | "csharp") && steps.len() > 1)
+        || steps
+            .first()
+            .is_some_and(|(_, source, _)| !generated_symbol_collisions(source, language).is_empty())
+    {
+        Vec::new()
+    } else {
+        steps
+    }
+}
+
+fn generated_symbol_collisions(source: &str, language: &str) -> Vec<&'static str> {
+    let reserved: &[&str] = match language {
+        "go" => &[
+            "Manifest",
+            "ReplayContext",
+            "loadManifest",
+            "AgentStepInput",
+            "ComputeDynamicFields",
+            "BuildRequest",
+            "getenv",
+            "AgentSteps",
+        ],
+        "java" | "csharp" => &["Replay", "AgentSteps"],
+        _ => &[],
+    };
+    reserved
+        .iter()
+        .copied()
+        .filter(|name| contains_ascii_identifier(source, name))
+        .collect()
+}
+
+fn contains_ascii_identifier(source: &str, identifier: &str) -> bool {
+    source.match_indices(identifier).any(|(start, _)| {
+        let before = source[..start].chars().next_back();
+        let end = start + identifier.len();
+        let after = source[end..].chars().next();
+        !before.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            && !after.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn compiled_step_collision_gap(
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+) -> Option<String> {
+    if !matches!(language, "go" | "java" | "csharp") {
+        return None;
+    }
+    let steps = strictly_verified_agent_steps(reconstruction, language);
+    if steps.len() > 1 {
+        return Some(format!(
+            "{} verified {language} algorithm steps reuse one compilation namespace; all were withheld to prevent candidate symbol collisions",
+            steps.len()
+        ));
+    }
+    let (_, source, _) = steps.first()?;
+    let collisions = generated_symbol_collisions(source, language);
+    (!collisions.is_empty()).then(|| {
+        format!(
+            "verified {language} candidate contains generated-package symbol(s) {}; it was withheld because the exported compilation unit would differ from the verified one",
+            collisions.join(", ")
+        )
+    })
+}
+
+fn unverified_algorithm_step_gaps(
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+) -> Vec<String> {
+    unverified_algorithm_steps(reconstruction, language)
+        .into_iter()
+        .map(|step| {
+            format!(
+                "algorithm step '{}' ({}) has no runtime-verified {} implementation and was not emitted",
+                step.name, step.status, language
+            )
+        })
+        .collect()
+}
+
+fn unverified_algorithm_step_names<'a>(
+    reconstruction: &'a AlgorithmReconstruction,
+    language: &str,
+) -> Vec<&'a str> {
+    unverified_algorithm_steps(reconstruction, language)
+        .into_iter()
+        .map(|step| step.name.as_str())
+        .collect()
+}
+
+fn unverified_algorithm_steps<'a>(
+    reconstruction: &'a AlgorithmReconstruction,
+    language: &str,
+) -> Vec<&'a algorithm_reconstruction::AlgorithmStep> {
+    let verified_names = verified_agent_steps(reconstruction, language)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect::<BTreeSet<_>>();
+    reconstruction
+        .pipeline
+        .iter()
+        .filter(|step| !verified_names.contains(step.name.as_str()))
+        .collect()
+}
+
+fn dynamic_field_gaps(
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+    dynamic_fields: &[String],
+) -> Vec<String> {
+    let emitted_names = verified_agent_steps(reconstruction, language)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect::<BTreeSet<_>>();
+    dynamic_fields
+        .iter()
+        .filter(|field| !emitted_names.contains(field.as_str()))
+        .map(|field| {
+            format!(
+                "dynamic field '{field}' has no emitted runtime-verified {language} step named exactly '{field}'"
+            )
+        })
+        .collect()
+}
+
+fn complete_evidence_gaps(
+    existing: &[String],
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+    dynamic_fields: &[String],
+) -> Vec<String> {
+    let mut gaps = existing.to_vec();
+    let mut generated = unverified_algorithm_step_gaps(reconstruction, language);
+    generated.extend(dynamic_field_gaps(reconstruction, language, dynamic_fields));
+    if let Some(gap) = compiled_step_collision_gap(reconstruction, language) {
+        generated.push(gap);
+    }
+    for gap in generated {
+        if !gaps.iter().any(|item| item == &gap) {
+            gaps.push(gap);
+        }
+    }
+    gaps
+}
+
+fn crypto_verified_for_package(
+    reconstruction: &AlgorithmReconstruction,
+    language: &str,
+    dynamic_fields: &[String],
+) -> bool {
+    !verified_agent_steps(reconstruction, language).is_empty()
+        && unverified_algorithm_step_names(reconstruction, language).is_empty()
+        && dynamic_field_gaps(reconstruction, language, dynamic_fields).is_empty()
 }
 
 /// Inline agent code for the interpreted languages, whose templates carry an
@@ -843,25 +1157,35 @@ fn render_agent_algorithms_python(verified_steps: &[(&str, &str, &str)]) -> Stri
             .to_string();
     }
 
-    let mut out = String::from(
-        "# --- Agent-reconstructed steps ------------------------------------------\n\
-         # Written by the analysis agent, then executed against values this capture\n\
-         # recorded. Only steps that reproduced those values exactly appear here.\n\
-         # See VERIFICATION.json for the cases each one passed.\n\n",
-    );
+    let mut out = String::from(concat!(
+        "# --- Agent-reconstructed steps ------------------------------------------\n",
+        "# Written by the analysis agent, then executed against values this capture\n",
+        "# recorded. Only steps that reproduced those values exactly appear here.\n",
+        "# See VERIFICATION.json for the cases each one passed.\n\n",
+        "def _load_verified_agent_step(source, entry_point, label):\n",
+        "    namespace = {\"__name__\": \"shownet_verified_candidate\"}\n",
+        "    exec(compile(source, \"<shownet-verified-candidate>\", \"exec\"), namespace)\n",
+        "    step = namespace.get(entry_point)\n",
+        "    if not callable(step):\n",
+        "        raise RuntimeError(f\"verified agent entry point is not callable: {label}.{entry_point}\")\n",
+        "    return step\n\n",
+    ));
     let mut registry = Vec::new();
     for (index, (name, source, entry_point)) in verified_steps.iter().enumerate() {
         let module_alias = format!("_agent_step_{index}");
         out.push_str(&format!("# step: {name}\n"));
-        // Namespaced in a function so two agent steps cannot collide on a helper
-        // name and silently take each other's implementation.
-        out.push_str(&format!("def {module_alias}_factory():\n"));
-        for line in source.lines() {
-            out.push_str(&format!("    {line}\n"));
-        }
-        out.push_str(&format!("    return {entry_point}\n\n"));
-        out.push_str(&format!("{module_alias} = {module_alias}_factory()\n\n"));
-        registry.push(format!("    {name:?}: {module_alias},"));
+        // The private dictionary and fixed module identity are the same ones
+        // used by verification, while sibling steps remain isolated.
+        out.push_str(&format!(
+            "{module_alias} = _load_verified_agent_step({}, {}, {})\n\n",
+            serde_json::to_string(source).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(entry_point).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
+        ));
+        registry.push(format!(
+            "    {}: {module_alias},",
+            serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into())
+        ));
     }
     out.push_str("AGENT_STEPS: Dict[str, Any] = {\n");
     out.push_str(&registry.join("\n"));
@@ -901,28 +1225,80 @@ fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &
         );
     }
 
-    // The candidate was verified against `shownet.*` primitives, because the
-    // verifier's sandbox has no WebCrypto. Node does, so the same surface is
-    // rebuilt on node:crypto here — same names, same encodings, so the code that
-    // passed verification is the code that runs.
+    // Keep the exact source string that earned the verification report. Adding
+    // indentation changes multiline template literals, so Node evaluates it in
+    // an isolated VM context instead. One context per step also preserves the
+    // same stateful, load-once lifecycle used by verification.
     let mut out = String::from(
-        "// --- Agent-reconstructed steps ------------------------------------------\n\
-         // Written by the analysis agent, then executed against values this capture\n\
-         // recorded. Only steps that reproduced those values exactly appear here.\n\
-         // See VERIFICATION.json for the cases each one passed.\n\n\
-         import { createHash, createHmac } from \"node:crypto\";\n\n\
-         const shownet = {\n\
-         \x20 sha256Hex: (data) => createHash(\"sha256\").update(String(data)).digest(\"hex\"),\n\
-         \x20 md5Hex: (data) => createHash(\"md5\").update(String(data)).digest(\"hex\"),\n\
-         \x20 hmacSha256Hex: (key, message) =>\n\
-         \x20   createHmac(\"sha256\", String(key)).update(String(message)).digest(\"hex\"),\n\
-         \x20 base64Encode: (data) => Buffer.from(String(data), \"utf8\").toString(\"base64\"),\n\
-         };\n\n",
+        r#"// --- Agent-reconstructed steps ------------------------------------------
+// Written by the analysis agent, then executed against values this capture
+// recorded. Only steps that reproduced those values exactly appear here.
+// See VERIFICATION.json for the cases each one passed.
+
+import { createHash, createHmac } from "node:crypto";
+import { createContext, runInContext } from "node:vm";
+
+const shownet = {
+  sha256Hex: (data) => createHash("sha256").update(String(data)).digest("hex"),
+  md5Hex: (data) => createHash("md5").update(String(data)).digest("hex"),
+  hmacSha256Hex: (key, message) =>
+    createHmac("sha256", String(key)).update(String(message)).digest("hex"),
+  base64Encode: (data) => Buffer.from(String(data), "utf8").toString("base64"),
+};
+
+"#,
     );
     if typed {
         out = out.replace(
             "const shownet = {",
             &format!("{AGENT_STEP_INPUT_TYPE}const shownet = {{"),
+        );
+        out.push_str(
+            r#"function _loadVerifiedAgentStep(source: string, entryPoint: string, label: string): (request: AgentStepInput) => string {
+  const context = createContext({ shownet });
+  const step = runInContext(source + "\n;" + entryPoint, context, {
+    timeout: 1_000,
+    filename: `shownet-agent-${label}.js`,
+  });
+  if (typeof step !== "function") {
+    throw new Error(`verified agent entry point is not callable: ${label}.${entryPoint}`);
+  }
+  Reflect.set(context, "__shownetEntry", step);
+  return (request: AgentStepInput) => {
+    Reflect.set(context, "__shownetRequest", request);
+    try {
+      return String(runInContext("__shownetEntry(__shownetRequest)", context, { timeout: 1_000 }));
+    } finally {
+      Reflect.deleteProperty(context, "__shownetRequest");
+    }
+  };
+}
+
+"#,
+        );
+    } else {
+        out.push_str(
+            r#"function _loadVerifiedAgentStep(source, entryPoint, label) {
+  const context = createContext({ shownet });
+  const step = runInContext(source + "\n;" + entryPoint, context, {
+    timeout: 1_000,
+    filename: `shownet-agent-${label}.js`,
+  });
+  if (typeof step !== "function") {
+    throw new Error(`verified agent entry point is not callable: ${label}.${entryPoint}`);
+  }
+  Reflect.set(context, "__shownetEntry", step);
+  return (request) => {
+    Reflect.set(context, "__shownetRequest", request);
+    try {
+      return String(runInContext("__shownetEntry(__shownetRequest)", context, { timeout: 1_000 }));
+    } finally {
+      Reflect.deleteProperty(context, "__shownetRequest");
+    }
+  };
+}
+
+"#,
         );
     }
 
@@ -930,14 +1306,16 @@ fn render_agent_algorithms_js(verified_steps: &[(&str, &str, &str)], language: &
     for (index, (name, source, entry_point)) in verified_steps.iter().enumerate() {
         let alias = format!("_agentStep{index}");
         out.push_str(&format!("// step: {name}\n"));
-        // Wrapped in an IIFE for the same reason as the Python factory: two
-        // agent steps must not be able to overwrite each other's helpers.
-        out.push_str(&format!("const {alias} = (() => {{\n"));
-        for line in source.lines() {
-            out.push_str(&format!("  {line}\n"));
-        }
-        out.push_str(&format!("  return {entry_point};\n}})();\n\n"));
-        registry.push(format!("  {name:?}: {alias},"));
+        out.push_str(&format!(
+            "const {alias} = _loadVerifiedAgentStep({}, {}, {});\n\n",
+            serde_json::to_string(source).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(entry_point).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
+        ));
+        registry.push(format!(
+            "  {}: {alias},",
+            serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into())
+        ));
     }
     out.push_str(&format!("export const AGENT_STEPS{registry_type} = {{\n"));
     out.push_str(&registry.join("\n"));
@@ -1002,8 +1380,12 @@ fn agent_step_files(
         "java" => {
             let mut files = vec![("Request.java".into(), JAVA_REQUEST_TYPE.into())];
             files.push(("AgentSteps.java".into(), java_agent_registry(&steps)));
-            for (index, (_, source, _)) in steps.iter().enumerate() {
-                files.push((java_candidate_name(source, index), (*source).to_string()));
+            for (_, source, _) in &steps {
+                // Verification compiles this exact source as Candidate.java and
+                // the package permits at most one Java candidate. Deriving a
+                // path from source text lets a comment spoof the class name and
+                // escape the export directory.
+                files.push(("Candidate.java".into(), (*source).to_string()));
             }
             files
         }
@@ -1016,19 +1398,6 @@ fn agent_step_files(
             files
         }
         _ => Vec::new(),
-    }
-}
-
-/// Java ties the file name to the public type declared inside it.
-fn java_candidate_name(source: &str, index: usize) -> String {
-    let declared = source
-        .split("public class ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .map(str::to_string);
-    match declared {
-        Some(name) if !name.is_empty() => format!("{name}.java"),
-        _ => format!("Candidate{index}.java"),
     }
 }
 
@@ -1109,12 +1478,9 @@ fn java_agent_registry(steps: &[(&str, &str, &str)]) -> String {
     let mut out = format!(
         "import java.util.LinkedHashMap;\nimport java.util.Map;\nimport java.util.function.Function;\n\n{AGENT_FILE_HEADER}\npublic final class AgentSteps {{\n    private AgentSteps() {{}}\n\n    public static Map<String, Function<Request, String>> all() {{\n        Map<String, Function<Request, String>> steps = new LinkedHashMap<>();\n"
     );
-    for (name, source, entry_point) in steps {
-        let class = java_candidate_name(source, 0)
-            .trim_end_matches(".java")
-            .to_string();
+    for (name, _, entry_point) in steps {
         out.push_str(&format!(
-            "        steps.put({name:?}, request -> {{\n            try {{\n                return {class}.{entry_point}(request);\n            }} catch (Exception exception) {{\n                throw new RuntimeException(exception);\n            }}\n        }});\n"
+            "        steps.put({name:?}, request -> {{\n            try {{\n                return Candidate.{entry_point}(request);\n            }} catch (Exception exception) {{\n                throw new RuntimeException(exception);\n            }}\n        }});\n"
         ));
     }
     out.push_str("        return steps;\n    }\n}\n");
@@ -1204,29 +1570,9 @@ fn render_replay_source(
     let vendor = &harness.vendor;
     let hash = &harness.evidence_hash;
     let recon_mode = &reconstruction.reconstruction_mode;
-    let has_hmac = reconstruction
-        .pipeline
-        .iter()
-        .any(|step| step.name == "hmac_sign" && step.status == "reconstructed");
-    let has_nb = reconstruction.pipeline.iter().any(|step| {
-        step.name == "pow_network_bandwidth"
-            && matches!(step.status.as_str(), "reconstructed" | "partial")
-    });
-    let has_telemetry = reconstruction
-        .pipeline
-        .iter()
-        .any(|step| step.name == "telemetry_session_chain");
-    let has_aes = reconstruction
-        .pipeline
-        .iter()
-        .any(|step| step.name == "encrypt_signals_aes_gcm");
     let vmp = reconstruction.vmp_or_custom_vm;
     let agent_algorithms = render_agent_algorithms(reconstruction, language);
     let py_bool = |value: bool| if value { "True" } else { "False" };
-    let has_hmac_py = py_bool(has_hmac);
-    let has_nb_py = py_bool(has_nb);
-    let has_telemetry_py = py_bool(has_telemetry);
-    let has_aes_py = py_bool(has_aes);
     let vmp_py = py_bool(vmp);
     let pipeline_summary = reconstruction
         .pipeline
@@ -1262,29 +1608,16 @@ Gaps: {gaps}
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import hmac
 import json
 import os
 import re
-import zlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except Exception:  # pragma: no cover
-    AESGCM = None  # type: ignore
 
 try:
     import httpx
 except ImportError:  # pragma: no cover
     httpx = None  # type: ignore
-
-# Difficulty → NetworkBandwidth body size (only used when challenge_type matches).
-NETWORK_BANDWIDTH_SIZES = {{1: 1024, 2: 10240, 3: 102400, 4: 1048576, 5: 10485760}}
-
 
 @dataclass
 class ReplayContext:
@@ -1344,145 +1677,33 @@ def load_algorithm_spec(path: str = "ALGORITHM_SPEC.json") -> Dict[str, Any]:
     return load_json(path)
 
 
-# --- Reconstructed primitives (enabled only when evidence supports them) ---
-
-HAS_HMAC = {has_hmac_py}
-HAS_NETWORK_BANDWIDTH = {has_nb_py}
-HAS_TELEMETRY_CHAIN = {has_telemetry_py}
-HAS_AES_GCM = {has_aes_py}
 VMP_HYBRID = {vmp_py}
-
-
-def compose_sign_base(ctx: ReplayContext, business_suffix: str = "") -> str:
-    """Reconstructed sign-base composition when report/evidence shows path:time:machine:nonce."""
-    time_value = ctx.request_time or str(int(__import__("time").time() * 1000))
-    nonce = ctx.nonce or os.urandom(8).hex()
-    machine = ctx.client_machine_id or os.environ.get("SHOWNET_CLIENT_MACHINE_ID", "")
-    base = f"{{ctx.path}}:{{time_value}}:{{machine}}:{{nonce}}"
-    if business_suffix:
-        base = f"{{base}}:{{business_suffix}}"
-    return base
-
-
-def hmac_sha256_hex(message: str, secret: Optional[str] = None) -> str:
-    if not HAS_HMAC:
-        raise RuntimeError("HMAC step not reconstructed from evidence")
-    key = (secret or os.environ.get("SHOWNET_HMAC_SECRET") or "").encode("utf-8")
-    if not key:
-        raise RuntimeError("Set SHOWNET_HMAC_SECRET for reconstructed HMAC signing")
-    return hmac.new(key, message.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def solve_network_bandwidth(difficulty: int) -> str:
-    if not HAS_NETWORK_BANDWIDTH:
-        raise RuntimeError("NetworkBandwidth PoW not reconstructed from evidence")
-    size = NETWORK_BANDWIDTH_SIZES.get(int(difficulty))
-    if size is None:
-        raise ValueError(f"unsupported NetworkBandwidth difficulty: {{difficulty}}")
-    return base64.b64encode(bytes(size)).decode("ascii")
-
-
-def crc32_hex8(data: bytes) -> str:
-    return format(zlib.crc32(data) & 0xFFFFFFFF, "08X")
-
-
-def encrypt_signals_aes_gcm(signals_obj: Dict[str, Any], key_hex: Optional[str] = None) -> Dict[str, str]:
-    """Partial reconstruction: CRC32#JSON then AES-GCM when key is provided via env."""
-    if not HAS_AES_GCM:
-        raise RuntimeError("AES-GCM signal encryption not reconstructed from evidence")
-    if AESGCM is None:
-        raise RuntimeError("install cryptography package for AES-GCM")
-    key_hex = key_hex or os.environ.get("SHOWNET_AES_KEY_HEX") or ""
-    key_hex = re.sub(r"[^0-9a-fA-F]", "", key_hex)
-    if len(key_hex) != 64:
-        raise RuntimeError("SHOWNET_AES_KEY_HEX must be 64 hex chars (AES-256) when encrypting signals")
-    json_str = json.dumps(signals_obj, separators=(",", ":"), ensure_ascii=False)
-    checksum = crc32_hex8(json_str.encode("utf-8"))
-    plaintext = f"{{checksum}}#{{json_str}}".encode("utf-8")
-    nonce = os.urandom(12)
-    aesgcm = AESGCM(bytes.fromhex(key_hex))
-    encrypted = aesgcm.encrypt(nonce, plaintext, None)
-    ciphertext, tag = encrypted[:-16], encrypted[-16:]
-    return {{
-        "checksum": checksum,
-        "encrypted": f"{{base64.b64encode(nonce).decode()}}::{{tag.hex()}}::{{ciphertext.hex()}}",
-    }}
-
-
-def telemetry_payload(existing_token: Optional[str], session_storage: str = "null", signals: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    if not HAS_TELEMETRY_CHAIN:
-        raise RuntimeError("telemetry chain not reconstructed from evidence")
-    return {{
-        "existing_token": existing_token,
-        "awswaf_session_storage": session_storage,
-        "client": "Browser",
-        "signals": signals or [],
-        "metrics": [{{"name": "6", "value": 50.0, "unit": "2"}}],
-    }}
 
 
 {agent_algorithms}
 
 def compute_dynamic_fields(ctx: ReplayContext, manifest: Dict[str, Any], spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Materialize reconstructed steps. Partial/VMP steps stay explicit errors or hook-trace placeholders."""
+    """Execute only agent steps verified against this capture in Python."""
     spec = spec or load_algorithm_spec()
     out: Dict[str, Any] = {{}}
-    pipeline = (spec.get("pipeline") or [])
-
-    # Always attach reconstruction metadata for debugging.
     out["_reconstructionMode"] = spec.get("reconstructionMode") or "{recon_mode}"
     out["_vmpHybrid"] = bool(spec.get("vmpOrCustomVm") or VMP_HYBRID)
 
-    for step in pipeline:
-        name = step.get("name") or ""
-        status = step.get("status") or ""
-        if name in AGENT_STEPS:
-            # A verified agent step wins over anything below: it was checked
-            # against this capture, while the branches below are generic
-            # templates that were not.
-            out[name] = AGENT_STEPS[name](agent_step_input(ctx, manifest))
-            out["_agentVerifiedSteps"] = sorted(set(out.get("_agentVerifiedSteps", []) + [name]))
-        elif name == "compose_sign_base" and status == "reconstructed":
-            out["signBase"] = compose_sign_base(ctx, str(ctx.extra.get("businessSuffix", "")))
-        elif name == "hmac_sign" and status == "reconstructed":
-            base = out.get("signBase") or compose_sign_base(ctx)
-            out["x-signature"] = hmac_sha256_hex(base)
-            out["X-Signature"] = out["x-signature"]
-            out["X-Request-Time"] = ctx.request_time or str(int(__import__("time").time() * 1000))
-            out["X-Request-Nonce"] = ctx.nonce or os.urandom(8).hex()
-            if ctx.client_machine_id:
-                out["X-Client-Machine-ID"] = ctx.client_machine_id
-        elif name == "pow_network_bandwidth" and status in ("reconstructed", "partial"):
-            difficulty = int(ctx.extra.get("difficulty") or os.environ.get("SHOWNET_POW_DIFFICULTY") or 1)
-            out["solution"] = solve_network_bandwidth(difficulty)
-            out["challenge_type"] = "NetworkBandwidth"
-        elif name == "encrypt_signals_aes_gcm":
-            if status == "reconstructed" or os.environ.get("SHOWNET_AES_KEY_HEX"):
-                signals = ctx.extra.get("signals") or {{"client": "Browser"}}
-                frame = encrypt_signals_aes_gcm(signals)
-                out["signals_checksum"] = frame["checksum"]
-                out["signals_encrypted"] = frame["encrypted"]
-            else:
-                out["_aes_gcm"] = "partial: set SHOWNET_AES_KEY_HEX after offline key recovery"
-        elif name == "telemetry_session_chain" and status == "reconstructed":
-            out["telemetry"] = telemetry_payload(
-                ctx.existing_token,
-                session_storage=str(ctx.extra.get("awswaf_session_storage", "null")),
-                signals=ctx.extra.get("telemetry_signals"),
-            )
-        elif name == "vmp_or_custom_vm_strategy" or status == "trace_driven":
-            out["_vmp_trace"] = {{
-                "strategy": "hook_trace",
-                "note": "Fill intermediates from ShowNet Hook capture; static VM dump not claimed",
-                "hookTraces": (spec.get("hookTraces") or [])[:20],
-            }}
-        elif status == "insufficient":
-            out["_insufficient"] = step.get("formula")
+    step_input = agent_step_input(ctx, manifest)
+    for name, step in AGENT_STEPS.items():
+        out[name] = step(step_input)
+    out["_agentVerifiedSteps"] = sorted(AGENT_STEPS)
 
-    # Ensure declared dynamic fields exist as placeholders when still missing.
     for name in manifest.get("dynamicFields") or []:
-        if name not in out:
-            out[name] = ctx.extra.get(name, f"<missing:{{name}}>")
+        if name not in out and name in ctx.extra:
+            out[name] = ctx.extra[name]
+    unresolved = [name for name in manifest.get("dynamicFields") or [] if name not in out]
+    if unresolved:
+        raise RuntimeError(
+            "no verified reconstruction for: " + ", ".join(unresolved) + ". "
+            "Supply a Python implementation in the analysis report's algorithm-spec block "
+            "or provide the value from authorized capture evidence."
+        )
     return out
 
 
@@ -1585,7 +1806,7 @@ def main() -> None:
         print(json.dumps({{"validation": result}}, indent=2, ensure_ascii=False))
         raise SystemExit(0 if result.get("ok") else 2)
     if httpx is None:
-        print("# optional: pip install httpx cryptography  # for live authorized tests / AES-GCM")
+        print("# optional: pip install httpx  # for live authorized tests")
     # Live send intentionally disabled by default.
     # with httpx.Client(http2=True, timeout=30.0) as client:
     #     resp = client.request(request["method"], request["url"], headers=request["headers"], json=request["json"])
@@ -2214,7 +2435,6 @@ public static class Replay
         }
     }
     let _ = fields;
-    let _ = BTreeSet::<String>::new();
     Ok(body)
 }
 
@@ -2329,12 +2549,16 @@ const difficulty=1; const t="awswaf";
             .unwrap();
         assert!(replay.content.contains("compute_dynamic_fields"));
         assert!(replay.content.contains("validate_against_capture"));
-        // Reconstructed helpers should appear as real functions, not pure empty stubs.
-        assert!(
-            replay.content.contains("def hmac_sha256_hex")
-                || replay.content.contains("def solve_network_bandwidth")
-                || replay.content.contains("def telemetry_payload")
-        );
+        assert!(replay.content.contains("AGENT_STEPS: Dict[str, Any] = {}"));
+        assert!(!replay.content.contains("def hmac_sha256_hex"));
+        assert!(!replay.content.contains("def solve_network_bandwidth"));
+        assert!(!replay.content.contains("def encrypt_signals_aes_gcm"));
+        assert!(!replay.content.contains("def telemetry_payload"));
+        assert!(!replay.content.contains("<missing:"));
+        assert!(package.evidence_gaps.iter().any(|gap| {
+            gap.contains("has no runtime-verified python implementation")
+                && gap.contains("was not emitted")
+        }));
         assert!(!replay
             .content
             .contains("2e1254cf-d58d-4c53-8afb-08be29b8d202:AAoA:xx"));
@@ -2362,11 +2586,16 @@ const difficulty=1; const t="awswaf";
         std::fs::create_dir_all(&parent).unwrap();
         let exported =
             export_algorithm_replay(&storage, &sid, "go", Some(parent.as_path())).unwrap();
+        let second = export_algorithm_replay(&storage, &sid, "go", Some(parent.as_path())).unwrap();
         // UI picks a parent folder; package is nested under a unique subdir.
         let package_dir = Path::new(&exported.directory);
         assert!(package_dir.exists());
         assert!(package_dir.starts_with(&parent));
         assert_ne!(package_dir, parent.as_path());
+        assert_ne!(
+            exported.directory, second.directory,
+            "back-to-back exports must not share or overwrite a package directory"
+        );
         assert!(exported
             .files
             .iter()
@@ -2565,6 +2794,11 @@ const difficulty=1; const t="awswaf";
         verdict: &str,
     ) -> AlgorithmReconstruction {
         use crate::algorithm_verification::{Implementation, VerificationReport};
+        let implementation = Implementation {
+            language: language.into(),
+            source: source.into(),
+            entry_point: "computeSignature".into(),
+        };
         let step = crate::algorithm_reconstruction::AlgorithmStep {
             id: "1".into(),
             name: "vendor_custom_sign".into(),
@@ -2572,16 +2806,16 @@ const difficulty=1; const t="awswaf";
             formula: "sha256(method + path)".into(),
             evidence: vec!["hook pair".into()],
             implementation_hint: "agent".into(),
-            implementations: vec![Implementation {
-                language: language.into(),
-                source: source.into(),
-                entry_point: "computeSignature".into(),
-            }],
+            implementations: vec![implementation.clone()],
         };
         let mut report = VerificationReport::for_test(verdict);
         report.step_id = "1".into();
         report.step_name = "vendor_custom_sign".into();
+        report.implementation_sha256 = implementation.sha256();
         report.language = language.into();
+        report.attempted = usize::from(verdict != "unverifiable");
+        report.passed = usize::from(verdict == "verified");
+        report.failed = usize::from(verdict == "failed");
         AlgorithmReconstruction {
             reconstruction_mode: "pure_reconstructed".into(),
             confidence: "high".into(),
@@ -2591,7 +2825,7 @@ const difficulty=1; const t="awswaf";
             vmp_indicators: vec![],
             hook_traces: vec![],
             snippet_algorithms: vec![],
-            dynamic_fields: vec!["x-signature".into()],
+            dynamic_fields: vec!["vendor_custom_sign".into()],
             required_env: vec![],
             test_field_shapes: vec![],
             report_spec_embedded: true,
@@ -2603,6 +2837,334 @@ const difficulty=1; const t="awswaf";
     }
 
     const AGENT_PY: &str = "import hashlib\n\ndef computeSignature(request):\n    base = request[\"method\"] + request[\"path\"]\n    return hashlib.sha256(base.encode()).hexdigest()\n";
+
+    fn replay_files_for_verdict(verdict: &str) -> (Vec<ReplayFile>, ArtifactVerificationManifest) {
+        let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, verdict);
+        replay_files_for_reconstruction(&reconstruction)
+    }
+
+    fn replay_files_for_reconstruction(
+        reconstruction: &AlgorithmReconstruction,
+    ) -> (Vec<ReplayFile>, ArtifactVerificationManifest) {
+        replay_files_for_reconstruction_with_fields(reconstruction, &["vendor_custom_sign"])
+    }
+
+    fn replay_files_for_reconstruction_with_fields(
+        reconstruction: &AlgorithmReconstruction,
+        dynamic_fields: &[&str],
+    ) -> (Vec<ReplayFile>, ArtifactVerificationManifest) {
+        let harness = crate::signature_adapter::SignatureAdapterHarness {
+            adapter_id: "generic-dynamic-signature".into(),
+            adapter_version: "1.0.0".into(),
+            vendor: "Generic".into(),
+            confidence: "high".into(),
+            evidence_hash: "capture-evidence-sha256".into(),
+            matched_requests: vec![],
+            dynamic_fields: dynamic_fields.iter().map(|field| (*field).into()).collect(),
+            cookie_names: vec![],
+            hook_names: vec![],
+            crypto_algorithms: vec!["SHA-256".into()],
+            fingerprint_dependencies: vec![],
+            required_inputs: vec![],
+            evidence_gaps: vec![],
+            language: "python".into(),
+            code: String::new(),
+        };
+        build_files(
+            "session-1",
+            "python",
+            &harness,
+            &json!([]),
+            &json!({}),
+            &json!({}),
+            &[],
+            "# Analysis\n",
+            reconstruction,
+        )
+        .expect("build replay files")
+    }
+
+    #[test]
+    fn replay_package_gate_preserves_all_three_runtime_verdicts() {
+        for (runtime_verdict, expected) in [
+            ("verified", VerificationVerdict::Verified),
+            ("failed", VerificationVerdict::Failed),
+            ("unverifiable", VerificationVerdict::Unverifiable),
+        ] {
+            let (files, manifest) = replay_files_for_verdict(runtime_verdict);
+            assert_eq!(manifest.gate.verdict, expected);
+
+            let replay = files
+                .iter()
+                .find(|file| file.name == "replay.py")
+                .expect("python replay file");
+            assert_eq!(
+                replay.content.contains("# step: vendor_custom_sign"),
+                runtime_verdict == "verified",
+                "{runtime_verdict} candidate emission disagrees with its package gate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verified_step_name_must_cover_the_dynamic_field_exactly() {
+        let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        let (files, manifest) =
+            replay_files_for_reconstruction_with_fields(&reconstruction, &["x-signature"]);
+
+        assert_eq!(manifest.gate.verdict, VerificationVerdict::Unverifiable);
+        assert!(manifest.gaps.iter().any(|gap| {
+            gap.contains("dynamic field 'x-signature'")
+                && gap.contains("named exactly 'x-signature'")
+        }));
+        let verification = files
+            .iter()
+            .find(|file| file.name == "VERIFICATION.json")
+            .expect("verification file");
+        let parsed: Value = serde_json::from_str(&verification.content).expect("verification JSON");
+        assert_eq!(parsed["cryptoVerified"], json!(false));
+    }
+
+    #[test]
+    fn duplicate_implementations_cannot_borrow_a_siblings_verification() {
+        use crate::algorithm_verification::{Implementation, VerificationReport};
+
+        let mut reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        let rejected = Implementation {
+            language: "python".into(),
+            source: "def computeSignature(request):\n    return 'wrong-source'\n".into(),
+            entry_point: "computeSignature".into(),
+        };
+        reconstruction.pipeline[0]
+            .implementations
+            .insert(0, rejected.clone());
+        let mut failed = VerificationReport::for_test("failed");
+        failed.step_id = "1".into();
+        failed.step_name = "vendor_custom_sign".into();
+        failed.implementation_sha256 = rejected.sha256();
+        failed.language = "python".into();
+        failed.attempted = 1;
+        failed.failed = 1;
+        reconstruction.verification.insert(0, failed);
+
+        assert!(verified_agent_steps(&reconstruction, "python").is_empty());
+        let (files, manifest) = replay_files_for_reconstruction(&reconstruction);
+        let replay = files
+            .iter()
+            .find(|file| file.name == "replay.py")
+            .expect("python replay file");
+        assert!(!replay.content.contains("wrong-source"));
+        assert!(!replay.content.contains("import hashlib"));
+        assert!(!manifest.gate.executable_verified_logic_emitted);
+        assert_eq!(manifest.gate.verdict, VerificationVerdict::Failed);
+    }
+
+    #[test]
+    fn a_verification_report_cannot_license_source_changed_after_the_run() {
+        let mut reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        reconstruction.pipeline[0].implementations[0]
+            .source
+            .push_str("\n# changed after verification\n");
+
+        assert!(verified_agent_steps(&reconstruction, "python").is_empty());
+        let (files, manifest) = replay_files_for_reconstruction(&reconstruction);
+        let replay = files
+            .iter()
+            .find(|file| file.name == "replay.py")
+            .expect("python replay file");
+        assert!(!replay.content.contains("changed after verification"));
+        assert_eq!(manifest.gate.verdict, VerificationVerdict::Unverifiable);
+        assert!(!manifest.gate.executable_verified_logic_emitted);
+    }
+
+    #[test]
+    fn replay_gate_is_scoped_to_the_exported_language() {
+        let mut reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        reconstruction.pipeline[0].implementations.push(
+            crate::algorithm_verification::Implementation {
+                language: "javascript".into(),
+                source: "function computeSignature() { return 'wrong'; }".into(),
+                entry_point: "computeSignature".into(),
+            },
+        );
+        let mut javascript_failure =
+            crate::algorithm_verification::VerificationReport::for_test("failed");
+        javascript_failure.step_id = "1".into();
+        javascript_failure.step_name = "vendor_custom_sign".into();
+        javascript_failure.implementation_sha256 =
+            reconstruction.pipeline[0].implementations[1].sha256();
+        javascript_failure.language = "javascript".into();
+        javascript_failure.attempted = 1;
+        javascript_failure.failed = 1;
+        reconstruction.verification.push(javascript_failure);
+        reconstruction.crypto_verified = false;
+
+        let harness = crate::signature_adapter::SignatureAdapterHarness {
+            adapter_id: "generic-dynamic-signature".into(),
+            adapter_version: "1.0.0".into(),
+            vendor: "Generic".into(),
+            confidence: "high".into(),
+            evidence_hash: "capture-evidence-sha256".into(),
+            matched_requests: vec![],
+            dynamic_fields: vec!["vendor_custom_sign".into()],
+            cookie_names: vec![],
+            hook_names: vec![],
+            crypto_algorithms: vec!["SHA-256".into()],
+            fingerprint_dependencies: vec![],
+            required_inputs: vec![],
+            evidence_gaps: vec![],
+            language: "python".into(),
+            code: String::new(),
+        };
+        let (files, manifest) = build_files(
+            "session-1",
+            "python",
+            &harness,
+            &json!([]),
+            &json!({}),
+            &json!({}),
+            &[],
+            "# Analysis\n",
+            &reconstruction,
+        )
+        .expect("build python replay");
+
+        assert_eq!(manifest.gate.verdict, VerificationVerdict::Verified);
+        assert_eq!(manifest.runtimes.len(), 1);
+        assert_eq!(manifest.runtimes[0].language, "python");
+        let verification = files
+            .iter()
+            .find(|file| file.name == "VERIFICATION.json")
+            .expect("verification file");
+        let parsed: Value = serde_json::from_str(&verification.content).expect("verification JSON");
+        assert_eq!(parsed["cryptoVerified"], json!(true));
+        assert_eq!(parsed["runs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(parsed["runs"][0]["language"], json!("python"));
+    }
+
+    #[test]
+    fn a_verified_step_survives_a_failed_sibling_in_the_same_language() {
+        use crate::algorithm_reconstruction::AlgorithmStep;
+        use crate::algorithm_verification::{Implementation, VerificationReport};
+
+        let mut reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
+        let rejected_source = "def rejectedSignature(request):\n    return \"must-not-ship\"\n";
+        let rejected = Implementation {
+            language: "python".into(),
+            source: rejected_source.into(),
+            entry_point: "rejectedSignature".into(),
+        };
+        reconstruction.pipeline.push(AlgorithmStep {
+            id: "2".into(),
+            name: "rejected_sign".into(),
+            status: "reconstructed".into(),
+            formula: "unverified candidate".into(),
+            evidence: vec!["hook pair".into()],
+            implementation_hint: "agent".into(),
+            implementations: vec![rejected.clone()],
+        });
+        let mut failed = VerificationReport::for_test("failed");
+        failed.step_id = "2".into();
+        failed.step_name = "rejected_sign".into();
+        failed.implementation_sha256 = rejected.sha256();
+        failed.language = "python".into();
+        failed.attempted = 1;
+        failed.failed = 1;
+        reconstruction.verification.push(failed);
+        reconstruction.crypto_verified = false;
+
+        assert_eq!(
+            verified_agent_steps(&reconstruction, "python")
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect::<Vec<_>>(),
+            vec!["vendor_custom_sign"]
+        );
+        assert_eq!(
+            unverified_algorithm_step_names(&reconstruction, "python"),
+            vec!["rejected_sign"]
+        );
+
+        let (files, manifest) = replay_files_for_reconstruction(&reconstruction);
+        let replay = files
+            .iter()
+            .find(|file| file.name == "replay.py")
+            .expect("python replay file");
+        assert!(replay.content.contains("# step: vendor_custom_sign"));
+        assert!(!replay.content.contains("must-not-ship"));
+        assert!(manifest.gate.executable_verified_logic_emitted);
+        assert_eq!(manifest.verdict_counts.verified, 1);
+        assert_eq!(manifest.verdict_counts.failed, 1);
+        assert_eq!(manifest.gate.verdict, VerificationVerdict::Failed);
+
+        let verification = files
+            .iter()
+            .find(|file| file.name == "VERIFICATION.json")
+            .expect("verification file");
+        let parsed: Value = serde_json::from_str(&verification.content).expect("verification JSON");
+        assert_eq!(parsed["cryptoVerified"], json!(false));
+        assert_eq!(parsed["runs"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn replay_verification_manifest_hashes_match_the_package_files() {
+        let (files, manifest) = replay_files_for_verdict("verified");
+        assert_eq!(manifest.generated_files.len() + 1, files.len());
+        assert!(
+            manifest
+                .generated_files
+                .iter()
+                .all(|digest| digest.name != "VERIFICATION_MANIFEST.json"),
+            "the manifest cannot recursively digest itself"
+        );
+
+        for digest in &manifest.generated_files {
+            let packaged = files
+                .iter()
+                .find(|file| file.name == digest.name)
+                .unwrap_or_else(|| panic!("digest references missing file {}", digest.name));
+            assert_eq!(digest.role, packaged.role);
+            assert_eq!(digest.bytes, packaged.content.len());
+            assert_eq!(
+                digest.sha256,
+                format!("{:x}", Sha256::digest(packaged.content.as_bytes())),
+                "digest mismatch for {}",
+                digest.name
+            );
+        }
+
+        let encoded = files
+            .iter()
+            .find(|file| file.name == "VERIFICATION_MANIFEST.json")
+            .expect("package carries verification manifest");
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded.content).expect("valid manifest JSON"),
+            serde_json::to_value(&manifest).expect("serialize manifest")
+        );
+    }
+
+    #[test]
+    fn replay_package_hash_frames_metadata_and_file_boundaries() {
+        let first = vec![file("a", "code", Some("python".into()), "bc")];
+        let same_file_bytes_with_another_boundary =
+            vec![file("ab", "code", Some("python".into()), "c")];
+
+        assert_ne!(
+            package_hash("ab", "c", "evidence", &first),
+            package_hash("a", "bc", "evidence", &first),
+            "session and language boundaries must be part of the package identity"
+        );
+        assert_ne!(
+            package_hash("session", "python", "evidence", &first),
+            package_hash(
+                "session",
+                "python",
+                "evidence",
+                &same_file_bytes_with_another_boundary,
+            ),
+            "file name and content boundaries must be part of the package identity"
+        );
+    }
 
     /// The test that decides whether the agent seam is real: a step the built-in
     /// catalogue has never heard of must reach the generated package and run.
@@ -2716,6 +3278,53 @@ const difficulty=1; const t="awswaf";
         );
     }
 
+    #[test]
+    fn unresolved_dynamic_fields_fail_instead_of_becoming_placeholders() {
+        let Some(python) = test_python() else {
+            return;
+        };
+        let source = render_replay_source_for_shape_test();
+        assert!(!source.contains("<missing:"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "shownet-replay-missing-field-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("replay.py"), source).expect("write replay");
+        std::fs::write(
+            dir.join("drive.py"),
+            r#"from replay import ReplayContext, compute_dynamic_fields
+
+try:
+    compute_dynamic_fields(
+        ReplayContext(domain="example.com", user_agent="test"),
+        {"dynamicFields": ["x-signature"]},
+        {},
+    )
+except RuntimeError as error:
+    assert "x-signature" in str(error), error
+    print(error)
+else:
+    raise AssertionError("missing dynamic field did not fail")
+"#,
+        )
+        .expect("write driver");
+
+        let output = std::process::Command::new(&python)
+            .arg("drive.py")
+            .current_dir(&dir)
+            .output()
+            .expect("run generated replay");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            output.status.success(),
+            "generated replay accepted an unresolved field:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn render_replay_source_for_shape_test() -> String {
         let reconstruction = reconstruction_with_agent_step("python", AGENT_PY, "verified");
         let harness = crate::signature_adapter::SignatureAdapterHarness {
@@ -2787,12 +3396,50 @@ const difficulty=1; const t="awswaf";
         assert!(
             parsed["note"]
                 .as_str()
-                .is_some_and(|note| note.contains("Only the second")),
-            "the file must distinguish the template claim from the verified claim: {parsed}"
+                .is_some_and(|note| note.contains("scoped to this python package")),
+            "the file must scope the verification claim to the package language: {parsed}"
         );
     }
 
     const AGENT_JS: &str = "function computeSignature(request) {\n  return shownet.hmacSha256Hex('Jefe', request.method + request.path);\n}\n";
+
+    #[test]
+    fn a_real_typescript_verification_licenses_the_typescript_export() {
+        let mut reconstruction =
+            reconstruction_with_agent_step("typescript", AGENT_JS, "unverifiable");
+        let implementation = reconstruction.pipeline[0].implementations[0].clone();
+        let mut report = crate::algorithm_verification::verify(
+            &implementation,
+            &[crate::algorithm_ground_truth::GroundTruthCase {
+                id: "request:1:vendor_custom_sign".into(),
+                origin: "request".into(),
+                field: "vendor_custom_sign".into(),
+                algorithm_hint: "HMAC".into(),
+                input: json!({
+                    "method": "POST",
+                    "host": "api.example.com",
+                    "path": "/v1/order",
+                    "query": null,
+                    "headers": {},
+                    "body": null,
+                }),
+                expected: expected_hmac("POST/v1/order"),
+                request_id: Some("1".into()),
+                sequence: 1,
+            }],
+        );
+        report.step_id = "1".into();
+        report.step_name = "vendor_custom_sign".into();
+        reconstruction.verification = vec![report];
+
+        assert_eq!(
+            verified_agent_steps(&reconstruction, "typescript").len(),
+            1,
+            "a TypeScript candidate must retain its package language after Boa verification"
+        );
+        let emitted = render_agent_algorithms(&reconstruction, "typescript");
+        assert!(emitted.contains("hmacSha256Hex('Jefe'"));
+    }
 
     /// Same standard the Python path is held to: the emitted JavaScript has to
     /// run under node and produce the real answer, not merely contain the text.
@@ -2852,6 +3499,44 @@ const difficulty=1; const t="awswaf";
         assert!(
             stdout.contains(&expected),
             "the emitted javascript step must produce its real answer:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn emitted_javascript_preserves_source_bytes_and_candidate_state() {
+        let Some(node) = test_node() else {
+            return;
+        };
+        let source = "let calls = 0;\nfunction computeSignature() {\n  calls += 1;\n  return `first line\nsecond line:${calls}`;\n}\n";
+        let reconstruction = reconstruction_with_agent_step("javascript", source, "verified");
+        let emitted = render_agent_algorithms(&reconstruction, "javascript");
+        let dir = std::env::temp_dir().join(format!(
+            "shownet-agent-js-source-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).expect("write");
+        std::fs::write(dir.join("steps.mjs"), &emitted).expect("write");
+        std::fs::write(
+            dir.join("drive.mjs"),
+            "import { AGENT_STEPS } from './steps.mjs';\n\
+             const step = AGENT_STEPS.vendor_custom_sign;\n\
+             if (step({}) !== 'first line\\nsecond line:1') throw new Error('first call changed');\n\
+             if (step({}) !== 'first line\\nsecond line:2') throw new Error('state lifecycle changed');\n",
+        )
+        .expect("write");
+
+        let output = std::process::Command::new(&node)
+            .arg("drive.mjs")
+            .current_dir(&dir)
+            .output()
+            .expect("run emitted javascript");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            output.status.success(),
+            "emitted JavaScript changed verified source semantics:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -2923,6 +3608,8 @@ const difficulty=1; const t="awswaf";
             if matches!(*language, "go" | "csharp") {
                 reconstruction.pipeline[0].implementations[0].entry_point =
                     "ComputeSignature".into();
+                reconstruction.verification[0].implementation_sha256 =
+                    reconstruction.pipeline[0].implementations[0].sha256();
             }
             let entry = reconstruction.pipeline[0].implementations[0]
                 .entry_point
@@ -3003,6 +3690,8 @@ const difficulty=1; const t="awswaf";
         }
         let mut reconstruction = reconstruction_with_agent_step("go", GO_AGENT, "verified");
         reconstruction.pipeline[0].implementations[0].entry_point = "ComputeSignature".into();
+        reconstruction.verification[0].implementation_sha256 =
+            reconstruction.pipeline[0].implementations[0].sha256();
         let files = agent_step_files(&reconstruction, "go");
 
         let dir = stage(
@@ -3031,6 +3720,22 @@ const difficulty=1; const t="awswaf";
     }
 
     const JAVA_AGENT: &str = "import javax.crypto.Mac;\nimport javax.crypto.spec.SecretKeySpec;\nimport java.nio.charset.StandardCharsets;\n\npublic class Candidate {\n    public static String computeSignature(Request request) throws Exception {\n        Mac mac = Mac.getInstance(\"HmacSHA256\");\n        mac.init(new SecretKeySpec(\"Jefe\".getBytes(StandardCharsets.UTF_8), \"HmacSHA256\"));\n        byte[] digest = mac.doFinal((request.method() + request.path()).getBytes(StandardCharsets.UTF_8));\n        StringBuilder out = new StringBuilder();\n        for (byte b : digest) { out.append(String.format(\"%02x\", b)); }\n        return out.toString();\n    }\n}\n";
+
+    #[test]
+    fn java_candidate_comments_cannot_choose_an_export_path() {
+        let source = format!("// public class ../../outside\n{JAVA_AGENT}");
+        let reconstruction = reconstruction_with_agent_step("java", &source, "verified");
+        let files = agent_step_files(&reconstruction, "java");
+        let candidate = files
+            .iter()
+            .find(|(name, _)| name == "Candidate.java")
+            .expect("verified Java source uses the same fixed file name as verification");
+
+        assert_eq!(candidate.1, source);
+        assert!(files
+            .iter()
+            .all(|(name, _)| !name.contains("..") && !name.contains('/') && !name.contains('\\')));
+    }
 
     #[test]
     fn emitted_java_agent_steps_compile_and_produce_the_real_answer() {
@@ -3094,8 +3799,35 @@ const difficulty=1; const t="awswaf";
         {
             return;
         }
-        let mut reconstruction = reconstruction_with_agent_step("csharp", CSHARP_AGENT, "verified");
+        let mut reconstruction =
+            reconstruction_with_agent_step("csharp", CSHARP_AGENT, "unverifiable");
         reconstruction.pipeline[0].implementations[0].entry_point = "ComputeSignature".into();
+        let implementation = reconstruction.pipeline[0].implementations[0].clone();
+        let mut report = crate::algorithm_verification::verify(
+            &implementation,
+            &[crate::algorithm_ground_truth::GroundTruthCase {
+                id: "request:1:vendor_custom_sign".into(),
+                origin: "request".into(),
+                field: "vendor_custom_sign".into(),
+                algorithm_hint: "HMAC".into(),
+                input: json!({
+                    "method": "POST",
+                    "host": "h",
+                    "path": "/v1/order",
+                    "query": null,
+                    "headers": {},
+                    "body": null,
+                }),
+                expected: expected_hmac("POST/v1/order"),
+                request_id: Some("1".into()),
+                sequence: 1,
+            }],
+        );
+        assert_eq!(report.verdict, "verified", "{report:?}");
+        report.step_id = "1".into();
+        report.step_name = "vendor_custom_sign".into();
+        reconstruction.verification = vec![report];
+        reconstruction.crypto_verified = true;
         let files = agent_step_files(&reconstruction, "csharp");
 
         let dir = stage(
@@ -3147,6 +3879,115 @@ const difficulty=1; const t="awswaf";
                     "{language}/{verdict} code must not be emitted"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn compiled_candidates_are_withheld_when_their_verified_units_would_collide() {
+        use crate::algorithm_reconstruction::AlgorithmStep;
+        use crate::algorithm_verification::{Implementation, VerificationReport};
+
+        for (language, source, entry_point) in [
+            ("go", GO_AGENT, "ComputeSignature"),
+            ("java", JAVA_AGENT, "computeSignature"),
+            ("csharp", CSHARP_AGENT, "ComputeSignature"),
+        ] {
+            let mut reconstruction = reconstruction_with_agent_step(language, source, "verified");
+            reconstruction.pipeline[0].implementations[0].entry_point = entry_point.into();
+            reconstruction.verification[0].implementation_sha256 =
+                reconstruction.pipeline[0].implementations[0].sha256();
+            let second_implementation = Implementation {
+                language: language.into(),
+                source: source.into(),
+                entry_point: entry_point.into(),
+            };
+            reconstruction.pipeline.push(AlgorithmStep {
+                id: "2".into(),
+                name: "vendor_custom_token".into(),
+                status: "reconstructed".into(),
+                formula: "second verified output".into(),
+                evidence: vec!["hook pair 2".into()],
+                implementation_hint: "agent".into(),
+                implementations: vec![second_implementation.clone()],
+            });
+            let mut report = VerificationReport::for_test("verified");
+            report.step_id = "2".into();
+            report.step_name = "vendor_custom_token".into();
+            report.implementation_sha256 = second_implementation.sha256();
+            report.language = language.into();
+            report.attempted = 1;
+            report.passed = 1;
+            reconstruction.verification.push(report);
+
+            assert_eq!(
+                strictly_verified_agent_steps(&reconstruction, language).len(),
+                2
+            );
+            assert!(verified_agent_steps(&reconstruction, language).is_empty());
+            let emitted = agent_step_files(&reconstruction, language)
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<String>();
+            assert!(
+                !emitted.contains("Jefe"),
+                "{language} collision must withhold both candidate sources"
+            );
+            let gaps = complete_evidence_gaps(
+                &[],
+                &reconstruction,
+                language,
+                &["vendor_custom_sign".into(), "vendor_custom_token".into()],
+            );
+            assert!(gaps.iter().any(|gap| {
+                gap.contains("reuse one compilation namespace") && gap.contains("all were withheld")
+            }));
+        }
+    }
+
+    #[test]
+    fn compiled_candidates_cannot_collide_with_generated_package_symbols() {
+        for (language, source, entry_point, reserved) in [
+            (
+                "go",
+                format!("{GO_AGENT}\nfunc BuildRequest() {{}}\n"),
+                "ComputeSignature",
+                "BuildRequest",
+            ),
+            (
+                "java",
+                format!("{JAVA_AGENT}\nfinal class Replay {{}}\n"),
+                "computeSignature",
+                "Replay",
+            ),
+            (
+                "csharp",
+                format!("{CSHARP_AGENT}\npublic static class AgentSteps {{}}\n"),
+                "ComputeSignature",
+                "AgentSteps",
+            ),
+        ] {
+            let mut reconstruction = reconstruction_with_agent_step(language, &source, "verified");
+            reconstruction.pipeline[0].implementations[0].entry_point = entry_point.into();
+            reconstruction.verification[0].implementation_sha256 =
+                reconstruction.pipeline[0].implementations[0].sha256();
+
+            assert_eq!(
+                strictly_verified_agent_steps(&reconstruction, language).len(),
+                1
+            );
+            assert!(verified_agent_steps(&reconstruction, language).is_empty());
+            let emitted = agent_step_files(&reconstruction, language)
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<String>();
+            assert!(
+                !emitted.contains("Jefe"),
+                "{language} collision source must be withheld"
+            );
+            let gap = compiled_step_collision_gap(&reconstruction, language)
+                .expect("collision must be machine-readable");
+            assert!(gap.contains(reserved), "{gap}");
+            assert!(gap.contains("withheld"), "{gap}");
         }
     }
 

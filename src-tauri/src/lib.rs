@@ -6,6 +6,7 @@ mod algorithm_verification;
 mod analysis;
 mod analysis_graph;
 mod analysis_pipeline;
+mod analysis_stream;
 mod android_setup;
 mod auto_crawler;
 mod breakpoints;
@@ -54,6 +55,7 @@ mod tls_interception;
 mod tls_outbound;
 pub mod tls_probe;
 mod updates;
+mod verification_manifest;
 mod web_risk_lab;
 
 use breakpoints::{BreakpointCoordinator, BreakpointDecisionInput, BreakpointQueueSnapshot};

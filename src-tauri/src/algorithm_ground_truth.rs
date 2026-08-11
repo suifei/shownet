@@ -23,6 +23,7 @@
 use crate::models::{BrowserHookEvent, RequestRecord};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// One case: run the candidate on `input`, the answer must be `expected`.
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +39,26 @@ pub struct GroundTruthCase {
     pub expected: String,
     pub request_id: Option<String>,
     pub sequence: i64,
+}
+
+impl GroundTruthCase {
+    pub fn evidence_sha256(&self) -> String {
+        let canonical = serde_json::to_vec(&json!({
+            "id": self.id,
+            "origin": self.origin,
+            "field": self.field,
+            "algorithmHint": self.algorithm_hint,
+            "input": self.input,
+            "expected": self.expected,
+            "requestId": self.request_id,
+            "sequence": self.sequence,
+        }))
+        .expect("ground-truth values are JSON serializable");
+        let mut hasher = Sha256::new();
+        hasher.update(b"shownet-ground-truth-case-v1\0");
+        hasher.update(canonical);
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -327,6 +348,32 @@ mod tests {
         assert_eq!(case.origin, "hook");
         assert_eq!(case.expected, "9f8e7d6c5b4a39281706");
         assert_eq!(case.algorithm_hint, "HMAC");
+    }
+
+    #[test]
+    fn evidence_hash_binds_the_input_and_expected_output() {
+        let hooks = vec![hook(
+            7,
+            "crypto.subtle",
+            "sign",
+            json!({"algorithm": "HMAC", "data": "amount=10"}),
+            json!("9f8e7d6c5b4a39281706"),
+        )];
+        let original = collect(&hooks, &[], &[]).cases.remove(0);
+        let mut changed_input = original.clone();
+        changed_input.input["data"] = json!("amount=11");
+        let mut changed_expected = original.clone();
+        changed_expected.expected = "00000000000000000000".into();
+
+        assert_eq!(
+            original.evidence_sha256(),
+            original.clone().evidence_sha256()
+        );
+        assert_ne!(original.evidence_sha256(), changed_input.evidence_sha256());
+        assert_ne!(
+            original.evidence_sha256(),
+            changed_expected.evidence_sha256()
+        );
     }
 
     #[test]

@@ -61,8 +61,13 @@ describe("restoring a report defers to a chosen mode", () => {
 
   it("lets a restored report set the mode only while none is pinned", () => {
     assert.match(analysis, /modePinned: boolean;/);
-    assert.match(analysis, /await restoreReport\(latest, \(\) => disposed, !modePinned\)/);
-    assert.match(analysis, /if \(!modePinned\) setMode\(latest\.mode\)/);
+    assert.match(analysis, /const modePinnedRef = useRef\(modePinned\)/);
+    assert.match(analysis, /modePinnedRef\.current = modePinned/);
+    assert.equal(
+      analysis.match(/!modePinnedRef\.current/g)?.length,
+      2,
+      "preview and async history restoration must both honor the latest pinned mode",
+    );
   });
 });
 

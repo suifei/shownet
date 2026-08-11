@@ -727,8 +727,11 @@ export interface AlgorithmReplayExportResult {
   directory: string;
   files: string[];
   packageHash: string;
+  gateVerdict: VerificationVerdict;
   bytesWritten: number;
 }
+
+export type VerificationVerdict = "verified" | "failed" | "unverifiable";
 
 export interface EvaluationExportResult {
   sessionId: string;
@@ -747,6 +750,7 @@ export interface SdkReadiness {
   cryptoVerified: number;
   cryptoUnverified: number;
   fingerprintTargetKnown: boolean;
+  packageRuntimeVerified: boolean;
   gapCount: number;
 }
 
@@ -756,6 +760,7 @@ export interface SdkExportResult {
   directory: string;
   files: string[];
   readiness: SdkReadiness;
+  gateVerdict: VerificationVerdict;
   bytesWritten: number;
 }
 
@@ -841,6 +846,7 @@ export interface AnalysisActivity {
   analysisId: string;
   phase: string;
   message: string;
+  elapsedMs?: number;
   createdAt: number;
 }
 
@@ -890,6 +896,7 @@ export interface AnalysisStreamEvent {
     | "artifact-invalid"
     | "graph-complete"
     | "generating"
+    | "first-visible"
     | "content-reset"
     | "delta"
     | "complete"
@@ -903,6 +910,7 @@ export interface AnalysisStreamEvent {
   keyRequestCount: number;
   report?: AnalysisReport;
   message?: string;
+  elapsedMs?: number;
 }
 
 export interface AnalysisChatMessage {

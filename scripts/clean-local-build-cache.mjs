@@ -23,6 +23,7 @@ export async function cleanLocalBuildCache(options = {}) {
   const projectPaths = options.projectPaths ?? [
     resolve(projectRoot, "src-tauri", "target"),
     resolve(projectRoot, "src-tauri", ".sidecar-src"),
+    resolve(projectRoot, "src-tauri", ".sidecar-target"),
     resolve(projectRoot, "packaging", "windows", "launcher", "target"),
     resolve(projectRoot, "dist"),
     resolve(projectRoot, "output"),

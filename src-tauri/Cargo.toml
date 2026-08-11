@@ -1,6 +1,6 @@
 [package]
 name = "shownet"
-version = "0.4.21"
+version = "0.4.22"
 description = "Full-scene traffic capture and AI protocol analysis"
 authors = ["ShowNet Team"]
 edition = "2021"
@@ -77,8 +77,11 @@ tauri-plugin-opener = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinInet", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # Test-only: hyper cannot send a GOAWAY carrying an error code, so the one
 # property the h2 downgrade rests on — that a protocol refusal is still

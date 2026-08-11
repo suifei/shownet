@@ -130,11 +130,13 @@ jobs:
         with:
           version: "28.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare pinned Agent source for Rust cache
+        run: node scripts/build-grok-sidecar.mjs --prepare-only --target aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             src-tauri
-            src-tauri/.sidecar-src/grok-build
+            src-tauri/.sidecar-src/grok-build -> ../../.sidecar-target
       - run: npm ci
       - run: npm run check:release
       - name: Detect signing mode
@@ -298,11 +300,13 @@ jobs:
         with:
           version: "28.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare pinned Agent source for Rust cache
+        run: node scripts/build-grok-sidecar.mjs --prepare-only --target x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             src-tauri
-            src-tauri/.sidecar-src/grok-build
+            src-tauri/.sidecar-src/grok-build -> ../../.sidecar-target
       - run: npm ci
       - name: Detect signing mode
         id: mode

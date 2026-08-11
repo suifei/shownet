@@ -22,10 +22,21 @@ import { describe, it } from "node:test";
 // every join below would be wrong. The repository hygiene test forbids it, and
 // caught this exact slip.
 const root = fileURLToPath(new URL("..", import.meta.url));
+const generatedCrateTrees = new Set([
+  ".git",
+  ".sidecar-src",
+  ".sidecar-target",
+  "node_modules",
+  "target",
+]);
+
+function shouldSkipDirectory(name: string): boolean {
+  return generatedCrateTrees.has(name);
+}
 
 async function walk(directory: string, out: string[] = []): Promise<string[]> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.name === "target" || entry.name === "node_modules" || entry.name === ".git") continue;
+    if (entry.isDirectory() && shouldSkipDirectory(entry.name)) continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) await walk(path, out);
     else if (entry.name === "Cargo.toml") out.push(path);
@@ -51,6 +62,12 @@ async function hasRustTests(manifest: string): Promise<boolean> {
 }
 
 describe("the release gate runs every crate's tests", () => {
+  it("does not treat generated sidecar sources or cache output as product crates", () => {
+    assert.equal(shouldSkipDirectory(".sidecar-src"), true);
+    assert.equal(shouldSkipDirectory(".sidecar-target"), true);
+    assert.equal(shouldSkipDirectory("packaging"), false);
+  });
+
   it("leaves no crate with tests unexecuted", async () => {
     const workflow = await readFile(join(root, ".github/workflows/release.yml"), "utf8");
     const manifests = await walk(root);

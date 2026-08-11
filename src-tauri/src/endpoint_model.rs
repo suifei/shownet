@@ -1338,7 +1338,6 @@ mod tests {
         assert_eq!(property["type"], serde_json::json!(["string", "null"]));
     }
 
-    #[test]
     /// A token the alphabet rule does not recognise still must not become a
     /// route. Measured on a real capture: Cloudflare's challenge tokens carry
     /// dots, fell outside the allowed characters, and each one became its own
@@ -1393,6 +1392,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn a_paging_parameter_is_not_an_enum() {
         // Found by reading a dumped model, not by a failing assertion: page=1
         // then page=2 was being reported as enum ["1","2"], which becomes

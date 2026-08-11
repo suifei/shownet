@@ -10,6 +10,7 @@ use crate::endpoint_model::{build_endpoint_model, EndpointModel};
 use crate::sdk_build::{FingerprintContract, SdkInputs, VerifiedCryptoStep};
 use crate::storage::Storage;
 use crate::tls_outbound;
+use crate::verification_manifest::{RuntimeVerification, VerificationVerdict};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -90,27 +91,33 @@ fn fingerprint_contract(storage: &Storage, session_id: &str) -> FingerprintContr
 fn crypto_from_replay(
     storage: &Storage,
     session_id: &str,
-) -> (Vec<VerifiedCryptoStep>, Vec<String>) {
-    let Ok(package) = algorithm_replay::build_algorithm_replay(storage, session_id, "python")
-    else {
-        return (Vec::new(), Vec::new());
-    };
-
-    // `crypto_verified` is the gate the replay builder already applies: steps
-    // that reproduced the values this capture recorded. Anything short of that
-    // is named, never emitted.
-    if !package.crypto_verified {
-        let unverified = package
-            .can_emit_runnable_crypto
-            .then(|| {
+) -> (
+    Vec<VerifiedCryptoStep>,
+    Vec<String>,
+    Vec<RuntimeVerification>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let package = match algorithm_replay::build_algorithm_replay(storage, session_id, "python") {
+        Ok(package) => package,
+        Err(error) => {
+            return (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
                 vec![format!(
-                    "{} (identified, never reproduced)",
-                    package.adapter_id
-                )]
-            })
-            .unwrap_or_default();
-        return (Vec::new(), unverified);
-    }
+                    "algorithm replay evidence could not be built: {error}"
+                )],
+            )
+        }
+    };
+    let verification_runs = package.verification_manifest.runtimes.clone();
+    let evidence_identifiers = package.verification_manifest.evidence.identifiers.clone();
+    let evidence_hashes = package.verification_manifest.evidence.hashes.clone();
+    let verification_gaps = package.verification_manifest.gaps.clone();
 
     // One entry per step rather than the whole replay.py. Taking the file
     // wholesale put an unrelated HTTP client, a manifest loader and every
@@ -126,24 +133,24 @@ fn crypto_from_replay(
             entry_point: step.entry_point.clone(),
         })
         .collect();
-
-    // crypto_verified without a step to show for it means the verification
-    // lives somewhere this cannot reach; say so rather than emit nothing
-    // silently.
-    if steps.is_empty() {
-        return (
-            Vec::new(),
-            vec![format!(
-                "{} (marked verified, but the package carried no step source)",
-                package.adapter_id
-            )],
-        );
+    let mut unverified = package.unverified_steps.clone();
+    if steps.is_empty() && unverified.is_empty() && package.can_emit_runnable_crypto {
+        unverified.push(format!(
+            "{} (identified, never reproduced)",
+            package.adapter_id
+        ));
     }
-    (steps, Vec::new())
+    (
+        steps,
+        unverified,
+        verification_runs,
+        evidence_identifiers,
+        evidence_hashes,
+        verification_gaps,
+    )
 }
 
 /// Everything the generator needs for one session.
-
 /// What an agent decided about a proposed API surface.
 ///
 /// The deterministic layer proposes: it extracts endpoints, parameters and
@@ -227,7 +234,20 @@ pub fn collect(storage: &Storage, session_id: &str) -> Result<(EndpointModel, Sd
     let bundle = storage.export_session_bundle(session_id)?;
     let model = build_endpoint_model(&bundle);
     let dataflow = build_dataflow(&bundle, &model);
-    let (verified_crypto, unverified_crypto) = crypto_from_replay(storage, session_id);
+    let (
+        verified_crypto,
+        unverified_crypto,
+        verification_runs,
+        evidence_identifiers,
+        evidence_hashes,
+        verification_gaps,
+    ) = crypto_from_replay(storage, session_id);
+    let mut captured_identifiers = bundle
+        .requests
+        .iter()
+        .map(|request| format!("request:{}", request.id))
+        .collect::<Vec<_>>();
+    captured_identifiers.extend(evidence_identifiers);
 
     Ok((
         model,
@@ -236,6 +256,12 @@ pub fn collect(storage: &Storage, session_id: &str) -> Result<(EndpointModel, Sd
             dataflow,
             verified_crypto,
             unverified_crypto,
+            verification_runs,
+            evidence_identifiers: captured_identifiers,
+            evidence_hashes,
+            verification_gaps,
+            // Component checks do not execute the generated SDK as a package.
+            package_runtime_verified: false,
         },
     ))
 }
@@ -247,6 +273,8 @@ mod tests {
     #[test]
     fn end_to_end_through_real_storage() {
         use crate::models::{CapturedRequestInput, HeaderEntry};
+        use sha2::{Digest, Sha256};
+
         const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.sig-9f2c11";
         let storage = Storage::in_memory().expect("memory storage");
         let session = storage.create_session(Some("e2e".into())).expect("session");
@@ -304,10 +332,48 @@ mod tests {
             );
         }
 
-        let exported = export(&storage, &session.id, Some(std::path::Path::new("/private/tmp/claude-501/-Users-suifei-works-shownet/18a99b54-e55c-4d61-9804-0cf417ccc7dd/scratchpad/e2e")), None)
-            .expect("export");
-        assert!(exported.readiness.endpoints_total >= 2, "{exported:?}");
-        assert!(!exported.files.is_empty());
+        let parent = std::env::temp_dir().join(format!(
+            "shownet-sdk-export-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let first = export(&storage, &session.id, Some(&parent), None).expect("first export");
+        let second = export(&storage, &session.id, Some(&parent), None).expect("second export");
+
+        assert!(first.readiness.endpoints_total >= 2, "{first:?}");
+        assert!(!first.files.is_empty());
+        assert_ne!(
+            first.directory, second.directory,
+            "exports must not overwrite"
+        );
+        assert!(std::path::Path::new(&first.directory).is_dir());
+        assert!(std::path::Path::new(&second.directory).is_dir());
+
+        let manifest_text = std::fs::read_to_string(
+            std::path::Path::new(&first.directory).join("VERIFICATION_MANIFEST.json"),
+        )
+        .expect("read exported verification manifest");
+        let manifest: crate::verification_manifest::ArtifactVerificationManifest =
+            serde_json::from_str(&manifest_text).expect("parse exported verification manifest");
+        assert_eq!(first.gate_verdict, manifest.gate.verdict);
+        for digest in &manifest.generated_files {
+            let path = std::path::Path::new(&first.directory).join(&digest.name);
+            let content = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            assert_eq!(
+                digest.bytes,
+                content.len(),
+                "size mismatch for {}",
+                digest.name
+            );
+            assert_eq!(
+                digest.sha256,
+                format!("{:x}", Sha256::digest(&content)),
+                "digest mismatch for {}",
+                digest.name
+            );
+        }
+
+        std::fs::remove_dir_all(parent).ok();
     }
 
     #[test]
@@ -338,6 +404,15 @@ mod tests {
             "the absence is stated"
         );
     }
+
+    #[test]
+    fn replay_collection_failure_is_exposed_as_an_sdk_evidence_gap() {
+        let storage = Storage::in_memory().expect("memory storage");
+        let (_, _, _, _, _, gaps) = crypto_from_replay(&storage, "missing-session");
+
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].contains("could not be built"), "{gaps:?}");
+    }
 }
 
 /// Writes a generated package to disk, following the same shape the replay and
@@ -350,6 +425,7 @@ pub struct SdkExportResult {
     pub directory: String,
     pub files: Vec<String>,
     pub readiness: crate::sdk_build::SdkReadiness,
+    pub gate_verdict: VerificationVerdict,
     pub bytes_written: usize,
 }
 
@@ -366,10 +442,10 @@ pub fn export(
     }
     let package = crate::sdk_build::build_python_sdk(&model, &inputs);
 
-    let directory = match output_dir {
-        Some(path) => path.join(format!("shownet-sdk-{}-python", session.id)),
-        None => std::env::temp_dir().join(format!("shownet-sdk-{}-python", session.id)),
-    };
+    let parent = output_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let directory = sdk_package_directory(&parent, &session.id);
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("创建导出目录失败 {}: {error}", directory.display()))?;
 
@@ -393,8 +469,26 @@ pub fn export(
         directory: directory.to_string_lossy().to_string(),
         files: written,
         readiness: package.readiness,
+        gate_verdict: package.verification_manifest.gate.verdict,
         bytes_written,
     })
+}
+
+fn sdk_package_directory(parent: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    let safe_session = session_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    parent.join(format!(
+        "shownet-sdk-{safe_session}-python-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 #[cfg(test)]

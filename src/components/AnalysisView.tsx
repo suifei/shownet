@@ -2,10 +2,16 @@ import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clo
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { ANALYSIS_MODES } from "../analysisModes";
 import { DEFAULT_AI_CONTEXT_TOKENS, promptBudgetBytes } from "../aiContextBudget";
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
+import {
+  analysisStreamReducer,
+  createAnalysisStreamState,
+  isGraphActivityPhase,
+  type AgentActivityEntry,
+} from "../analysisStreamState";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
 import { pickReplayExportDirectory } from "../replayExport";
 import type { AiAnalysisSettings, AiProviderSettings, AlgorithmReplayExportResult, AnalysisActivity, AnalysisChatMessage, AnalysisGraphRun, AnalysisMode, AnalysisReport, AnalysisStatus, AnalysisStreamEvent, AutonomousAnalysisResult, EvaluationExportResult, RequestListItem, SdkExportResult, SkillPlan, SkillRunAudit } from "../types";
@@ -160,38 +166,6 @@ interface AnalysisViewProps {
 
 type ChatItem = Pick<AnalysisChatMessage, "id" | "role" | "content">;
 
-type AgentActivityPhase =
-  | "filtering"
-  | "analyzing"
-  | "runtime"
-  | "reasoning"
-  | "tool"
-  | "tool-complete"
-  | "tool-error"
-  | "graph-node"
-  | "graph-retry"
-  | "artifact-valid"
-  | "artifact-invalid"
-  | "graph-complete"
-  | "generating"
-  | "complete"
-  | "error";
-
-type AgentActivityStatus = "running" | "complete" | "error";
-
-interface AgentActivityEntry {
-  id: string;
-  phase: AgentActivityPhase;
-  status: AgentActivityStatus;
-  title: string;
-  detail: string;
-  toolKey?: string;
-  startedAt: number;
-  updatedAt: number;
-}
-
-const maxAgentActivities = 12;
-
 const replayLanguages = [
   { id: "python", label: "Python" },
   { id: "javascript", label: "JavaScript" },
@@ -204,32 +178,38 @@ const replayLanguages = [
 type ReplayLanguage = (typeof replayLanguages)[number]["id"];
 
 export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, autoRunId, onAutoRunConsumed, initialRequestIds, scopeRequestId, onScopeConsumed, onOpenEvidenceRequest, mode, onModeChange: setMode, modePinned }: AnalysisViewProps) {
-  const [status, setStatus] = useState<AnalysisStatus>("idle");
-  const [report, setReport] = useState<AnalysisReport | null>(null);
+  const [streamState, dispatchStream] = useReducer(analysisStreamReducer, createAnalysisStreamState());
+  const {
+    status,
+    report,
+    content,
+    phaseMessage,
+    error,
+    failureKind,
+    pendingAnswer,
+    sending,
+    cancelling,
+    streamKeyCount,
+    agentActivities,
+    firstVisibleLatencyMs,
+  } = streamState;
   const [reports, setReports] = useState<AnalysisReport[]>([]);
-  const [content, setContent] = useState("");
   const [includeStatic, setIncludeStatic] = useState(false);
   const [includeAnnotations, setIncludeAnnotations] = useState(false);
   const [manualScope, setManualScope] = useState(false);
   const [mobileScopeOpen, setMobileScopeOpen] = useState(false);
   const [scopedRequestIds, setScopedRequestIds] = useState<string[]>([]);
-  const [phaseMessage, setPhaseMessage] = useState("");
-  const [error, setError] = useState("");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatItem[]>([]);
-  const [pendingAnswer, setPendingAnswer] = useState("");
-  const [sending, setSending] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [aiSettings, setAiSettings] = useState(fallbackAiSettings);
   const [analysisSettings, setAnalysisSettings] = useState(fallbackAnalysisSettings);
   const [aiSettingsLoaded, setAiSettingsLoaded] = useState(!isTauri());
   const [analysisSettingsLoaded, setAnalysisSettingsLoaded] = useState(!isTauri());
   const [historyLoaded, setHistoryLoaded] = useState(!isTauri());
-  const [streamKeyCount, setStreamKeyCount] = useState(0);
+  const [streamListenerSessionId, setStreamListenerSessionId] = useState(isTauri() ? "" : sessionId);
   const [skillPlan, setSkillPlan] = useState<SkillPlan | null>(null);
   const [skillRuns, setSkillRuns] = useState<SkillRunAudit[]>([]);
   const [graphRun, setGraphRun] = useState<AnalysisGraphRun | null>(null);
-  const [agentActivities, setAgentActivities] = useState<AgentActivityEntry[]>([]);
   const [replayLanguage, setReplayLanguage] = useState<ReplayLanguage>("python");
   const [replayExport, setReplayExport] = useState<AlgorithmReplayExportResult | null>(null);
   const [exportingReplay, setExportingReplay] = useState(false);
@@ -239,12 +219,27 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   const [sdkExport, setSdkExport] = useState<SdkExportResult | null>(null);
   const [exportingSdk, setExportingSdk] = useState(false);
   const sdkExportRequestId = useRef(0);
+  const [quickScanning, setQuickScanning] = useState(false);
+  const [quickScan, setQuickScan] = useState<AutonomousAnalysisResult | null>(null);
+  const quickScanRequestId = useRef(0);
   const reportEndRef = useRef<HTMLDivElement | null>(null);
   const activeAnalysisId = useRef("");
+  const currentSessionId = useRef(sessionId);
+  const analysisCommandRequestId = useRef(0);
+  const analysisCommandPending = useRef(false);
+  const historyRequestId = useRef(0);
+  const streamEventRevision = useRef(0);
+  const reportRestoreRequestId = useRef(0);
+  const followupRequestId = useRef(0);
+  const followupCommandPending = useRef(false);
+  const supersededAnalysisIds = useRef(new Set<string>());
+  const modePinnedRef = useRef(modePinned);
   const replayExportRequestId = useRef(0);
   const handledAutoRunId = useRef(0);
   const initializedSessionId = useRef("");
   const handledScopeRequestId = useRef(0);
+  currentSessionId.current = sessionId;
+  modePinnedRef.current = modePinned;
 
   const apiRequests = useMemo(
     () => requests.filter((request) => request.type === "xhr" || request.type === "fetch"),
@@ -272,13 +267,14 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   const running = status === "filtering" || status === "analyzing";
   const requiresApiKey = aiSettings.provider !== "local" && !aiSettings.hasApiKey;
   const smartFilteringEnabled = analysisSettings.twoStageAnalysis && requests.length >= 20 && !manualScope;
+  const streamListenerReady = !isTauri() || streamListenerSessionId === sessionId;
 
   useEffect(() => {
     if (!scopeRequestId || handledScopeRequestId.current === scopeRequestId || !initialRequestIds?.length) return;
     handledScopeRequestId.current = scopeRequestId;
     setScopedRequestIds([...initialRequestIds]);
     setManualScope(true);
-    setPhaseMessage(`已载入 ${initialRequestIds.length} 条选中请求，确认范围后开始分析`);
+    dispatchStream({ type: "notice", message: `已载入 ${initialRequestIds.length} 条选中请求，确认范围后开始分析` });
     onScopeConsumed();
   }, [initialRequestIds, onScopeConsumed, scopeRequestId]);
 
@@ -299,65 +295,88 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   }, []);
 
   useEffect(() => {
+    const loadRequestId = ++historyRequestId.current;
     if (initializedSessionId.current !== sessionId) {
       initializedSessionId.current = sessionId;
       activeAnalysisId.current = "";
+      supersededAnalysisIds.current.clear();
+      streamEventRevision.current = 0;
+      analysisCommandRequestId.current += 1;
+      analysisCommandPending.current = false;
+      reportRestoreRequestId.current += 1;
+      followupRequestId.current += 1;
+      followupCommandPending.current = false;
+      quickScanRequestId.current += 1;
       setScopedRequestIds([]);
       setIncludeAnnotations(false);
-      setReport(null);
+      setQuestion("");
       setReports([]);
-      setContent("");
       setMessages([]);
-      setPendingAnswer("");
-      setPhaseMessage("");
-      setAgentActivities([]);
       setSkillRuns([]);
       setGraphRun(null);
       setReplayExport(null);
       setExportingReplay(false);
       replayExportRequestId.current += 1;
-      setStreamKeyCount(0);
-      setError("");
-      setStatus("idle");
+      setEvalExport(null);
+      setExportingEval(false);
+      evalExportRequestId.current += 1;
+      setSdkExport(null);
+      setExportingSdk(false);
+      sdkExportRequestId.current += 1;
+      setQuickScan(null);
+      setQuickScanning(false);
+      dispatchStream({ type: "reset" });
     }
     setHistoryLoaded(!isTauri());
+    // A running report can finish between the history query and listener
+    // registration. Load history only after this session's listener is active,
+    // so every terminal event after the snapshot has somewhere to land.
+    if (isTauri() && !streamListenerReady) return;
     if (!isTauri()) {
       const history = previewReports.filter((item) => item.sessionId === sessionId);
       setReports(history);
       const latest = history[0];
       if (latest) {
         activeAnalysisId.current = latest.id;
-        if (!modePinned) setMode(latest.mode);
-        setReport(latest);
-        setContent(latest.content);
-        setStreamKeyCount(latest.keyRequestCount);
+        if (!modePinnedRef.current) setMode(latest.mode);
+        dispatchStream({ type: "restore", report: latest });
         setGraphRun(buildPreviewGraphRun(latest, requests));
-        setStatus("complete");
       }
       return;
     }
     if (!sessionId) return;
     let disposed = false;
+    const historyStreamRevision = streamEventRevision.current;
     invoke<AnalysisReport[]>("list_analysis_reports", { sessionId })
       .then(async (history) => {
-        if (disposed) return;
+        if (disposed || historyRequestId.current !== loadRequestId) return;
+        // The snapshot may have been read before an event that reached this
+        // listener. Preserve the event-driven state; terminal events carry the
+        // authoritative report, and later events continue the live stream.
+        if (streamEventRevision.current !== historyStreamRevision) return;
         setReports(history);
         const latest = history[0];
         if (!latest) return;
         // On a first visit there is no choice to protect, so the report may
         // set the mode; once the user has picked one, it may not.
-        await restoreReport(latest, () => disposed, !modePinned);
+        await restoreReport(
+          latest,
+          () => disposed || historyRequestId.current !== loadRequestId,
+          !modePinnedRef.current,
+        );
       })
       .catch((loadError) => {
-        if (!disposed) setError(`读取历史报告失败：${String(loadError)}`);
+        if (!disposed && historyRequestId.current === loadRequestId) {
+          dispatchStream({ type: "set-error", message: `读取历史报告失败：${String(loadError)}` });
+        }
       })
       .finally(() => {
-        if (!disposed) setHistoryLoaded(true);
+        if (!disposed && currentSessionId.current === sessionId) setHistoryLoaded(true);
       });
     return () => {
       disposed = true;
     };
-  }, [sessionId]);
+  }, [sessionId, streamListenerReady]);
 
   /**
    * @param adoptMode whether the report should take over the mode selection.
@@ -366,100 +385,90 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
    *   not overwrite a mode the user chose, possibly over in Skill 编排.
    */
   const restoreReport = async (selected: AnalysisReport, isDisposed: () => boolean = () => false, adoptMode = true) => {
+    if (currentSessionId.current !== selected.sessionId) return;
+    analysisCommandRequestId.current += 1;
+    analysisCommandPending.current = false;
+    const restoreRequestId = ++reportRestoreRequestId.current;
+    followupRequestId.current += 1;
+    followupCommandPending.current = false;
+    const isCurrent = () => (
+      !isDisposed()
+      && reportRestoreRequestId.current === restoreRequestId
+      && currentSessionId.current === selected.sessionId
+      && activeAnalysisId.current === selected.id
+    );
+    supersededAnalysisIds.current.delete(selected.id);
     activeAnalysisId.current = selected.id;
     if (adoptMode) setMode(selected.mode);
-    setReport(selected);
-    setContent(selected.content);
-    setStreamKeyCount(selected.keyRequestCount);
+    dispatchStream({ type: "restore", report: selected });
     setMessages([]);
-    setPendingAnswer("");
-    setPhaseMessage("");
-    setAgentActivities([]);
     setSkillRuns([]);
     setGraphRun(null);
     setReplayExport(null);
     setExportingReplay(false);
     replayExportRequestId.current += 1;
-    setError("");
+    setEvalExport(null);
+    setExportingEval(false);
+    evalExportRequestId.current += 1;
     if (!isTauri()) {
       setGraphRun(buildPreviewGraphRun(selected, requests));
-      if (selected.status === "complete") setStatus("complete");
-      else if (selected.status === "failed") {
-        setStatus("failed");
-        setError(selected.error ?? "分析未完成");
-      } else {
-        setStatus(selected.status);
-      }
       return;
     }
     try {
       const activityHistory = await invoke<AnalysisActivity[]>("list_analysis_activities", {
         analysisId: selected.id,
       });
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
-        const restored = restoreAgentActivities(activityHistory);
-        setAgentActivities(restored);
-        const latestActivity = restored.at(-1);
-        if (latestActivity && selected.status !== "complete") setPhaseMessage(latestActivity.title);
+      if (isCurrent()) {
+        dispatchStream({ type: "restore-activities", activities: activityHistory });
       }
     } catch (activityError) {
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
-        setPhaseMessage(`读取 Agent 执行轨迹失败：${String(activityError)}`);
+      if (isCurrent()) {
+        dispatchStream({ type: "notice", message: `读取 Agent 执行轨迹失败：${String(activityError)}` });
       }
     }
     try {
       const restoredSkillRuns = await invoke<SkillRunAudit[]>("list_analysis_skill_runs", {
         analysisId: selected.id,
       });
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
+      if (isCurrent()) {
         setSkillRuns(restoredSkillRuns);
       }
     } catch (skillRunError) {
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
-        setPhaseMessage(`读取 Skill 审计失败：${String(skillRunError)}`);
+      if (isCurrent()) {
+        dispatchStream({ type: "notice", message: `读取 Skill 审计失败：${String(skillRunError)}` });
       }
     }
     try {
       const restoredGraph = await invoke<AnalysisGraphRun | null>("get_analysis_graph_run", {
         analysisId: selected.id,
       });
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
+      if (isCurrent()) {
         setGraphRun(restoredGraph);
       }
     } catch (graphError) {
-      if (!isDisposed() && activeAnalysisId.current === selected.id) {
-        setPhaseMessage(`读取 Graph 轨迹失败：${String(graphError)}`);
+      if (isCurrent()) {
+        dispatchStream({ type: "notice", message: `读取 Graph 轨迹失败：${String(graphError)}` });
       }
     }
     if (selected.status === "complete") {
-      setStatus("complete");
       try {
         const history = await invoke<AnalysisChatMessage[]>("list_analysis_messages", {
           analysisId: selected.id,
         });
-        if (!isDisposed() && activeAnalysisId.current === selected.id) setMessages(history);
+        if (isCurrent()) setMessages(history);
       } catch (historyError) {
-        if (!isDisposed() && activeAnalysisId.current === selected.id) {
-          setPhaseMessage(`读取报告追问记录失败：${String(historyError)}`);
+        if (isCurrent()) {
+          dispatchStream({ type: "notice", message: `读取报告追问记录失败：${String(historyError)}` });
         }
       }
-    } else if (selected.status === "failed") {
-      setStatus("failed");
-      setError(selected.error ?? "分析未完成");
-    } else {
+    } else if (selected.status !== "failed") {
       try {
         const isRunning = await invoke<boolean>("is_ai_analysis_running", { analysisId: selected.id });
-        if (isDisposed() || activeAnalysisId.current !== selected.id) return;
-        if (isRunning) {
-          setStatus(selected.status);
-        } else {
-          setStatus("failed");
-          setError("这次分析未正常结束，可重新开始分析");
-        }
+        if (!isCurrent()) return;
+        dispatchStream({ type: "recover", report: selected, running: isRunning });
       } catch (runtimeError) {
-        if (!isDisposed() && activeAnalysisId.current === selected.id) {
-          setStatus("failed");
-          setError(`读取分析运行状态失败：${String(runtimeError)}`);
+        if (isCurrent()) {
+          dispatchStream({ type: "recovery-error", message: `读取分析运行状态失败：${String(runtimeError)}` });
         }
       }
     }
@@ -479,22 +488,29 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   }, [mode, sessionId, requests.length]);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      setStreamListenerSessionId(sessionId);
+      return;
+    }
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
+    setStreamListenerSessionId("");
     listen<AnalysisStreamEvent>("analysis://stream", (event) => {
       const update = event.payload;
-      if (update.sessionId !== sessionId) return;
+      if (update.sessionId !== sessionId || currentSessionId.current !== update.sessionId) return;
+      if (supersededAnalysisIds.current.has(update.analysisId)) return;
       if (!activeAnalysisId.current) activeAnalysisId.current = update.analysisId;
       if (update.analysisId !== activeAnalysisId.current) return;
-      if (isAgentActivityPhase(update.phase)) {
-        const activityPhase = update.phase;
-        setAgentActivities((items) => updateAgentActivities(items, activityPhase, update.message));
-      }
+      streamEventRevision.current += 1;
       if (isGraphActivityPhase(update.phase) || update.phase === "tool-complete" || update.phase === "tool-error") {
         invoke<AnalysisGraphRun | null>("get_analysis_graph_run", { analysisId: update.analysisId })
           .then((loaded) => {
-            if (activeAnalysisId.current === update.analysisId) setGraphRun(loaded);
+            if (
+              currentSessionId.current === update.sessionId
+              && activeAnalysisId.current === update.analysisId
+            ) {
+              setGraphRun(loaded);
+            }
           })
           .catch(() => undefined);
       }
@@ -507,64 +523,29 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       ) {
         invoke<SkillRunAudit[]>("list_analysis_skill_runs", { analysisId: update.analysisId })
           .then((runs) => {
-            if (activeAnalysisId.current === update.analysisId) setSkillRuns(runs);
+            if (
+              currentSessionId.current === update.sessionId
+              && activeAnalysisId.current === update.analysisId
+            ) {
+              setSkillRuns(runs);
+            }
           })
           .catch(() => undefined);
       }
-      if (update.phase === "filtering") {
-        setStatus("filtering");
-        setPhaseMessage(update.message ?? "正在识别关键请求");
-      } else if (
-        update.phase === "analyzing"
-        || update.phase === "runtime"
-        || update.phase === "reasoning"
-        || update.phase === "tool"
-        || update.phase === "tool-complete"
-        || update.phase === "tool-error"
-        || isGraphActivityPhase(update.phase)
-        || update.phase === "generating"
-      ) {
-        setStatus("analyzing");
-        setPhaseMessage(isAgentActivityPhase(update.phase)
-          ? describeAgentActivity(update.phase, update.message).title
-          : update.message ?? "正在分析");
-        setStreamKeyCount(update.keyRequestCount);
-      } else if (update.phase === "content-reset") {
-        setStatus("analyzing");
-        setContent("");
-      } else if (update.phase === "delta") {
-        setStatus("analyzing");
-        setContent((current) => current + update.delta);
-      } else if (update.phase === "complete" && update.report) {
-        setReport(update.report);
+      if ((update.phase === "complete" || update.phase === "error") && update.report) {
         setReports((items) => [update.report!, ...items.filter((item) => item.id !== update.report!.id)]);
-        setContent(update.report.content);
-        setStreamKeyCount(update.report.keyRequestCount);
-        setStatus("complete");
-        setError("");
-        setPhaseMessage("");
-        setCancelling(false);
-      } else if (update.phase === "error") {
-        if (update.report) {
-          setReport(update.report);
-          setReports((items) => [update.report!, ...items.filter((item) => item.id !== update.report!.id)]);
-          setContent(update.report.content);
-        }
-        setStatus("failed");
-        setError(update.message ?? "AI 分析失败");
-        setCancelling(false);
-      } else if (update.phase === "followup-start") {
-        setPendingAnswer("");
-        setSending(true);
-      } else if (update.phase === "followup-delta") {
-        setPendingAnswer((current) => current + update.delta);
-      } else if (update.phase === "followup-error") {
-        setSending(false);
-        setPhaseMessage(update.message ?? "追问失败");
       }
+      dispatchStream({ type: "event", event: update });
     }).then((handler) => {
       if (disposed) handler();
-      else unlisten = handler;
+      else {
+        unlisten = handler;
+        setStreamListenerSessionId(sessionId);
+      }
+    }).catch((listenError) => {
+      if (!disposed && currentSessionId.current === sessionId) {
+        dispatchStream({ type: "set-error", message: `订阅分析进度失败：${String(listenError)}` });
+      }
     });
     return () => {
       disposed = true;
@@ -581,60 +562,72 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   // Deterministic pass: plan skills, aggregate protection evidence, no model
   // call. It is the only way to reach the protection analysis without an AI key
   // configured, which is otherwise a hard requirement for anything on this page.
-  const [quickScanning, setQuickScanning] = useState(false);
-  const [quickScan, setQuickScan] = useState<AutonomousAnalysisResult | null>(null);
   const runQuickScan = async () => {
     if (!isTauri() || !sessionId) return;
+    const requestId = ++quickScanRequestId.current;
+    const requestSessionId = sessionId;
     setQuickScanning(true);
     setQuickScan(null);
     try {
-      setQuickScan(await invoke<AutonomousAnalysisResult>("run_autonomous_session_analysis", {
+      const result = await invoke<AutonomousAnalysisResult>("run_autonomous_session_analysis", {
         sessionId,
         mode,
-      }));
+      });
+      if (
+        quickScanRequestId.current === requestId
+        && currentSessionId.current === requestSessionId
+      ) {
+        setQuickScan(result);
+      }
     } catch (reason) {
-      setError(String(reason));
+      if (
+        quickScanRequestId.current === requestId
+        && currentSessionId.current === requestSessionId
+      ) {
+        dispatchStream({ type: "set-error", message: String(reason) });
+      }
     } finally {
-      setQuickScanning(false);
+      if (quickScanRequestId.current === requestId) setQuickScanning(false);
     }
   };
 
   const startAnalysis = async (overrides?: { mode?: AnalysisMode; includeStatic?: boolean }) => {
-    if (!sessionId || requests.length === 0 || running) return;
+    if (!sessionId || requests.length === 0 || running || analysisCommandPending.current || !streamListenerReady) return;
     const analysisMode = overrides?.mode ?? mode;
     const includeStaticResources = overrides?.includeStatic ?? includeStatic;
     if (overrides?.mode) setMode(overrides.mode);
     if (overrides?.includeStatic !== undefined) setIncludeStatic(overrides.includeStatic);
     if (!isTauri()) {
-      setStatus("failed");
-      setError("真实 AI 分析需要在 ShowNet 桌面应用中运行");
+      dispatchStream({ type: "fail", message: "真实 AI 分析需要在 ShowNet 桌面应用中运行" });
       return;
     }
     if (requiresApiKey) {
-      setStatus("failed");
-      setError("尚未配置 AI API Key。加入 QQ 群后可联系管理员申请一次性 5 美金免费额度。");
+      dispatchStream({ type: "fail", message: "尚未配置 AI API Key。加入 QQ 群后可联系管理员申请一次性 5 美金免费额度。" });
       return;
     }
+    const commandRequestId = ++analysisCommandRequestId.current;
+    analysisCommandPending.current = true;
+    const commandSessionId = sessionId;
+    historyRequestId.current += 1;
+    reportRestoreRequestId.current += 1;
+    followupRequestId.current += 1;
+    followupCommandPending.current = false;
+    if (activeAnalysisId.current) supersededAnalysisIds.current.add(activeAnalysisId.current);
     activeAnalysisId.current = "";
-    setReport(null);
-    setContent("");
     setMessages([]);
-    setPendingAnswer("");
-    setError("");
-    setCancelling(false);
-    setPhaseMessage(smartFilteringEnabled ? "正在识别关键请求" : "准备直接进入深度分析");
     setSkillRuns([]);
     setGraphRun(null);
     setReplayExport(null);
     setExportingReplay(false);
     replayExportRequestId.current += 1;
-    setAgentActivities(updateAgentActivities(
-      [],
-      smartFilteringEnabled ? "filtering" : "analyzing",
-      smartFilteringEnabled ? "正在识别关键请求" : "准备直接进入深度分析",
-    ));
-    setStreamKeyCount(0);
-    setStatus(smartFilteringEnabled ? "filtering" : "analyzing");
+    setEvalExport(null);
+    setExportingEval(false);
+    evalExportRequestId.current += 1;
+    dispatchStream({
+      type: "start",
+      filtering: smartFilteringEnabled,
+      message: smartFilteringEnabled ? "正在识别关键请求" : "准备直接进入深度分析",
+    });
     try {
       const completed = await invoke<AnalysisReport>("start_ai_analysis", {
         input: {
@@ -645,62 +638,85 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           includeAnnotations,
         },
       });
+      if (
+        analysisCommandRequestId.current !== commandRequestId
+        || currentSessionId.current !== commandSessionId
+        || (activeAnalysisId.current && activeAnalysisId.current !== completed.id)
+      ) {
+        return;
+      }
       activeAnalysisId.current = completed.id;
-      setReport(completed);
       setReports((items) => [completed, ...items.filter((item) => item.id !== completed.id)]);
-      setContent(completed.content);
-      setStatus("complete");
-      setAgentActivities((items) => updateAgentActivities(items, "complete", "分析报告已生成"));
+      dispatchStream({ type: "command-complete", report: completed });
       const completedGraph = await invoke<AnalysisGraphRun | null>("get_analysis_graph_run", { analysisId: completed.id }).catch(() => null);
-      setGraphRun(completedGraph);
+      if (
+        analysisCommandRequestId.current === commandRequestId
+        && currentSessionId.current === commandSessionId
+        && activeAnalysisId.current === completed.id
+      ) {
+        setGraphRun(completedGraph);
+      }
     } catch (analysisError) {
-      setStatus("failed");
-      setError(String(analysisError));
-      setAgentActivities((items) => updateAgentActivities(items, "error", "内置 Agent 执行未完成"));
+      if (
+        analysisCommandRequestId.current === commandRequestId
+        && currentSessionId.current === commandSessionId
+      ) {
+        dispatchStream({ type: "command-failed", message: String(analysisError) });
+      }
     } finally {
-      setCancelling(false);
+      if (analysisCommandRequestId.current === commandRequestId) {
+        analysisCommandPending.current = false;
+      }
     }
   };
 
   const cancelAnalysis = async () => {
     if (!isTauri() || !running || !activeAnalysisId.current || cancelling) return;
-    setCancelling(true);
-    setPhaseMessage("正在停止分析");
+    dispatchStream({ type: "cancel-requested" });
     try {
       await invoke("cancel_ai_analysis", { analysisId: activeAnalysisId.current });
     } catch (cancelError) {
-      setCancelling(false);
-      setError(String(cancelError));
+      dispatchStream({ type: "cancel-failed", message: String(cancelError) });
     }
   };
 
   useEffect(() => {
     if (!autoRunId || handledAutoRunId.current === autoRunId) return;
-    if (!aiSettingsLoaded || !analysisSettingsLoaded || !historyLoaded || requests.length === 0 || running) return;
+    if (!aiSettingsLoaded || !analysisSettingsLoaded || !historyLoaded || !streamListenerReady || requests.length === 0 || running) return;
     handledAutoRunId.current = autoRunId;
     onAutoRunConsumed();
     void startAnalysis({ mode: "crypto", includeStatic: true });
-  }, [aiSettingsLoaded, analysisSettingsLoaded, autoRunId, historyLoaded, onAutoRunConsumed, requests.length, running]);
+  }, [aiSettingsLoaded, analysisSettingsLoaded, autoRunId, historyLoaded, onAutoRunConsumed, requests.length, running, streamListenerReady]);
 
   const ask = async () => {
     const value = question.trim();
-    if (!value || sending || !report) return;
+    if (!value || sending || !report || followupCommandPending.current) return;
+    const requestId = ++followupRequestId.current;
+    followupCommandPending.current = true;
+    const analysisId = report.id;
+    const requestSessionId = sessionId;
+    const isCurrent = () => (
+      followupRequestId.current === requestId
+      && currentSessionId.current === requestSessionId
+      && activeAnalysisId.current === analysisId
+    );
     const localId = -Date.now();
     setMessages((items) => [...items, { id: localId, role: "user", content: value }]);
     setQuestion("");
-    setPendingAnswer("");
-    setPhaseMessage("");
-    setSending(true);
+    dispatchStream({ type: "followup-requested" });
     try {
       const reply = await invoke<AnalysisChatMessage>("followup_ai_analysis", {
-        input: { analysisId: report.id, question: value },
+        input: { analysisId, question: value },
       });
+      if (!isCurrent()) return;
       setMessages((items) => [...items, reply]);
-      setPendingAnswer("");
+      dispatchStream({ type: "followup-finished" });
     } catch (askError) {
-      setPhaseMessage(`追问失败：${String(askError)}`);
+      if (isCurrent()) dispatchStream({ type: "followup-failed", message: String(askError) });
     } finally {
-      setSending(false);
+      if (followupRequestId.current === requestId) {
+        followupCommandPending.current = false;
+      }
     }
   };
 
@@ -714,41 +730,47 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       onNotify("算法重播包需要在 ShowNet 桌面应用中导出");
       return;
     }
-
-    // Always ask where to put the package — never silently write under Application Support.
-    const picked = await pickReplayExportDirectory(() =>
-      openDialog({
-        directory: true,
-        multiple: false,
-        title: "选择算法重播包保存目录",
-      }),
+    const requestId = ++replayExportRequestId.current;
+    const requestSessionId = sessionId;
+    const reportId = report.id;
+    const isCurrent = () => (
+      replayExportRequestId.current === requestId
+      && currentSessionId.current === requestSessionId
+      && activeAnalysisId.current === reportId
     );
-    if (picked.status === "cancel") {
-      onNotify("已取消导出");
-      return;
-    }
-    if (picked.status === "error") {
-      onNotify(`无法打开目录选择：${picked.message}`);
-      return;
-    }
-    const outputDir = picked.path;
-
     setExportingReplay(true);
     setReplayExport(null);
-    const requestId = ++replayExportRequestId.current;
+
     try {
+      // Always ask where to put the package — never silently write under Application Support.
+      const picked = await pickReplayExportDirectory(() =>
+        openDialog({
+          directory: true,
+          multiple: false,
+          title: "选择算法重播包保存目录",
+        }),
+      );
+      if (!isCurrent()) return;
+      if (picked.status === "cancel") {
+        onNotify("已取消导出");
+        return;
+      }
+      if (picked.status === "error") {
+        onNotify(`无法打开目录选择：${picked.message}`);
+        return;
+      }
       const exported = await invoke<AlgorithmReplayExportResult>("export_algorithm_replay_package", {
-        sessionId,
+        sessionId: requestSessionId,
         language: replayLanguage,
-        reportId: report.id,
-        outputDir,
+        reportId,
+        outputDir: picked.path,
       });
-      if (replayExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       setReplayExport(exported);
       const label = replayLanguages.find((item) => item.id === exported.language)?.label ?? exported.language;
-      onNotify(`${label} 算法包已导出 · ${exported.files.length} 个文件 · ${exported.directory}`);
+      onNotify(`${label} 算法包已导出 · 验证门 ${verificationVerdictLabel(exported.gateVerdict)} · ${exported.files.length} 个文件 · ${exported.directory}`);
     } catch (exportError) {
-      if (replayExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       onNotify(`导出算法包失败：${String(exportError)}`);
     } finally {
       if (replayExportRequestId.current === requestId) setExportingReplay(false);
@@ -761,38 +783,43 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       onNotify("API SDK 需要在 ShowNet 桌面应用中生成");
       return;
     }
-    const picked = await pickReplayExportDirectory(() =>
-      openDialog({ directory: true, multiple: false, title: "选择 API SDK 保存目录" }),
+    const requestId = ++sdkExportRequestId.current;
+    const requestSessionId = sessionId;
+    const isCurrent = () => (
+      sdkExportRequestId.current === requestId
+      && currentSessionId.current === requestSessionId
     );
-    if (picked.status === "cancel") {
-      onNotify("已取消生成");
-      return;
-    }
-    if (picked.status === "error") {
-      onNotify(`无法打开目录选择：${picked.message}`);
-      return;
-    }
-
     setExportingSdk(true);
     setSdkExport(null);
-    const requestId = ++sdkExportRequestId.current;
     try {
+      const picked = await pickReplayExportDirectory(() =>
+        openDialog({ directory: true, multiple: false, title: "选择 API SDK 保存目录" }),
+      );
+      if (!isCurrent()) return;
+      if (picked.status === "cancel") {
+        onNotify("已取消生成");
+        return;
+      }
+      if (picked.status === "error") {
+        onNotify(`无法打开目录选择：${picked.message}`);
+        return;
+      }
       const exported = await invoke<SdkExportResult>("build_sdk_package", {
-        sessionId,
+        sessionId: requestSessionId,
         outputDir: picked.path,
       });
-      if (sdkExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       setSdkExport(exported);
       // The gap count leads, because a package that looks finished and is not
       // is the failure this feature has to avoid.
       const { gapCount, endpointsTotal } = exported.readiness;
       onNotify(
         gapCount > 0
-          ? `SDK 已生成 · ${endpointsTotal} 个端点 · ${gapCount} 处未经抓包证实，见 GAPS.md`
-          : `SDK 已生成 · ${endpointsTotal} 个端点 · 无未证实项`,
+          ? `SDK 已生成 · 验证门 ${verificationVerdictLabel(exported.gateVerdict)} · ${endpointsTotal} 个端点 · ${gapCount} 处未经抓包证实，见 GAPS.md`
+          : `SDK 已生成 · 验证门 ${verificationVerdictLabel(exported.gateVerdict)} · ${endpointsTotal} 个端点 · 无未证实项`,
       );
     } catch (exportError) {
-      if (sdkExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       onNotify(`生成 SDK 失败：${String(exportError)}`);
     } finally {
       if (sdkExportRequestId.current === requestId) setExportingSdk(false);
@@ -805,36 +832,44 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       onNotify("评估包需要在 ShowNet 桌面应用中导出");
       return;
     }
-    const picked = await pickReplayExportDirectory(() =>
-      openDialog({
-        directory: true,
-        multiple: false,
-        title: "选择评估包保存目录",
-      }),
+    const requestId = ++evalExportRequestId.current;
+    const requestSessionId = sessionId;
+    const reportId = report.id;
+    const isCurrent = () => (
+      evalExportRequestId.current === requestId
+      && currentSessionId.current === requestSessionId
+      && activeAnalysisId.current === reportId
     );
-    if (picked.status === "cancel") {
-      onNotify("已取消导出评估包");
-      return;
-    }
-    if (picked.status === "error") {
-      onNotify(`无法打开目录选择：${picked.message}`);
-      return;
-    }
     setExportingEval(true);
     setEvalExport(null);
-    const requestId = ++evalExportRequestId.current;
     try {
+      const picked = await pickReplayExportDirectory(() =>
+        openDialog({
+          directory: true,
+          multiple: false,
+          title: "选择评估包保存目录",
+        }),
+      );
+      if (!isCurrent()) return;
+      if (picked.status === "cancel") {
+        onNotify("已取消导出评估包");
+        return;
+      }
+      if (picked.status === "error") {
+        onNotify(`无法打开目录选择：${picked.message}`);
+        return;
+      }
       const exported = await invoke<EvaluationExportResult>("export_evaluation_package", {
-        sessionId,
-        analysisId: report.id,
+        sessionId: requestSessionId,
+        analysisId: reportId,
         outputDir: picked.path,
       });
-      if (evalExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       setEvalExport(exported);
       const score = exported.scorecardComposite != null ? ` · scorecard ${exported.scorecardComposite}` : "";
       onNotify(`评估包已导出 · ${exported.files.length} 个文件${score} · ${exported.directory}`);
     } catch (exportError) {
-      if (evalExportRequestId.current !== requestId) return;
+      if (!isCurrent()) return;
       onNotify(`导出评估包失败：${String(exportError)}`);
     } finally {
       if (evalExportRequestId.current === requestId) setExportingEval(false);
@@ -890,7 +925,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           <button className="model-select" onClick={onConfigureAi} title="配置 AI 服务">
             <Bot size={16} /><span><small>{providerLabel(aiSettings.provider)} · 内置 Agent</small><strong>{aiSettings.model}</strong></span><Settings2 size={14} />
           </button>
-          <button className={`analysis-start-button ${running ? "is-running" : ""}`} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (running && !activeAnalysisId.current)}>
+          <button className={`analysis-start-button ${running ? "is-running" : ""}`} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (!running && !streamListenerReady) || (running && !activeAnalysisId.current)}>
             {running ? (cancelling ? <LoaderCircle className="spin" size={17} /> : <Square size={14} fill="currentColor" />) : <Play size={15} fill="currentColor" />}
             {requests.length === 0 ? "暂无可分析请求" : cancelling ? "正在停止" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}
           </button>
@@ -955,7 +990,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           >
             <Settings2 size={15} />
           </button>
-          <button className={running ? "is-running" : ""} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (running && !activeAnalysisId.current)}>{running ? (cancelling ? <LoaderCircle className="spin" size={15} /> : <Square size={12} fill="currentColor" />) : <Play size={14} fill="currentColor" />}{cancelling ? "停止中" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}</button>
+          <button className={running ? "is-running" : ""} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (!running && !streamListenerReady) || (running && !activeAnalysisId.current)}>{running ? (cancelling ? <LoaderCircle className="spin" size={15} /> : <Square size={12} fill="currentColor" />) : <Play size={14} fill="currentColor" />}{cancelling ? "停止中" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}</button>
         </div>
 
         <section className={`analysis-mobile-scope ${mobileScopeOpen ? "is-open" : ""}`} aria-label="移动端分析范围">{scopeControls}</section>
@@ -980,11 +1015,11 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           <div className="report-body">
             {status !== "failed" && <AnalysisProgress status={status} requestCount={requests.length} keyCount={selectedRequestCount} message={phaseMessage} filteringEnabled={smartFilteringEnabled} />}
             {graphRun && <AnalysisGraphPanel run={graphRun} />}
-            {agentActivities.length > 0 && <AgentActivityPanel activities={agentActivities} skillRuns={skillRuns} running={running} />}
+            {agentActivities.length > 0 && <AgentActivityPanel activities={agentActivities} skillRuns={skillRuns} running={running} firstVisibleLatencyMs={firstVisibleLatencyMs} />}
             {status === "failed" && (
               <div className="analysis-error">
                 <span><CircleAlert size={20} /></span>
-                <div><strong>分析未完成</strong><p>{error}</p></div>
+                <div><strong>{failureKind === "cancelled" ? "分析已停止" : "分析未完成"}</strong><p>{error}</p></div>
                 {(requiresApiKey || error.includes("API Key")) && <button onClick={onConfigureAi}><KeyRound size={14} />配置 AI</button>}
               </div>
             )}
@@ -1009,7 +1044,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                   </div>
                   <small title={replayExport?.directory}>
                     {replayExport
-                      ? `${replayLanguages.find((item) => item.id === replayExport.language)?.label ?? replayExport.language} · ${replayExport.files.length} 个文件 · ${replayExport.directory}`
+                      ? `${replayLanguages.find((item) => item.id === replayExport.language)?.label ?? replayExport.language} · 验证门 ${verificationVerdictLabel(replayExport.gateVerdict)} · ${replayExport.files.length} 个文件 · ${replayExport.directory}`
                       : "点击导出将打开系统目录选择；取消不会写入任何文件。包内含报告、算法规格、协议证据与可校验重播实现。"}
                   </small>
                 </div>
@@ -1047,7 +1082,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 </div>
                 <small title={sdkExport?.directory}>
                   {sdkExport
-                    ? `${sdkExport.readiness.endpointsTotal} 个端点（${sdkExport.readiness.endpointsConfirmed} 个路径参数已互证）· 加解密已验证 ${sdkExport.readiness.cryptoVerified} 个 · ${sdkExport.directory}`
+                    ? `${sdkExport.readiness.endpointsTotal} 个端点（${sdkExport.readiness.endpointsConfirmed} 个路径参数已互证）· 加解密已验证 ${sdkExport.readiness.cryptoVerified} 个 · 验证门 ${verificationVerdictLabel(sdkExport.gateVerdict)} · ${sdkExport.directory}`
                     : "把这次抓包归纳成端点，生成可直接调用的 Python 客户端：凭据由调用方传入，指纹目标可实测比对，未经证实的部分写在 GAPS.md 并标在对应方法上。"}
                 </small>
               </div>
@@ -1109,179 +1144,6 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       </div>
     </section>
   );
-}
-
-function isAgentActivityPhase(phase: string): phase is AgentActivityPhase {
-  return phase === "filtering"
-    || phase === "analyzing"
-    || phase === "runtime"
-    || phase === "reasoning"
-    || phase === "tool"
-    || phase === "tool-complete"
-    || phase === "tool-error"
-    || phase === "graph-node"
-    || phase === "graph-retry"
-    || phase === "artifact-valid"
-    || phase === "artifact-invalid"
-    || phase === "graph-complete"
-    || phase === "generating"
-    || phase === "complete"
-    || phase === "error";
-}
-
-function isGraphActivityPhase(phase: string) {
-  return phase === "graph-node"
-    || phase === "graph-retry"
-    || phase === "artifact-valid"
-    || phase === "artifact-invalid"
-    || phase === "graph-complete";
-}
-
-const toolActivityLabels: Record<string, string> = {
-  shownet_list_requests: "读取请求索引",
-  shownet_get_request: "读取请求证据",
-  shownet_get_hooks: "关联 JS Hook",
-  shownet_get_crypto_snippets: "读取加密代码",
-  shownet_get_tls_fingerprints: "读取 TLS 指纹",
-  shownet_get_outbound_tls_status: "读取出站 TLS 状态",
-  shownet_list_px_evidence: "列出 PX 证据",
-  shownet_decode_px_payload: "解码 PX 结构",
-  shownet_analyze_dynamic_protection: "聚合动态防护证据",
-  shownet_get_websocket_frames: "读取 WebSocket 消息",
-  shownet_get_sse_events: "读取 SSE 事件流",
-  shownet_build_signature_harness: "生成动态签名适配器",
-  shownet_build_algorithm_replay: "生成多语言算法重播包",
-  shownet_export_analysis_artifacts: "导出报告与算法重播包",
-  shownet_list_js_debug_profiles: "列出 JS 调试固定参数档",
-  shownet_build_web_risk_lab: "构建 Web 风控研究 Lab",
-  shownet_eval_js_sandbox: "JS 虚拟沙箱求值",
-  shownet_build_request_hijack_script: "生成请求体劫持脚本",
-  shownet_build_object_dump_script: "生成对象自吐脚本",
-  shownet_plan_physical_interactions: "规划物理点击 CDP 序列",
-  shownet_build_vision_captcha_package: "生成视觉验证码 VLM 包",
-  shownet_run_offline_lab_probe: "离线 Lab 探针（objectDump）",
-  shownet_map_vision_captcha_indices: "视觉验证码索引映射坐标",
-  shownet_seed_web_risk_fixture: "种子 Web 风控 fixture 会话",
-  shownet_solve_vision_captcha: "视觉验证码 VLM 求解",
-  shownet_decode_challenge_js: "沙箱解码 challenge.js",
-  shownet_eval_scorecard: "机检 scorecard L0/L1/L2",
-  shownet_browser_status: "Browser 总线状态",
-  shownet_browser_evaluate: "Browser 总线 evaluate",
-  shownet_browser_click: "Browser 总线点击",
-  shownet_browser_screenshot: "Browser 总线截图",
-  shownet_browser_navigate: "Browser 总线导航",
-  shownet_browser_insert_text: "Browser 总线输入文本",
-  shownet_browser_install_lab: "Browser 一键注入风控 Lab",
-  shownet_generate_code: "生成调用代码",
-  shownet_get_report: "读取历史分析报告",
-  shownet_get_skill_runs: "读取 Skill 执行审计",
-  shownet_list_sessions: "读取会话索引",
-  shownet_list_skills: "读取 Skill 能力",
-  shownet_plan_analysis: "编排分析计划",
-};
-
-function activityToolKey(message?: string) {
-  if (!message) return undefined;
-  const known = Object.keys(toolActivityLabels).find((name) => message.includes(name));
-  if (known) return known;
-  return /(?:调用\s*|^)([a-zA-Z][a-zA-Z0-9_.:-]+)(?:\s|已|$)/.exec(message)?.[1];
-}
-
-function describeAgentActivity(phase: AgentActivityPhase, message?: string) {
-  const toolKey = activityToolKey(message);
-  const toolTitle = toolKey ? toolActivityLabels[toolKey] ?? "调用 MCP 扩展工具" : undefined;
-  if (phase === "filtering") return { title: "筛选关键请求", detail: message || "正在从会话流量中识别有效证据" };
-  if (phase === "analyzing") return { title: "编排分析任务", detail: message || "正在选择 Skill 并建立证据范围" };
-  if (phase === "runtime") return { title: "启动内置 Agent", detail: "正在创建隔离运行环境并加载分析能力" };
-  if (phase === "reasoning") return { title: "关联会话证据", detail: "正在核对请求、Hook、指纹与 Skill 证据" };
-  if (phase === "generating") return { title: "生成分析报告", detail: "证据收集完成，正在组织结论与依据" };
-  if (phase === "tool") return { title: toolTitle || "按需收集分析证据", detail: toolKey ? "正在通过本地 MCP 读取证据" : message || "内置 Agent 正在补充会话证据", toolKey };
-  if (phase === "tool-complete") return { title: toolTitle || "分析证据已返回", detail: "工具调用完成，证据已加入当前上下文", toolKey };
-  if (phase === "tool-error") return { title: toolTitle || "分析工具调用失败", detail: "未取得可用结果，内置 Agent 将继续评估现有证据", toolKey };
-  if (phase === "graph-node") return { title: "调整建议路径", detail: message || "Agent 正在根据证据选择下一项工作" };
-  if (phase === "graph-retry") return { title: "重新校验产物", detail: message || "产物未满足契约，正在补全" };
-  if (phase === "artifact-valid") return { title: "产物校验通过", detail: message || "当前 Skill 产物已经可供报告使用" };
-  if (phase === "artifact-invalid") return { title: "产物存在缺口", detail: message || "当前缺口将如实进入最终报告" };
-  if (phase === "graph-complete") return { title: "建议路径已收束", detail: message || "Graph 轨迹与 Skill 产物已归档" };
-  if (phase === "complete") return { title: "分析报告已生成", detail: "取证过程与报告内容已完成" };
-  return { title: "内置 Agent 执行未完成", detail: "执行已中断，请查看下方错误信息" };
-}
-
-function updateAgentActivities(
-  activities: AgentActivityEntry[],
-  phase: AgentActivityPhase,
-  message?: string,
-  occurredAt = Date.now(),
-) {
-  const now = occurredAt;
-  const descriptor = describeAgentActivity(phase, message);
-  const terminalStatus: AgentActivityStatus = phase === "error" || phase === "tool-error" || phase === "artifact-invalid"
-    ? "error"
-    : phase === "tool-complete" || phase === "artifact-valid" || phase === "graph-complete" || phase === "complete"
-      ? "complete"
-      : "running";
-
-  const last = activities.at(-1);
-  if (last?.phase === phase && last.status === terminalStatus && terminalStatus !== "running") {
-    return [...activities.slice(0, -1), { ...last, detail: descriptor.detail, updatedAt: now }];
-  }
-
-  if (phase === "tool-complete" || phase === "tool-error") {
-    let matchingIndex = -1;
-    for (let index = activities.length - 1; index >= 0; index -= 1) {
-      const item = activities[index];
-      if (item.status === "running" && item.phase === "tool" && (!descriptor.toolKey || item.toolKey === descriptor.toolKey)) {
-        matchingIndex = index;
-        break;
-      }
-    }
-    if (matchingIndex >= 0) {
-      return activities.map((item, index) => index === matchingIndex ? {
-        ...item,
-        status: terminalStatus,
-        detail: descriptor.detail,
-        updatedAt: now,
-      } : item).slice(-maxAgentActivities);
-    }
-  }
-
-  if (
-    last?.status === "running"
-    && last.phase === phase
-    && (
-      (Boolean(descriptor.toolKey) && last.toolKey === descriptor.toolKey)
-      || phase === "filtering"
-      || phase === "analyzing"
-      || phase === "runtime"
-      || phase === "reasoning"
-      || phase === "generating"
-    )
-  ) {
-    return [...activities.slice(0, -1), { ...last, detail: descriptor.detail, updatedAt: now }];
-  }
-
-  const settled = activities.map((item) => item.status === "running" ? {
-    ...item,
-    status: phase === "error" ? "error" as const : "complete" as const,
-    updatedAt: now,
-  } : item);
-  return [...settled, {
-    id: `${now}-${phase}-${settled.length}`,
-    phase,
-    status: terminalStatus,
-    title: descriptor.title,
-    detail: descriptor.detail,
-    toolKey: descriptor.toolKey,
-    startedAt: now,
-    updatedAt: now,
-  }].slice(-maxAgentActivities);
-}
-
-function restoreAgentActivities(activities: AnalysisActivity[]) {
-  return activities.reduce<AgentActivityEntry[]>((restored, activity) => {
-    if (!isAgentActivityPhase(activity.phase)) return restored;
-    return updateAgentActivities(restored, activity.phase, activity.message, activity.createdAt);
-  }, []);
 }
 
 function AnalysisGraphPanel({ run }: { run: AnalysisGraphRun }) {
@@ -1366,7 +1228,7 @@ function graphNodeStatusLabel(status: AnalysisGraphRun["nodes"][number]["status"
   })[status];
 }
 
-function AgentActivityPanel({ activities, skillRuns, running }: { activities: AgentActivityEntry[]; skillRuns: SkillRunAudit[]; running: boolean }) {
+function AgentActivityPanel({ activities, skillRuns, running, firstVisibleLatencyMs }: { activities: AgentActivityEntry[]; skillRuns: SkillRunAudit[]; running: boolean; firstVisibleLatencyMs?: number }) {
   const current = activities.at(-1)!;
   const recent = activities.slice(0, -1).slice(-3).reverse();
   const stateLabel = running ? "实时执行中" : current.status === "error" ? "执行中断" : "本次已完成";
@@ -1375,7 +1237,7 @@ function AgentActivityPanel({ activities, skillRuns, running }: { activities: Ag
       <header>
         <span className="agent-activity__mark"><Activity size={15} /></span>
         <div><span className="section-kicker">AGENT ACTIVITY</span><strong>内置 Agent 执行轨迹</strong></div>
-        <span className={`agent-activity__state is-${running ? "running" : current.status}`}><i />{stateLabel} · {activities.length} 步</span>
+        <span className={`agent-activity__state is-${running ? "running" : current.status}`}><i />{stateLabel} · {activities.length} 步{firstVisibleLatencyMs !== undefined ? ` · 首段 ${formatMetricDuration(firstVisibleLatencyMs)}` : ""}</span>
       </header>
       <div className={`agent-activity__current is-${current.status}`}>
         <span className="agent-activity__status-icon">
@@ -1422,6 +1284,11 @@ function formatDuration(durationMs: number | undefined, status: SkillRunAudit["s
   return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 1 : 0)} s`;
 }
 
+function formatMetricDuration(durationMs: number) {
+  if (durationMs < 1_000) return `${durationMs} ms`;
+  return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 1 : 0)} s`;
+}
+
 function formatActivityTime(value: number) {
   return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
@@ -1446,6 +1313,12 @@ function statusLabel(status: AnalysisReport["status"]) {
   if (status === "complete") return "已完成";
   if (status === "failed") return "失败";
   return "未完成";
+}
+
+function verificationVerdictLabel(verdict: AlgorithmReplayExportResult["gateVerdict"]) {
+  if (verdict === "verified") return "已验证";
+  if (verdict === "failed") return "失败";
+  return "不可验证";
 }
 
 function AnalysisProgress({ status, requestCount, keyCount, message, filteringEnabled }: { status: AnalysisStatus; requestCount: number; keyCount: number; message: string; filteringEnabled: boolean }) {

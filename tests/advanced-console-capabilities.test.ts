@@ -149,11 +149,13 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
 
 describe("agent wiring: catalog tools exist in MCP preview and agent_tools", () => {
   it("catalog agent tools are registered in capabilities mcpToolPreview and agent_tools.rs", async () => {
-    const [caps, agentTools, analysisView] = await Promise.all([
+    const [caps, agentTools, analysisView, analysisStreamState] = await Promise.all([
       readFile(new URL("../src/capabilities.ts", import.meta.url), "utf8"),
       readFile(new URL("../src-tauri/src/agent_tools.rs", import.meta.url), "utf8"),
       readFile(new URL("../src/components/AnalysisView.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../src/analysisStreamState.ts", import.meta.url), "utf8"),
     ]);
+    assert.match(analysisView, /from ["']\.\.\/analysisStreamState["']/);
 
     const required = [
       "shownet_get_tls_fingerprints",
@@ -173,7 +175,7 @@ describe("agent wiring: catalog tools exist in MCP preview and agent_tools", () 
         new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*=>`),
         `execute_read_tool must dispatch ${name}`,
       );
-      assert.ok(analysisView.includes(name), `AnalysisView tool labels missing ${name}`);
+      assert.ok(analysisStreamState.includes(name), `analysis stream tool labels missing ${name}`);
     }
 
     // Honesty in tool descriptions

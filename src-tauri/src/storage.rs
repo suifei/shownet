@@ -2506,6 +2506,16 @@ impl Storage {
         phase: &str,
         message: Option<&str>,
     ) -> Result<AnalysisActivity, String> {
+        self.append_analysis_activity_with_elapsed(analysis_id, phase, message, None)
+    }
+
+    pub fn append_analysis_activity_with_elapsed(
+        &self,
+        analysis_id: &str,
+        phase: &str,
+        message: Option<&str>,
+        elapsed_ms: Option<i64>,
+    ) -> Result<AnalysisActivity, String> {
         if !matches!(
             phase,
             "filtering"
@@ -2521,6 +2531,7 @@ impl Storage {
                 | "artifact-invalid"
                 | "graph-complete"
                 | "generating"
+                | "first-visible"
                 | "complete"
                 | "error"
         ) {
@@ -2530,9 +2541,9 @@ impl Storage {
         let message = message.unwrap_or_default();
         let id = self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO analysis_activities(analysis_id, phase, message, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![analysis_id, phase, message, created_at],
+                "INSERT INTO analysis_activities(analysis_id, phase, message, elapsed_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![analysis_id, phase, message, elapsed_ms, created_at],
             )?;
             Ok(connection.last_insert_rowid())
         })?;
@@ -2541,6 +2552,7 @@ impl Storage {
             analysis_id: analysis_id.to_string(),
             phase: phase.to_string(),
             message: message.to_string(),
+            elapsed_ms,
             created_at,
         })
     }
@@ -2551,9 +2563,9 @@ impl Storage {
     ) -> Result<Vec<AnalysisActivity>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, analysis_id, phase, message, created_at
+                "SELECT id, analysis_id, phase, message, elapsed_ms, created_at
                  FROM (
-                   SELECT id, analysis_id, phase, message, created_at
+                   SELECT id, analysis_id, phase, message, elapsed_ms, created_at
                    FROM analysis_activities
                    WHERE analysis_id = ?1
                    ORDER BY id DESC
@@ -2568,7 +2580,8 @@ impl Storage {
                         analysis_id: row.get(1)?,
                         phase: row.get(2)?,
                         message: row.get(3)?,
-                        created_at: row.get(4)?,
+                        elapsed_ms: row.get(4)?,
+                        created_at: row.get(5)?,
                     })
                 })?
                 .collect();
@@ -6846,6 +6859,32 @@ fn apply_migrations(connection: &Connection) -> Result<(), String> {
                VALUES (22, unixepoch('now') * 1000);",
         )
         .map_err(|error| format!("数据库迁移 v22 失败: {error}"))?;
+    let analysis_activity_has_elapsed_ms = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(analysis_activities)")
+            .map_err(|error| error.to_string())?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        columns.iter().any(|column| column == "elapsed_ms")
+    };
+    if !analysis_activity_has_elapsed_ms {
+        connection
+            .execute(
+                "ALTER TABLE analysis_activities ADD COLUMN elapsed_ms INTEGER",
+                [],
+            )
+            .map_err(|error| format!("数据库迁移 v23 增加 elapsed_ms 失败: {error}"))?;
+    }
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+             VALUES (23, unixepoch('now') * 1000)",
+            [],
+        )
+        .map_err(|error| format!("记录数据库迁移 v23 失败: {error}"))?;
     Ok(())
 }
 
@@ -9009,6 +9048,14 @@ mod tests {
             )
             .unwrap();
         storage
+            .append_analysis_activity_with_elapsed(
+                &report.id,
+                "first-visible",
+                Some("首段报告内容已显示 · 420 ms"),
+                Some(420),
+            )
+            .unwrap();
+        storage
             .append_analysis_activity(&report.id, "complete", Some("分析报告已生成"))
             .unwrap();
         storage
@@ -9075,11 +9122,13 @@ mod tests {
         );
         assert_eq!(storage.list_analysis_messages(&report.id).unwrap().len(), 2);
         let activities = storage.list_analysis_activities(&report.id).unwrap();
-        assert_eq!(activities.len(), 4);
+        assert_eq!(activities.len(), 5);
         assert_eq!(activities[0].phase, "filtering");
         assert_eq!(activities[1].phase, "tool");
         assert_eq!(activities[2].phase, "tool-complete");
-        assert_eq!(activities[3].phase, "complete");
+        assert_eq!(activities[3].phase, "first-visible");
+        assert_eq!(activities[3].elapsed_ms, Some(420));
+        assert_eq!(activities[4].phase, "complete");
         assert_eq!(activities[1].analysis_id, report.id);
         assert!(storage
             .append_analysis_activity(&report.id, "delta", None)
@@ -9103,7 +9152,7 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].id, second_report.id);
         assert_eq!(reports[1].id, report.id);
-        let migrations: (i64, i64, i64) = storage
+        let migrations: (i64, i64, i64, i64) = storage
             .with_connection(|connection| {
                 Ok((
                     connection.query_row(
@@ -9121,10 +9170,15 @@ mod tests {
                         [],
                         |row| row.get(0),
                     )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version = 23",
+                        [],
+                        |row| row.get(0),
+                    )?,
                 ))
             })
             .unwrap();
-        assert_eq!(migrations, (1, 1, 1));
+        assert_eq!(migrations, (1, 1, 1, 1));
     }
 
     #[test]
