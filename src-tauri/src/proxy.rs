@@ -8776,7 +8776,6 @@ mod tests {
         tls_outbound::set_active_preset("chrome150").unwrap();
     }
 
-    #[test]
     /// The panel compares the two sides; before this the outbound half had no
     /// JA4 field at all, so the measurement was taken, written into prose, and
     /// dropped. Comparing the JA3s instead cannot work: Chrome randomises the
@@ -8807,6 +8806,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn mitm_fingerprint_never_preclaims_ja3_parity() {
         let inbound = crate::tls_fingerprint::ClientTlsFingerprint {
             ja3: "a".into(),

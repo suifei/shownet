@@ -27,6 +27,11 @@ use boa_engine::{js_string, Context, JsValue, NativeFunction, Source};
 use md5::Md5;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::io::{self, Read};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Candidate implementation supplied by the analysis agent.
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +51,30 @@ impl Implementation {
             entry_point: "computeSignature".into(),
         }
     }
+
+    pub(crate) fn sha256(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"shownet-algorithm-implementation-v1\0");
+        hasher.update(self.normalized_language().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.entry_point.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.source.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    pub(crate) fn normalized_language(&self) -> String {
+        let language = self.language.trim().to_ascii_lowercase();
+        match language.as_str() {
+            "javascript" | "js" | "node" | "nodejs" => "javascript".to_string(),
+            "typescript" | "ts" | "tsx" => "typescript".to_string(),
+            "python" | "python3" | "py" => "python".to_string(),
+            "go" | "golang" => "go".to_string(),
+            "java" => "java".to_string(),
+            "csharp" | "c#" | "cs" => "csharp".to_string(),
+            _ => language,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -54,6 +83,7 @@ pub struct CaseOutcome {
     pub case_id: String,
     pub origin: String,
     pub field: String,
+    pub evidence_sha256: String,
     pub passed: bool,
     pub expected: String,
     pub actual: Option<String>,
@@ -69,6 +99,10 @@ pub struct VerificationReport {
     pub step_id: String,
     #[serde(default)]
     pub step_name: String,
+    /// Hash of the normalized language, entry point and exact source this run loaded.
+    /// A passing report may only license an implementation with the same hash.
+    #[serde(default)]
+    pub implementation_sha256: String,
     pub language: String,
     pub runtime: String,
     pub verdict: String,
@@ -90,6 +124,7 @@ impl VerificationReport {
         Self {
             step_id: String::new(),
             step_name: String::new(),
+            implementation_sha256: String::new(),
             language: language.to_string(),
             runtime: runtime.to_string(),
             verdict: "unverifiable".into(),
@@ -138,19 +173,63 @@ impl VerificationReport {
 /// An agent-written function that does not terminate must not hang the app.
 const LOOP_LIMIT: u64 = 5_000_000;
 const RECURSION_LIMIT: usize = 512;
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
+const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn verify(implementation: &Implementation, cases: &[GroundTruthCase]) -> VerificationReport {
-    match implementation.language.to_ascii_lowercase().as_str() {
-        "javascript" | "js" | "typescript" | "ts" => verify_javascript(implementation, cases),
-        "python" | "python3" | "py" => verify_python(implementation, cases),
-        "go" | "golang" => verify_go(implementation, cases),
-        "java" => verify_java(implementation, cases),
-        "csharp" | "c#" | "cs" => verify_csharp(implementation, cases),
-        other => VerificationReport::unverifiable(
-            other,
-            "none",
-            &format!("no verification runtime for {other}; the candidate was not executed"),
-        ),
+    let language = implementation.normalized_language();
+    let mut report = if !is_portable_entry_point(&implementation.entry_point) {
+        VerificationReport::unverifiable(
+            &language,
+            expected_runtime(&language),
+            "entry point must be a simple ASCII identifier; the candidate was not executed",
+        )
+    } else {
+        match language.as_str() {
+            "javascript" | "typescript" => verify_javascript(implementation, cases),
+            "python" => verify_python(implementation, cases),
+            "go" => verify_go(implementation, cases),
+            "java" => verify_java(implementation, cases),
+            "csharp" => verify_csharp(implementation, cases),
+            other => VerificationReport::unverifiable(
+                other,
+                "none",
+                &format!("no verification runtime for {other}; the candidate was not executed"),
+            ),
+        }
+    };
+    report.language = language;
+    report.implementation_sha256 = implementation.sha256();
+    if matches!(
+        report.language.as_str(),
+        "python" | "go" | "java" | "csharp"
+    ) {
+        report.notes.push(
+            "security boundary: this local toolchain is time-limited but not an OS sandbox; output verification does not establish that candidate filesystem, process, or network behavior is safe"
+                .to_string(),
+        );
+    }
+    report
+}
+
+fn is_portable_entry_point(entry_point: &str) -> bool {
+    let mut characters = entry_point.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn expected_runtime(language: &str) -> &'static str {
+    match language {
+        "javascript" | "typescript" => "boa",
+        "python" => "python3",
+        "go" => "go",
+        "java" => "javac+java",
+        "csharp" => "dotnet",
+        _ => "none",
     }
 }
 
@@ -167,23 +246,41 @@ fn verify_javascript(
         );
     }
 
+    // Load once and reuse the same realm for every case. Exported JavaScript is
+    // a module whose candidate state also survives between calls; rebuilding a
+    // fresh realm here could verify code whose second runtime call behaves
+    // differently from its second verification case.
+    let mut context = Context::default();
+    context
+        .runtime_limits_mut()
+        .set_loop_iteration_limit(LOOP_LIMIT);
+    context
+        .runtime_limits_mut()
+        .set_recursion_limit(RECURSION_LIMIT);
+    let load_error = (|| -> Result<(), String> {
+        register_primitives(&mut context)?;
+        context
+            .eval(Source::from_bytes(CRYPTO_BOOTSTRAP.as_bytes()))
+            .map_err(|error| format!("crypto bootstrap failed: {error}"))?;
+        context
+            .eval(Source::from_bytes(implementation.source.as_bytes()))
+            .map_err(|error| format!("candidate failed to load: {error}"))?;
+        Ok(())
+    })()
+    .err();
+
     let mut outcomes = Vec::new();
     for case in cases {
-        // A fresh context per case: state left behind by one case must not be
-        // able to make the next one pass.
-        let mut context = Context::default();
-        context
-            .runtime_limits_mut()
-            .set_loop_iteration_limit(LOOP_LIMIT);
-        context
-            .runtime_limits_mut()
-            .set_recursion_limit(RECURSION_LIMIT);
-
-        let outcome = match run_javascript_case(&mut context, implementation, case) {
+        let result = match &load_error {
+            Some(error) => Err(error.clone()),
+            None => run_javascript_case(&mut context, implementation, case),
+        };
+        let outcome = match result {
             Ok(actual) => CaseOutcome {
                 case_id: case.id.clone(),
                 origin: case.origin.clone(),
                 field: case.field.clone(),
+                evidence_sha256: case.evidence_sha256(),
                 passed: actual == case.expected,
                 expected: case.expected.clone(),
                 actual: Some(actual),
@@ -193,6 +290,7 @@ fn verify_javascript(
                 case_id: case.id.clone(),
                 origin: case.origin.clone(),
                 field: case.field.clone(),
+                evidence_sha256: case.evidence_sha256(),
                 passed: false,
                 expected: case.expected.clone(),
                 actual: None,
@@ -210,14 +308,6 @@ fn run_javascript_case(
     implementation: &Implementation,
     case: &GroundTruthCase,
 ) -> Result<String, String> {
-    register_primitives(context)?;
-    context
-        .eval(Source::from_bytes(CRYPTO_BOOTSTRAP.as_bytes()))
-        .map_err(|error| format!("crypto bootstrap failed: {error}"))?;
-    context
-        .eval(Source::from_bytes(implementation.source.as_bytes()))
-        .map_err(|error| format!("candidate failed to load: {error}"))?;
-
     let input = serde_json::to_string(&case.input).map_err(|error| error.to_string())?;
     let call = format!(
         "(function(){{ var out = {entry}(JSON.parse({input})); \
@@ -414,7 +504,6 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             "origin": case.origin,
             "field": case.field,
             "input": case.input,
-            "expected": case.expected,
         })).collect::<Vec<_>>(),
     });
 
@@ -430,10 +519,9 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         );
     }
 
-    let output = std::process::Command::new(&python)
-        .arg("run_verify.py")
-        .current_dir(&dir)
-        .output();
+    let mut command = Command::new(&python);
+    command.arg("run_verify.py").current_dir(&dir);
+    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
@@ -443,52 +531,26 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             "verification run failed to start",
         );
     };
+    let TimedCommandOutput::Completed(output) = output else {
+        return timeout_failure("python", &python, cases);
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = stdout.lines().last() else {
-        return VerificationReport::unverifiable(
+    match outcomes_from_stdout(&stdout, cases) {
+        Some(outcomes) => VerificationReport::unverifiable("python", &python, "").settle(outcomes),
+        None => build_failure(
             "python",
             &python,
-            "verification run produced no result",
-        );
-    };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
-        return VerificationReport::unverifiable(
-            "python",
-            &python,
+            cases,
             &format!(
-                "verification run produced no parsable result: {}",
+                "verification runner returned invalid case results\n{}",
                 String::from_utf8_lossy(&output.stderr)
-                    .lines()
-                    .last()
-                    .unwrap_or("")
             ),
-        );
-    };
-
-    let outcomes = parsed
-        .get("cases")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| CaseOutcome {
-                    case_id: item["id"].as_str().unwrap_or_default().to_string(),
-                    origin: item["origin"].as_str().unwrap_or_default().to_string(),
-                    field: item["field"].as_str().unwrap_or_default().to_string(),
-                    passed: item["passed"].as_bool().unwrap_or(false),
-                    expected: item["expected"].as_str().unwrap_or_default().to_string(),
-                    actual: item["actual"].as_str().map(str::to_string),
-                    error: item["error"].as_str().map(str::to_string),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    VerificationReport::unverifiable("python", &python, "").settle(outcomes)
+        ),
+    }
 }
 
 /// Driver executed inside the candidate's own runtime. Kept deliberately small:
-/// it imports, calls, compares, and reports — it never repairs a failing answer.
+/// it imports, calls, and reports actual values — it never sees the expected answer.
 const PYTHON_RUNNER: &str = r#"import json, sys, traceback
 
 with open("cases.json", "r", encoding="utf-8") as handle:
@@ -496,14 +558,16 @@ with open("cases.json", "r", encoding="utf-8") as handle:
 
 results = []
 try:
-    import candidate
-    entry = getattr(candidate, payload["entryPoint"])
+    with open("candidate.py", "r", encoding="utf-8") as handle:
+        source = handle.read()
+    namespace = {"__name__": "shownet_verified_candidate"}
+    exec(compile(source, "<shownet-verified-candidate>", "exec"), namespace)
+    entry = namespace[payload["entryPoint"]]
 except Exception:
     for case in payload["cases"]:
         results.append({
             "id": case["id"], "origin": case["origin"], "field": case["field"],
-            "passed": False, "expected": case["expected"], "actual": None,
-            "error": traceback.format_exc(limit=2).strip().splitlines()[-1],
+            "actual": None, "error": traceback.format_exc(limit=2).strip().splitlines()[-1],
         })
     print(json.dumps({"cases": results}))
     sys.exit(0)
@@ -511,12 +575,11 @@ except Exception:
 for case in payload["cases"]:
     record = {
         "id": case["id"], "origin": case["origin"], "field": case["field"],
-        "expected": case["expected"], "actual": None, "error": None, "passed": False,
+        "actual": None, "error": None,
     }
     try:
         actual = entry(case["input"])
         record["actual"] = None if actual is None else str(actual)
-        record["passed"] = record["actual"] == case["expected"]
     except Exception:
         record["error"] = traceback.format_exc(limit=2).strip().splitlines()[-1]
     results.append(record)
@@ -548,11 +611,244 @@ fn staging_dir(tag: &str) -> Option<std::path::PathBuf> {
 }
 
 fn tool_available(binary: &str, arg: &str) -> bool {
-    std::process::Command::new(binary)
-        .arg(arg)
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new(binary);
+    command.arg(arg);
+    matches!(
+        run_with_timeout(&mut command, TOOL_PROBE_TIMEOUT),
+        Ok(TimedCommandOutput::Completed(output)) if output.status.success()
+    )
+}
+
+enum TimedCommandOutput {
+    Completed(Output),
+    TimedOut,
+}
+
+struct ProcessContainment {
+    #[cfg(target_os = "windows")]
+    job: Option<WindowsJob>,
+}
+
+impl ProcessContainment {
+    fn attach(_child: &Child) -> Self {
+        Self {
+            #[cfg(target_os = "windows")]
+            job: WindowsJob::attach(_child),
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        #[cfg(unix)]
+        {
+            let process_group = i32::try_from(child.id()).unwrap_or(i32::MAX);
+            // The child is the process-group leader, so a negative PID reaches
+            // its descendants as well. This also closes inherited output pipes
+            // when the driver exits but a candidate-created child does not.
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(job) = &self.job {
+                job.terminate();
+            } else {
+                terminate_windows_process_tree(child.id());
+            }
+        }
+        let _ = child.kill();
+    }
+
+    fn close(self) {
+        #[cfg(target_os = "windows")]
+        drop(self.job);
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsJob {
+    fn attach(child: &Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return None;
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        } != 0;
+        let assigned = configured
+            && unsafe {
+                AssignProcessToJobObject(
+                    handle,
+                    child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                )
+            } != 0;
+        if !assigned {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return None;
+        }
+        Some(Self { handle })
+    }
+
+    fn terminate(&self) {
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_windows_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn configure_process_containment(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+}
+
+fn drain_output<R>(mut reader: R) -> JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut tail = VecDeque::new();
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            if read >= MAX_CAPTURED_OUTPUT_BYTES {
+                tail.clear();
+                tail.extend(&buffer[read - MAX_CAPTURED_OUTPUT_BYTES..read]);
+                continue;
+            }
+            let overflow = tail
+                .len()
+                .saturating_add(read)
+                .saturating_sub(MAX_CAPTURED_OUTPUT_BYTES);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+            tail.extend(&buffer[..read]);
+        }
+        Ok(tail.into_iter().collect())
+    })
+}
+
+fn join_output(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("candidate output reader panicked"))?
+}
+
+fn run_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<TimedCommandOutput> {
+    configure_process_containment(command);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let containment = ProcessContainment::attach(&child);
+    let stdout = drain_output(
+        child
+            .stdout
+            .take()
+            .expect("stdout was configured as a pipe"),
+    );
+    let stderr = drain_output(
+        child
+            .stderr
+            .take()
+            .expect("stderr was configured as a pipe"),
+    );
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                containment.terminate(&mut child);
+                containment.close();
+                return Ok(TimedCommandOutput::Completed(Output {
+                    status,
+                    stdout: join_output(stdout)?,
+                    stderr: join_output(stderr)?,
+                }));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                containment.terminate(&mut child);
+                let _ = child.wait();
+                containment.close();
+                let _ = join_output(stdout);
+                let _ = join_output(stderr);
+                return Err(error);
+            }
+        }
+        if started_at.elapsed() >= timeout {
+            containment.terminate(&mut child);
+            let _ = child.wait();
+            containment.close();
+            let _ = join_output(stdout);
+            let _ = join_output(stderr);
+            return Ok(TimedCommandOutput::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn timeout_failure(language: &str, runtime: &str, cases: &[GroundTruthCase]) -> VerificationReport {
+    build_failure(
+        language,
+        runtime,
+        cases,
+        &format!(
+            "candidate exceeded the {} ms execution limit",
+            CANDIDATE_TIMEOUT.as_millis()
+        ),
+    )
 }
 
 fn cases_payload(implementation: &Implementation, cases: &[GroundTruthCase]) -> String {
@@ -563,36 +859,58 @@ fn cases_payload(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             "origin": case.origin,
             "field": case.field,
             "input": case.input,
-            "expected": case.expected,
         })).collect::<Vec<_>>(),
     })
     .to_string()
 }
 
-/// Read the driver's verdict line. Drivers print exactly one JSON object last;
-/// anything a compiler wrote before it is ignored.
-fn outcomes_from_stdout(stdout: &str) -> Option<Vec<CaseOutcome>> {
+/// Read actual values from the driver and bind them back to the original cases.
+/// The child process is not trusted to decide whether it passed, nor does its
+/// payload contain the expected values.
+fn outcomes_from_stdout(stdout: &str, cases: &[GroundTruthCase]) -> Option<Vec<CaseOutcome>> {
     let line = stdout
         .lines()
         .rev()
         .find(|line| line.trim_start().starts_with('{'))?;
     let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    Some(
-        parsed
-            .get("cases")?
-            .as_array()?
-            .iter()
-            .map(|item| CaseOutcome {
-                case_id: item["id"].as_str().unwrap_or_default().to_string(),
-                origin: item["origin"].as_str().unwrap_or_default().to_string(),
-                field: item["field"].as_str().unwrap_or_default().to_string(),
-                passed: item["passed"].as_bool().unwrap_or(false),
-                expected: item["expected"].as_str().unwrap_or_default().to_string(),
-                actual: item["actual"].as_str().map(str::to_string),
-                error: item["error"].as_str().map(str::to_string),
-            })
-            .collect(),
-    )
+    let items = parsed.get("cases")?.as_array()?;
+    if items.len() != cases.len() {
+        return None;
+    }
+
+    let mut outcomes = Vec::with_capacity(cases.len());
+    for (item, case) in items.iter().zip(cases) {
+        if item.get("id")?.as_str()? != case.id
+            || item.get("origin")?.as_str()? != case.origin
+            || item.get("field")?.as_str()? != case.field
+        {
+            return None;
+        }
+        let actual = match item.get("actual")? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => Some(value.clone()),
+            _ => return None,
+        };
+        let mut error = match item.get("error")? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => Some(value.clone()),
+            _ => return None,
+        };
+        if actual.is_none() && error.is_none() {
+            error = Some("candidate returned no value".to_string());
+        }
+        outcomes.push(CaseOutcome {
+            case_id: case.id.clone(),
+            origin: case.origin.clone(),
+            field: case.field.clone(),
+            evidence_sha256: case.evidence_sha256(),
+            passed: error.is_none() && actual.as_deref() == Some(case.expected.as_str()),
+            expected: case.expected.clone(),
+            actual,
+            error,
+        });
+    }
+    Some(outcomes)
 }
 
 /// A build that never produced a verdict is one failure per case, carrying the
@@ -617,6 +935,7 @@ fn build_failure(
                 case_id: case.id.clone(),
                 origin: case.origin.clone(),
                 field: case.field.clone(),
+                evidence_sha256: case.evidence_sha256(),
                 passed: false,
                 expected: case.expected.clone(),
                 actual: None,
@@ -659,20 +978,53 @@ fn verify_go(implementation: &Implementation, cases: &[GroundTruthCase]) -> Veri
         return VerificationReport::unverifiable("go", "go", "could not stage the candidate");
     }
 
-    let output = std::process::Command::new("go")
-        .args(["run", "."])
+    let executable_name = if cfg!(windows) {
+        "shownetverify.exe"
+    } else {
+        "shownetverify"
+    };
+    let mut build = Command::new("go");
+    build
+        .args(["build", "-o", executable_name, "."])
         .current_dir(&dir)
         // Keep the module hermetic: a candidate must not pull dependencies.
         .env("GOFLAGS", "-mod=mod")
         .env("GO111MODULE", "on")
-        .output();
+        .env("GOPROXY", "off")
+        .env("GOSUMDB", "off");
+    match run_with_timeout(&mut build, BUILD_TIMEOUT) {
+        Ok(TimedCommandOutput::Completed(output)) if output.status.success() => {}
+        Ok(TimedCommandOutput::Completed(output)) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return build_failure("go", "go", cases, &String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(TimedCommandOutput::TimedOut) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return VerificationReport::unverifiable(
+                "go",
+                "go",
+                "Go build exceeded the verification build limit",
+            );
+        }
+        Err(_) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return VerificationReport::unverifiable("go", "go", "compiler failed to start");
+        }
+    }
+
+    let mut command = Command::new(dir.join(executable_name));
+    command.current_dir(&dir);
+    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
         return VerificationReport::unverifiable("go", "go", "verification run failed to start");
     };
+    let TimedCommandOutput::Completed(output) = output else {
+        return timeout_failure("go", "go", cases);
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match outcomes_from_stdout(&stdout) {
+    match outcomes_from_stdout(&stdout, cases) {
         Some(outcomes) => VerificationReport::unverifiable("go", "go", "").settle(outcomes),
         None => build_failure("go", "go", cases, &String::from_utf8_lossy(&output.stderr)),
     }
@@ -710,15 +1062,24 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
         return VerificationReport::unverifiable("java", "java", "could not stage the candidate");
     }
 
-    let compile = std::process::Command::new("javac")
+    let mut compile_command = Command::new("javac");
+    compile_command
         .args(["Candidate.java", "Driver.java"])
-        .current_dir(&dir)
-        .output();
+        .current_dir(&dir);
+    let compile = run_with_timeout(&mut compile_command, BUILD_TIMEOUT);
     match compile {
-        Ok(compile) if !compile.status.success() => {
+        Ok(TimedCommandOutput::Completed(compile)) if !compile.status.success() => {
             let stderr = String::from_utf8_lossy(&compile.stderr).to_string();
             std::fs::remove_dir_all(&dir).ok();
             return build_failure("java", "javac", cases, &stderr);
+        }
+        Ok(TimedCommandOutput::TimedOut) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return VerificationReport::unverifiable(
+                "java",
+                "javac",
+                "Java build exceeded the verification build limit",
+            );
         }
         Err(_) => {
             std::fs::remove_dir_all(&dir).ok();
@@ -727,10 +1088,9 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
         _ => {}
     }
 
-    let output = std::process::Command::new("java")
-        .arg("Driver")
-        .current_dir(&dir)
-        .output();
+    let mut command = Command::new("java");
+    command.arg("Driver").current_dir(&dir);
+    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
@@ -740,8 +1100,11 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
             "verification run failed to start",
         );
     };
+    let TimedCommandOutput::Completed(output) = output else {
+        return timeout_failure("java", "java", cases);
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match outcomes_from_stdout(&stdout) {
+    match outcomes_from_stdout(&stdout, cases) {
         Some(outcomes) => VerificationReport::unverifiable("java", "java", "").settle(outcomes),
         None => build_failure(
             "java",
@@ -795,19 +1158,48 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         );
     }
 
-    let output = std::process::Command::new("dotnet")
-        .args([
-            "run",
-            "--project",
-            "verify.csproj",
-            "-v",
-            "quiet",
-            "--nologo",
-        ])
+    let mut build = Command::new("dotnet");
+    build
+        .args(["build", "verify.csproj", "-v", "quiet", "--nologo"])
         .current_dir(&dir)
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
-        .env("DOTNET_NOLOGO", "1")
-        .output();
+        .env("DOTNET_NOLOGO", "1");
+    match run_with_timeout(&mut build, BUILD_TIMEOUT) {
+        Ok(TimedCommandOutput::Completed(output)) if output.status.success() => {}
+        Ok(TimedCommandOutput::Completed(output)) => {
+            let message = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return build_failure("csharp", "dotnet", cases, &message);
+        }
+        Ok(TimedCommandOutput::TimedOut) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return VerificationReport::unverifiable(
+                "csharp",
+                "dotnet",
+                "C# build exceeded the verification build limit",
+            );
+        }
+        Err(_) => {
+            std::fs::remove_dir_all(&dir).ok();
+            return VerificationReport::unverifiable(
+                "csharp",
+                "dotnet",
+                "compiler failed to start",
+            );
+        }
+    }
+
+    let mut command = Command::new("dotnet");
+    command
+        .arg(dir.join("bin/Debug/net8.0/shownetverify.dll"))
+        .current_dir(&dir)
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+        .env("DOTNET_NOLOGO", "1");
+    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
@@ -817,8 +1209,11 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
             "verification run failed to start",
         );
     };
+    let TimedCommandOutput::Completed(output) = output else {
+        return timeout_failure("csharp", "dotnet", cases);
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match outcomes_from_stdout(&stdout) {
+    match outcomes_from_stdout(&stdout, cases) {
         Some(outcomes) => VerificationReport::unverifiable("csharp", "dotnet", "").settle(outcomes),
         None => build_failure(
             "csharp",
@@ -862,7 +1257,7 @@ fn java_cases_literal(cases: &[GroundTruthCase]) -> String {
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "    cases.add(new Case({id}, {origin}, {field}, new Request({method}, {host}, {path}, {query}, headers({headers}), {body}), {expected}));\n",
+            "    cases.add(new Case({id}, {origin}, {field}, new Request({method}, {host}, {path}, {query}, headers({headers}), {body})));\n",
             id = quote(&case.id),
             origin = quote(&case.origin),
             field = quote(&case.field),
@@ -871,7 +1266,6 @@ fn java_cases_literal(cases: &[GroundTruthCase]) -> String {
             path = nullable(input.get("path")),
             query = nullable(input.get("query")),
             body = nullable(input.get("body")),
-            expected = quote(&case.expected),
         ));
     }
     out
@@ -897,21 +1291,18 @@ type Request struct {
 }
 
 type verifyCase struct {
-	ID       string  `json:"id"`
-	Origin   string  `json:"origin"`
-	Field    string  `json:"field"`
-	Input    Request `json:"input"`
-	Expected string  `json:"expected"`
+	ID     string  `json:"id"`
+	Origin string  `json:"origin"`
+	Field  string  `json:"field"`
+	Input  Request `json:"input"`
 }
 
 type verifyResult struct {
-	ID       string  `json:"id"`
-	Origin   string  `json:"origin"`
-	Field    string  `json:"field"`
-	Passed   bool    `json:"passed"`
-	Expected string  `json:"expected"`
-	Actual   *string `json:"actual"`
-	Error    *string `json:"error"`
+	ID     string  `json:"id"`
+	Origin string  `json:"origin"`
+	Field  string  `json:"field"`
+	Actual *string `json:"actual"`
+	Error  *string `json:"error"`
 }
 
 func main() {
@@ -930,7 +1321,7 @@ func main() {
 
 	results := make([]verifyResult, 0, len(payload.Cases))
 	for _, c := range payload.Cases {
-		result := verifyResult{ID: c.ID, Origin: c.Origin, Field: c.Field, Expected: c.Expected}
+		result := verifyResult{ID: c.ID, Origin: c.Origin, Field: c.Field}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -940,7 +1331,6 @@ func main() {
 			}()
 			actual := __ENTRY__(c.Input)
 			result.Actual = &actual
-			result.Passed = actual == c.Expected
 		}()
 		results = append(results, result)
 	}
@@ -958,7 +1348,7 @@ import java.util.Map;
 record Request(String method, String host, String path, String query, Map<String, String> headers, String body) {}
 
 public class Driver {
-    record Case(String id, String origin, String field, Request input, String expected) {}
+    record Case(String id, String origin, String field, Request input) {}
 
     static Map<String, String> headers(String... kv) {
         Map<String, String> map = new LinkedHashMap<>();
@@ -1011,10 +1401,8 @@ __CASES__
             out.append("{\"id\":").append(quote(c.id()))
                .append(",\"origin\":").append(quote(c.origin()))
                .append(",\"field\":").append(quote(c.field()))
-               .append(",\"expected\":").append(quote(c.expected()))
                .append(",\"actual\":").append(quote(actual))
                .append(",\"error\":").append(quote(error))
-               .append(",\"passed\":").append(actual != null && actual.equals(c.expected()))
                .append('}');
         }
         System.out.println(out.append("]}"));
@@ -1038,6 +1426,8 @@ const CSHARP_PROJECT: &str = r#"<Project Sdk="Microsoft.NET.Sdk">
 const CSHARP_RUNNER: &str = r#"using System.Text.Json;
 using System.Text.Json.Serialization;
 
+namespace ShowNetReplay;
+
 /// <summary>The shape a candidate is verified against; identical to the generated package's.</summary>
 public sealed record Request(
     [property: JsonPropertyName("method")] string Method,
@@ -1051,8 +1441,7 @@ internal sealed record VerifyCase(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("origin")] string Origin,
     [property: JsonPropertyName("field")] string Field,
-    [property: JsonPropertyName("input")] Request Input,
-    [property: JsonPropertyName("expected")] string Expected);
+    [property: JsonPropertyName("input")] Request Input);
 
 internal sealed record VerifyPayload(
     [property: JsonPropertyName("cases")] List<VerifyCase> Cases);
@@ -1087,10 +1476,8 @@ internal static class Driver
                 ["id"] = item.Id,
                 ["origin"] = item.Origin,
                 ["field"] = item.Field,
-                ["expected"] = item.Expected,
                 ["actual"] = actual,
                 ["error"] = error,
-                ["passed"] = actual is not null && actual == item.Expected,
             });
         }
         Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?> { ["cases"] = results }));
@@ -1153,6 +1540,25 @@ mod tests {
         let report = verify(&Implementation::new("javascript", source), &cases);
         assert_eq!(report.verdict, "verified", "{report:?}");
         assert_eq!(report.passed, 1);
+    }
+
+    #[test]
+    fn javascript_verification_uses_the_same_load_once_lifecycle_as_export() {
+        let source = r#"
+            let calls = 0;
+            function computeSignature(input) {
+              calls += 1;
+              return `${calls}:${input.data}`;
+            }
+        "#;
+        let cases = vec![
+            case("c1", "hook", json!({"data": "a"}), "1:a"),
+            case("c2", "hook", json!({"data": "b"}), "2:b"),
+        ];
+
+        let report = verify(&Implementation::new("javascript", source), &cases);
+        assert_eq!(report.verdict, "verified", "{report:?}");
+        assert_eq!(report.passed, 2);
     }
 
     /// The case that matters most: a candidate that is plausible and wrong must
@@ -1267,6 +1673,204 @@ mod tests {
         );
         assert_eq!(report.verdict, "unverifiable", "{report:?}");
         assert!(!report.is_verified());
+    }
+
+    #[test]
+    fn verification_keeps_typescript_distinct_from_javascript() {
+        let source = "function computeSignature(input) { return input.value; }";
+        let report = verify(
+            &Implementation::new("typescript", source),
+            &[case("c1", "request", json!({"value": "ok"}), "ok")],
+        );
+
+        assert_eq!(report.verdict, "verified", "{report:?}");
+        assert_eq!(report.language, "typescript");
+        assert_eq!(report.runtime, "boa");
+    }
+
+    #[test]
+    fn aliases_share_the_export_language_and_implementation_hash() {
+        let source = "function computeSignature(input) { return input.value; }";
+        let javascript = Implementation::new("javascript", source);
+        let alias = Implementation::new("js", source);
+        let report = verify(
+            &alias,
+            &[case("c1", "request", json!({"value": "ok"}), "ok")],
+        );
+
+        assert_eq!(report.language, "javascript");
+        assert_eq!(report.implementation_sha256, javascript.sha256());
+    }
+
+    #[test]
+    fn an_entry_point_cannot_inject_code_into_a_runner_or_export() {
+        let mut implementation =
+            Implementation::new("javascript", "function computeSignature() { return 'ok'; }");
+        implementation.entry_point = "computeSignature; globalThis.injected = true".into();
+        let report = verify(&implementation, &[case("c1", "request", json!({}), "ok")]);
+
+        assert_eq!(report.verdict, "unverifiable", "{report:?}");
+        assert!(report.notes[0].contains("simple ASCII identifier"));
+    }
+
+    #[test]
+    fn a_non_terminating_python_candidate_is_stopped() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = "def computeSignature(request):\n    while True:\n        pass\n";
+        let started_at = Instant::now();
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "ok")],
+        );
+
+        assert_eq!(report.verdict, "failed", "{report:?}");
+        assert!(
+            started_at.elapsed() < Duration::from_secs(10),
+            "candidate timeout did not return promptly"
+        );
+        assert!(report.cases[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("execution limit")));
+    }
+
+    #[test]
+    fn a_python_candidate_cannot_keep_the_verifier_waiting_with_an_inherited_child_pipe() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = r#"
+import subprocess, sys
+
+def computeSignature(request):
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+    return "expected-value"
+"#;
+        let started_at = Instant::now();
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "expected-value")],
+        );
+
+        assert_eq!(report.verdict, "verified", "{report:?}");
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "the verifier waited for a candidate-created child process"
+        );
+    }
+
+    #[test]
+    fn verbose_python_output_does_not_fill_the_verifier_pipe() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = r#"
+def computeSignature(request):
+    print("x" * (512 * 1024))
+    return "expected-value"
+"#;
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "expected-value")],
+        );
+
+        assert_eq!(report.verdict, "verified", "{report:?}");
+    }
+
+    #[test]
+    fn external_candidates_cannot_read_expected_values_from_the_driver_payload() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = r#"
+import json
+
+def computeSignature(request):
+    with open("cases.json", "r", encoding="utf-8") as handle:
+        return json.load(handle)["cases"][0]["expected"]
+"#;
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "expected-value")],
+        );
+
+        assert_eq!(report.verdict, "failed", "{report:?}");
+        assert!(!cases_payload(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "expected-value"),]
+        )
+        .contains("expected-value"));
+    }
+
+    #[test]
+    fn a_candidate_cannot_self_report_a_pass_without_an_actual_value() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = r#"
+import json, os
+
+print(json.dumps({"cases": [{
+    "id": "c1", "origin": "request", "field": "x-signature",
+    "passed": True, "expected": "expected-value", "actual": None, "error": None,
+}]}), flush=True)
+os._exit(0)
+
+def computeSignature(request):
+    return "expected-value"
+"#;
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case("c1", "request", json!({}), "expected-value")],
+        );
+
+        assert_eq!(report.verdict, "failed", "{report:?}");
+        assert!(report.cases[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("no value")));
+    }
+
+    #[test]
+    fn verification_outcomes_bind_the_full_ground_truth_hash() {
+        let implementation = Implementation::new(
+            "javascript",
+            "function computeSignature(request) { return request.value; }",
+        );
+        let original = case(
+            "c1",
+            "request",
+            json!({"value": "expected-value"}),
+            "expected-value",
+        );
+        let report = verify(&implementation, std::slice::from_ref(&original));
+
+        assert_eq!(report.verdict, "verified", "{report:?}");
+        assert_eq!(report.cases[0].evidence_sha256, original.evidence_sha256());
+    }
+
+    #[test]
+    fn python_verification_uses_the_same_fixed_module_identity_as_export() {
+        let Some(_) = python_interpreter() else {
+            return;
+        };
+        let source = r#"
+def computeSignature(request):
+    return __name__
+"#;
+        let report = verify(
+            &Implementation::new("python", source),
+            &[case(
+                "c1",
+                "request",
+                json!({}),
+                "shownet_verified_candidate",
+            )],
+        );
+
+        assert_eq!(report.verdict, "verified", "{report:?}");
     }
 
     #[test]
@@ -1459,6 +2063,8 @@ public class Candidate {
     const CSHARP_GOOD: &str = r#"using System.Security.Cryptography;
 using System.Text;
 
+namespace ShowNetReplay;
+
 public static class Candidate
 {
     public static string ComputeSignature(Request request)
@@ -1472,6 +2078,8 @@ public static class Candidate
 
     const CSHARP_WRONG: &str = r#"using System.Security.Cryptography;
 using System.Text;
+
+namespace ShowNetReplay;
 
 public static class Candidate
 {

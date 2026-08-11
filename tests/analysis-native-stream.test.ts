@@ -4,9 +4,10 @@ import { describe, it } from "node:test";
 
 describe("native AI report streaming", () => {
   it("forwards GrokBuild deltas and persists visible progress", async () => {
-    const [analysis, analysisView, types] = await Promise.all([
+    const [analysis, analysisView, analysisStreamState, types] = await Promise.all([
       readFile(new URL("../src-tauri/src/analysis.rs", import.meta.url), "utf8"),
       readFile(new URL("../src/components/AnalysisView.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../src/analysisStreamState.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/types.ts", import.meta.url), "utf8"),
     ]);
 
@@ -18,9 +19,10 @@ describe("native AI report streaming", () => {
     );
     assert.match(analysis, /"content-reset"/);
     assert.match(types, /\| "content-reset"/);
+    assert.match(analysisView, /dispatchStream\(\{ type: "event", event: update \}\)/);
     assert.match(
-      analysisView,
-      /update\.phase === "content-reset"[\s\S]*?setContent\(""\)/,
+      analysisStreamState,
+      /event\.phase === "content-reset"[\s\S]*?content: ""/,
     );
   });
 });

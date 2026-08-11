@@ -26,6 +26,9 @@
 
 use crate::dataflow::{credential_source, DataFlow, DataFlowEdge};
 use crate::endpoint_model::{Endpoint, EndpointModel, FieldModel, Gap, GapKind, ParamEvidence};
+use crate::verification_manifest::{
+    ArtifactVerificationManifest, GeneratedFileDigest, ManifestInput, RuntimeVerification,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -52,6 +55,9 @@ pub struct SdkReadiness {
     /// Whether a real ClientHello fingerprint target could be stated. Without
     /// it the package still runs, with curl_cffi's own default profile.
     pub fingerprint_target_known: bool,
+    /// Whether the generated package itself was executed after generation.
+    /// Component-level crypto checks do not establish this.
+    pub package_runtime_verified: bool,
     pub gap_count: usize,
 }
 
@@ -64,6 +70,7 @@ pub struct SdkPackage {
     pub files: Vec<SdkFile>,
     pub readiness: SdkReadiness,
     pub gaps: Vec<Gap>,
+    pub verification_manifest: ArtifactVerificationManifest,
 }
 
 /// The TLS and HTTP/2 shape the generated client should present. Kept as data
@@ -104,6 +111,13 @@ pub struct SdkInputs {
     /// Steps that were identified but never reproduced a captured value. Named
     /// in the gaps, never emitted as code.
     pub unverified_crypto: Vec<String>,
+    pub verification_runs: Vec<RuntimeVerification>,
+    pub evidence_identifiers: Vec<String>,
+    pub evidence_hashes: Vec<String>,
+    /// Evidence gaps inherited from the replay package that supplied crypto.
+    /// They must survive SDK generation even when an individual step is valid.
+    pub verification_gaps: Vec<String>,
+    pub package_runtime_verified: bool,
 }
 
 /// A Python string literal, escaped by the JSON writer. Hand-rolled quoting is
@@ -294,7 +308,7 @@ fn render_client(model: &EndpointModel, inputs: &SdkInputs, credentials: &[Field
     // Class-body helpers, kept as real Python for the same reason as the prelude:
     // this is exactly where indentation went wrong when it was Rust literals.
     out.push_str(CLIENT_HELPERS);
-    out.push_str("\n");
+    out.push('\n');
 
     for endpoint in &model.endpoints {
         out.push_str(&render_method(endpoint, &model.gaps));
@@ -519,31 +533,39 @@ fn render_fingerprint(inputs: &SdkInputs) -> String {
 }
 
 fn render_crypto(inputs: &SdkInputs) -> String {
-    // Steps go in verbatim: their Python was executed against captured values and
-    // reproduced them, so reformatting it here would be editing code that has
-    // been proven to work.
-    let steps = if inputs.verified_crypto.is_empty() {
-        "# No step reproduced a captured value in this session.\n         # Requests needing a signed or encrypted field will have to supply it."
-            .to_string()
+    let (steps, index) = if inputs.verified_crypto.is_empty() {
+        (
+            "# No step reproduced a captured value in this session.\n         # Requests needing a signed or encrypted field will have to supply it."
+                .to_string(),
+            "{}".to_string(),
+        )
     } else {
-        inputs
-            .verified_crypto
-            .iter()
-            .map(|step| format!("# step: {}\n{}", step.name, step.python_source.trim_end()))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-
-    let index = if inputs.verified_crypto.is_empty() {
-        "{}".to_string()
-    } else {
-        let entries = inputs
-            .verified_crypto
-            .iter()
-            .map(|step| format!("    {}: {},", py_string(&step.name), step.entry_point))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{{\n{entries}\n}}")
+        let mut definitions = vec![concat!(
+            "def _shownet_load_verified_step(source, entry_point, label):\n",
+            "    namespace = {\"__name__\": \"shownet_verified_candidate\"}\n",
+            "    exec(compile(source, \"<shownet-verified-candidate>\", \"exec\"), namespace)\n",
+            "    step = namespace.get(entry_point)\n",
+            "    if not callable(step):\n",
+            "        raise RuntimeError(f\"verified SDK entry point is not callable: {label}.{entry_point}\")\n",
+            "    return step",
+        )
+        .to_string()];
+        let mut entries = Vec::new();
+        for (position, step) in inputs.verified_crypto.iter().enumerate() {
+            let callable = format!("_shownet_step_{position}");
+            definitions.push(format!(
+                "# step: {}\n{callable} = _shownet_load_verified_step({}, {}, {})",
+                step.name,
+                py_string(&step.python_source),
+                py_string(&step.entry_point),
+                py_string(&step.name),
+            ));
+            entries.push(format!("    {}: {callable},", py_string(&step.name)));
+        }
+        (
+            definitions.join("\n\n"),
+            format!("{{\n{}\n}}", entries.join("\n")),
+        )
     };
 
     CRYPTO_TEMPLATE
@@ -580,10 +602,20 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
             "本次抓包没有记录到目标 JA3，客户端使用 curl_cffi 自带的模拟档位，未经比对"
         }
     ));
+    out.push_str(&format!(
+        "- 包级运行：{}\n\n",
+        if readiness.package_runtime_verified {
+            "生成后的 SDK 已完成端到端执行"
+        } else {
+            "生成后的 SDK 尚未做端到端执行；算法步骤验证不能替代整包运行"
+        }
+    ));
 
     if model.gaps.is_empty()
         && inputs.unverified_crypto.is_empty()
+        && inputs.verification_gaps.is_empty()
         && inputs.dataflow.unsourced_credentials.is_empty()
+        && inputs.package_runtime_verified
         && !inputs
             .dataflow
             .edges
@@ -629,6 +661,14 @@ fn render_gaps(model: &EndpointModel, inputs: &SdkInputs, readiness: &SdkReadine
         out.push_str(&format!(
             "- **算法未通过验证** · `{name}` — 识别出来了，但没有用抓到的值复现成功，因此没有生成代码\n"
         ));
+    }
+    for gap in &inputs.verification_gaps {
+        out.push_str(&format!("- **上游验证仍有缺口** · {gap}\n"));
+    }
+    if !inputs.package_runtime_verified {
+        out.push_str(
+            "- **SDK 尚未端到端运行** · 当前只验证了可用的算法步骤；生成后的客户端、端点参数和凭据链路尚未作为一个完整包执行，因此不能标为已验证\n",
+        );
     }
     out
 }
@@ -742,7 +782,19 @@ pub fn build_python_sdk(model: &EndpointModel, inputs: &SdkInputs) -> SdkPackage
         crypto_verified: inputs.verified_crypto.len(),
         crypto_unverified: inputs.unverified_crypto.len(),
         fingerprint_target_known: inputs.fingerprint.target_ja3.is_some(),
-        gap_count: model.gaps.len() + inputs.unverified_crypto.len(),
+        package_runtime_verified: inputs.package_runtime_verified,
+        gap_count: model.gaps.len()
+            + inputs.unverified_crypto.len()
+            + inputs.verification_gaps.len()
+            + inputs.dataflow.unsourced_credentials.len()
+            + inputs
+                .dataflow
+                .edges
+                .iter()
+                .filter(|edge| edge.occurrences == 1)
+                .count()
+            + usize::from(inputs.fingerprint.target_ja3.is_none())
+            + usize::from(!inputs.package_runtime_verified),
     };
 
     let mut files = Vec::new();
@@ -805,12 +857,78 @@ pub fn build_python_sdk(model: &EndpointModel, inputs: &SdkInputs) -> SdkPackage
         "servers": model.servers,
         "readiness": readiness,
         "files": files.iter().map(|file| file.name.clone()).collect::<Vec<_>>(),
+        "verificationManifest": "VERIFICATION_MANIFEST.json",
     });
     push(
         &mut files,
         "MANIFEST.json",
         "manifest",
         serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()),
+    );
+
+    let mut verification_gaps = model
+        .gaps
+        .iter()
+        .map(|gap| format!("{:?} {}: {}", gap.kind, gap.operation_id, gap.detail))
+        .collect::<Vec<_>>();
+    verification_gaps.extend(
+        inputs
+            .unverified_crypto
+            .iter()
+            .map(|name| format!("unverified crypto step: {name}")),
+    );
+    verification_gaps.extend(inputs.verification_gaps.iter().cloned());
+    verification_gaps.extend(
+        inputs
+            .dataflow
+            .unsourced_credentials
+            .iter()
+            .map(|name| format!("credential has no captured source: {name}")),
+    );
+    verification_gaps.extend(
+        inputs
+            .dataflow
+            .edges
+            .iter()
+            .filter(|edge| edge.occurrences == 1)
+            .map(|edge| {
+                format!(
+                    "credential flow observed once: {} -> {} ({})",
+                    edge.producer, edge.consumer, edge.consumer_name
+                )
+            }),
+    );
+    if inputs.fingerprint.target_ja3.is_none() {
+        verification_gaps.push("no captured or documented target JA3".to_string());
+    }
+    if !inputs.package_runtime_verified {
+        verification_gaps.push(
+            "generated SDK package was not executed end to end; component verification is not a package pass"
+                .to_string(),
+        );
+    }
+    let verification_manifest = ArtifactVerificationManifest::build(ManifestInput {
+        kind: "api-sdk".to_string(),
+        session_id: model.session_id.clone(),
+        language: "python".to_string(),
+        evidence_identifiers: inputs.evidence_identifiers.clone(),
+        evidence_hashes: inputs.evidence_hashes.clone(),
+        runtimes: inputs.verification_runs.clone(),
+        generated_files: files
+            .iter()
+            .map(|file| GeneratedFileDigest::from_content(&file.name, &file.role, &file.content))
+            .collect(),
+        gaps: verification_gaps,
+        executable_verified_logic_emitted: inputs.package_runtime_verified
+            || !inputs.verified_crypto.is_empty(),
+        package_runtime_required: true,
+        package_runtime_verified: inputs.package_runtime_verified,
+    });
+    push(
+        &mut files,
+        "VERIFICATION_MANIFEST.json",
+        "verification-manifest",
+        serde_json::to_string_pretty(&verification_manifest).unwrap_or_else(|_| "{}".into()),
     );
 
     SdkPackage {
@@ -820,6 +938,7 @@ pub fn build_python_sdk(model: &EndpointModel, inputs: &SdkInputs) -> SdkPackage
         files,
         readiness,
         gaps: model.gaps.clone(),
+        verification_manifest,
     }
 }
 
@@ -1056,8 +1175,71 @@ mod tests {
         let package = build_python_sdk(&model, &inputs);
         assert_eq!(package.readiness.crypto_verified, 2);
         let crypto = file(&package, "shownet_sdk/crypto.py");
-        assert!(crypto.contains("\"sign_body\": sign_body,"));
-        assert!(crypto.contains("\"sign_header\": sign_header,"));
+        assert!(crypto.contains("\"sign_body\": _shownet_step_0,"));
+        assert!(crypto.contains("\"sign_header\": _shownet_step_1,"));
+    }
+
+    #[test]
+    fn verified_steps_with_the_same_entry_name_stay_isolated() {
+        let python = ["python3", "python"].into_iter().find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        });
+        let Some(python) = python else {
+            return;
+        };
+
+        let model = build_endpoint_model(&bundle(vec![request("GET", "/v1/thing")]));
+        let inputs = SdkInputs {
+            verified_crypto: vec![
+                VerifiedCryptoStep {
+                    name: "sign_body".into(),
+                    python_source:
+                        "from __future__ import annotations\n\nprefix = 'body:'\n\ndef computeSignature(request):\n    global prefix\n    return prefix + request['path']\n"
+                            .into(),
+                    entry_point: "computeSignature".into(),
+                },
+                VerifiedCryptoStep {
+                    name: "sign_header".into(),
+                    python_source:
+                        "from __future__ import annotations\n\nprefix = 'header:'\n\ndef computeSignature(request):\n    global prefix\n    return prefix + request['path']\n"
+                            .into(),
+                    entry_point: "computeSignature".into(),
+                },
+            ],
+            ..SdkInputs::default()
+        };
+        let package = build_python_sdk(&model, &inputs);
+        let dir = std::env::temp_dir().join(format!(
+            "shownet-sdk-step-isolation-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp SDK directory");
+        std::fs::write(
+            dir.join("crypto.py"),
+            file(&package, "shownet_sdk/crypto.py"),
+        )
+        .expect("write generated crypto module");
+        std::fs::write(
+            dir.join("drive.py"),
+            "from crypto import VERIFIED_STEPS\nrequest = {'path': '/v1/order'}\nassert VERIFIED_STEPS['sign_body'](request) == 'body:/v1/order'\nassert VERIFIED_STEPS['sign_header'](request) == 'header:/v1/order'\n",
+        )
+        .expect("write SDK driver");
+        let output = std::process::Command::new(python)
+            .arg("drive.py")
+            .current_dir(&dir)
+            .output()
+            .expect("run generated crypto module");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            output.status.success(),
+            "same-name verified steps collided:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1151,12 +1333,192 @@ mod tests {
         };
         let package = build_python_sdk(&model, &inputs);
         assert!(file(&package, "GAPS.md").contains("vendor_sign_v2"));
+        assert!(
+            package
+                .verification_manifest
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("vendor_sign_v2")),
+            "machine-readable gaps must carry the withheld step"
+        );
+        assert_eq!(
+            package.verification_manifest.gate.verdict,
+            crate::verification_manifest::VerificationVerdict::Unverifiable
+        );
         let crypto = file(&package, "shownet_sdk/crypto.py");
         assert!(
             !crypto.contains("vendor_sign_v2"),
             "an unreproduced step must not be emitted as code:\n{crypto}"
         );
         assert!(crypto.contains("VERIFIED_STEPS"));
+    }
+
+    #[test]
+    fn replay_evidence_gaps_survive_sdk_generation() {
+        let model = build_endpoint_model(&bundle(vec![request("GET", "/v1/thing")]));
+        let gap = "dynamic field 'x-signature' has no emitted runtime-verified python step named exactly 'x-signature'";
+        let package = build_python_sdk(
+            &model,
+            &SdkInputs {
+                verification_gaps: vec![gap.into()],
+                ..SdkInputs::default()
+            },
+        );
+
+        assert!(file(&package, "GAPS.md").contains(gap));
+        assert!(package
+            .verification_manifest
+            .gaps
+            .iter()
+            .any(|item| item == gap));
+    }
+
+    #[test]
+    fn sdk_verification_manifest_hashes_match_the_package_files() {
+        use sha2::{Digest, Sha256};
+
+        let model = build_endpoint_model(&bundle(vec![request("GET", "/v1/thing")]));
+        let package = build_python_sdk(&model, &SdkInputs::default());
+        let manifest = &package.verification_manifest;
+
+        assert_eq!(manifest.generated_files.len() + 1, package.files.len());
+        assert!(
+            manifest
+                .generated_files
+                .iter()
+                .all(|digest| digest.name != "VERIFICATION_MANIFEST.json"),
+            "the manifest cannot recursively digest itself"
+        );
+        for digest in &manifest.generated_files {
+            let packaged = package
+                .files
+                .iter()
+                .find(|file| file.name == digest.name)
+                .unwrap_or_else(|| panic!("digest references missing file {}", digest.name));
+            assert_eq!(digest.role, packaged.role);
+            assert_eq!(digest.bytes, packaged.content.len());
+            assert_eq!(
+                digest.sha256,
+                format!("{:x}", Sha256::digest(packaged.content.as_bytes())),
+                "digest mismatch for {}",
+                digest.name
+            );
+        }
+
+        assert_eq!(
+            serde_json::from_str::<Value>(file(&package, "VERIFICATION_MANIFEST.json"))
+                .expect("valid manifest JSON"),
+            serde_json::to_value(manifest).expect("serialize manifest")
+        );
+    }
+
+    #[test]
+    fn sdk_package_gate_preserves_all_three_runtime_verdicts() {
+        use crate::verification_manifest::VerificationVerdict;
+
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/v1/thing"),
+            request("GET", "/v1/thing"),
+        ]));
+        for verdict in [
+            VerificationVerdict::Verified,
+            VerificationVerdict::Failed,
+            VerificationVerdict::Unverifiable,
+        ] {
+            let verified = verdict == VerificationVerdict::Verified;
+            let inputs = SdkInputs {
+                fingerprint: FingerprintContract {
+                    target_ja3: Some("captured-ja3".into()),
+                    ..FingerprintContract::default()
+                },
+                verified_crypto: verified
+                    .then(|| VerifiedCryptoStep {
+                        name: "vendor_sign".into(),
+                        python_source: "def vendor_sign(request):\n    return \"signed\"\n".into(),
+                        entry_point: "vendor_sign".into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                unverified_crypto: (!verified)
+                    .then(|| "vendor_sign".to_string())
+                    .into_iter()
+                    .collect(),
+                verification_runs: vec![RuntimeVerification {
+                    step_id: "step-1".into(),
+                    step_name: "vendor_sign".into(),
+                    implementation_sha256: "candidate-sha256".into(),
+                    language: "python".into(),
+                    runtime: "python3".into(),
+                    verdict,
+                    attempted: usize::from(verdict != VerificationVerdict::Unverifiable),
+                    passed: usize::from(verified),
+                    failed: usize::from(verdict == VerificationVerdict::Failed),
+                    end_to_end_passed: 0,
+                    notes: Vec::new(),
+                }],
+                evidence_identifiers: vec!["request:1".into()],
+                evidence_hashes: vec!["capture-evidence-sha256".into()],
+                package_runtime_verified: true,
+                ..SdkInputs::default()
+            };
+            let package = build_python_sdk(&model, &inputs);
+            assert_eq!(package.verification_manifest.gate.verdict, verdict);
+            assert_eq!(
+                serde_json::to_value(package.verification_manifest.gate.verdict)
+                    .expect("serialize verdict"),
+                serde_json::to_value(verdict).expect("serialize expected verdict")
+            );
+        }
+    }
+
+    #[test]
+    fn component_verification_does_not_mark_the_sdk_package_verified() {
+        use crate::verification_manifest::VerificationVerdict;
+
+        let model = build_endpoint_model(&bundle(vec![
+            request("GET", "/v1/thing"),
+            request("GET", "/v1/thing"),
+        ]));
+        let inputs = SdkInputs {
+            fingerprint: FingerprintContract {
+                target_ja3: Some("captured-ja3".into()),
+                ..FingerprintContract::default()
+            },
+            verified_crypto: vec![VerifiedCryptoStep {
+                name: "vendor_sign".into(),
+                python_source: "def vendor_sign(request):\n    return \"signed\"\n".into(),
+                entry_point: "vendor_sign".into(),
+            }],
+            verification_runs: vec![RuntimeVerification {
+                step_id: "step-1".into(),
+                step_name: "vendor_sign".into(),
+                implementation_sha256: "candidate-sha256".into(),
+                language: "python".into(),
+                runtime: "python3".into(),
+                verdict: VerificationVerdict::Verified,
+                attempted: 1,
+                passed: 1,
+                failed: 0,
+                end_to_end_passed: 0,
+                notes: Vec::new(),
+            }],
+            evidence_identifiers: vec!["request:1".into()],
+            evidence_hashes: vec!["capture-evidence-sha256".into()],
+            package_runtime_verified: false,
+            ..SdkInputs::default()
+        };
+
+        let package = build_python_sdk(&model, &inputs);
+        assert_eq!(
+            package.verification_manifest.gate.verdict,
+            VerificationVerdict::Unverifiable
+        );
+        assert!(package
+            .verification_manifest
+            .gate
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("not executed end to end")));
     }
 
     #[test]
@@ -1173,7 +1535,7 @@ mod tests {
         let package = build_python_sdk(&model, &inputs);
         let crypto = file(&package, "shownet_sdk/crypto.py");
         assert!(crypto.contains("def vendor_sign(request):"));
-        assert!(crypto.contains("\"vendor_sign\": vendor_sign,"));
+        assert!(crypto.contains("\"vendor_sign\": _shownet_step_0,"));
     }
 
     #[test]

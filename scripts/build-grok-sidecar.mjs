@@ -4,6 +4,10 @@ import { access, chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from "n
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { constants as fsConstants } from "node:fs";
+import {
+  grokBuildArtifact,
+  resolveGrokTargetDirectory,
+} from "./grok-sidecar-layout.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -30,18 +34,27 @@ if (options.fresh && options.source) {
 if (options.stampOnly && (options.fresh || options.source)) {
   throw new Error("--stamp-only cannot be combined with --fresh or --source");
 }
+if (options.prepareOnly && (options.stampOnly || options.xwin)) {
+  throw new Error("--prepare-only cannot be combined with --stamp-only or --xwin");
+}
 const target = options.target ?? hostTarget();
 const executableSuffix = target.includes("windows") ? ".exe" : "";
 if (options.xwin && !target.includes("windows")) {
   throw new Error("--xwin requires a Windows target");
 }
 const sourceDir = resolve(options.source ?? resolve(root, "src-tauri/.sidecar-src/grok-build"));
+const targetDir = resolveGrokTargetDirectory(root);
 const output = resolve(
   root,
   `src-tauri/binaries/grok-build-${target}${executableSuffix}`,
 );
 
-if (!options.stampOnly) {
+if (options.prepareOnly) {
+  await ensurePinnedSource(sourceDir);
+  validatePinnedSource(sourceDir);
+  console.log(`Prepared pinned Agent source for cache metadata: ${sourceDir}`);
+  console.log(`Agent Cargo target cache: ${targetDir}`);
+} else if (!options.stampOnly) {
   await ensurePinnedSource(sourceDir);
   validatePinnedSource(sourceDir);
   // Vendored bin/protoc is a macOS dotslash stub; CI must inject a real protoc.
@@ -65,51 +78,55 @@ if (!options.stampOnly) {
         CARGO_PROFILE_RELEASE_INCREMENTAL: "false",
       }
     : {};
+  const buildEnv = {
+    ...process.env,
+    ...protocEnv,
+    ...windowsLinkEnv,
+    CARGO_TARGET_DIR: targetDir,
+  };
   if (windowsTarget) {
     console.log("Windows release: CARGO_PROFILE_RELEASE_DEBUG=0 + cargo config /DEBUG:NONE");
   }
   if (options.xwin) {
     const pinnedCargo = capture("rustup", ["which", "--toolchain", GROK_RUST_TOOLCHAIN, "cargo"], root);
     run("cargo-xwin", buildArgs, sourceDir, {
-      ...process.env,
-      ...protocEnv,
-      ...windowsLinkEnv,
+      ...buildEnv,
       PATH: `${dirname(pinnedCargo)}${delimiter}${process.env.PATH ?? ""}`,
       RUSTUP_TOOLCHAIN: GROK_RUST_TOOLCHAIN,
     });
   } else {
     run("rustup", ["run", GROK_RUST_TOOLCHAIN, "cargo", ...buildArgs], sourceDir, {
-      ...process.env,
-      ...protocEnv,
-      ...windowsLinkEnv,
+      ...buildEnv,
     });
   }
 
-  const built = resolve(sourceDir, `target/${target}/release/xai-grok-pager${executableSuffix}`);
+  const built = grokBuildArtifact(targetDir, target, executableSuffix);
   await assertFile(built, "官方 grok-build 编译产物");
   await mkdir(resolve(root, "src-tauri/binaries"), { recursive: true });
   await copyFile(built, output);
   if (process.platform !== "win32") await chmod(output, 0o755);
 }
-await assertFile(output, "Agent sidecar");
-const bytes = await readFile(output);
-const checksum = createHash("sha256").update(bytes).digest("hex");
-await writeFile(`${output}.sha256`, `${checksum}  ${basename(output)}\n`, { mode: 0o600 });
-await writeFile(
-  `${output}.metadata.json`,
-  `${JSON.stringify({
-    name: "xai-org/grok-build",
-    version: GROK_VERSION,
-    repository: GROK_REPOSITORY,
-    commit: GROK_COMMIT,
-    rustToolchain: GROK_RUST_TOOLCHAIN,
-    target,
-    sha256: checksum,
-  }, null, 2)}\n`,
-  { mode: 0o600 },
-);
-console.log(`Built verified Agent sidecar: ${output}`);
-console.log(`SHA-256: ${checksum}`);
+if (!options.prepareOnly) {
+  await assertFile(output, "Agent sidecar");
+  const bytes = await readFile(output);
+  const checksum = createHash("sha256").update(bytes).digest("hex");
+  await writeFile(`${output}.sha256`, `${checksum}  ${basename(output)}\n`, { mode: 0o600 });
+  await writeFile(
+    `${output}.metadata.json`,
+    `${JSON.stringify({
+      name: "xai-org/grok-build",
+      version: GROK_VERSION,
+      repository: GROK_REPOSITORY,
+      commit: GROK_COMMIT,
+      rustToolchain: GROK_RUST_TOOLCHAIN,
+      target,
+      sha256: checksum,
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  console.log(`Built verified Agent sidecar: ${output}`);
+  console.log(`SHA-256: ${checksum}`);
+}
 
 function validateSourceMetadata(metadata) {
   if (metadata.name !== "xai-org/grok-build") throw new Error("Unexpected Agent source name");
@@ -135,6 +152,8 @@ function parseArguments(args) {
       parsed.fresh = true;
     } else if (argument === "--stamp-only") {
       parsed.stampOnly = true;
+    } else if (argument === "--prepare-only") {
+      parsed.prepareOnly = true;
     } else if (argument === "--xwin") {
       parsed.xwin = true;
     } else {
@@ -208,9 +227,10 @@ function resetEphemeralPatches(directory) {
   // Checkout one path at a time — some (e.g. bin/protoc.exe) are not in the tree.
   for (const relative of EPHEMERAL_SOURCE_PATHS) {
     try {
+      capture("git", ["ls-files", "--error-unmatch", relative], directory);
       run("git", ["checkout", "HEAD", "--", relative], directory);
     } catch {
-      // Path not in HEAD or checkout dirty — ignore.
+      // Path not in HEAD — ignore it without printing a misleading pathspec error.
     }
   }
 }

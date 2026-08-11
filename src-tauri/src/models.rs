@@ -1378,6 +1378,7 @@ pub struct AnalysisActivity {
     pub analysis_id: String,
     pub phase: String,
     pub message: String,
+    pub elapsed_ms: Option<i64>,
     pub created_at: i64,
 }
 
@@ -1425,6 +1426,7 @@ pub struct AnalysisStreamEvent {
     pub key_request_count: i64,
     pub report: Option<AnalysisReport>,
     pub message: Option<String>,
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
