@@ -529,6 +529,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           ? describeAgentActivity(update.phase, update.message).title
           : update.message ?? "正在分析");
         setStreamKeyCount(update.keyRequestCount);
+      } else if (update.phase === "content-reset") {
+        setStatus("analyzing");
+        setContent("");
       } else if (update.phase === "delta") {
         setStatus("analyzing");
         setContent((current) => current + update.delta);

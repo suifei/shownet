@@ -37,6 +37,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_ERROR_BYTES: usize = 1_200;
 const MAX_REQUEST_INDEX_BYTES: usize = 96 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 96 * 1024;
+const GRAPH_ARTIFACT_MARKER: &str = "```graph-artifacts";
 /// Fallback only when settings are unavailable; prefer `AiAnalysisSettings.max_agent_turns`.
 const DEFAULT_AGENT_TOOL_ROUNDS: usize = 8;
 const MAX_MODELS_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -398,6 +399,8 @@ async fn run_analysis(
             analysis_settings.max_agent_turns.max(1)
         )),
     )?;
+    let mut native_stream = NativeReportStream::default();
+    let mut native_persisted_at = 0usize;
     let native_runtime_result = grok_runtime::try_run(
         app,
         &report.id,
@@ -407,7 +410,36 @@ async fn run_analysis(
         &skill_plan,
         analysis_settings.max_agent_turns,
         &native_runtime_prompt,
-        |_delta| Ok(()),
+        |delta| {
+            if !analysis_settings.streaming_output {
+                return Ok(());
+            }
+            let visible_delta = native_stream.push(delta);
+            if visible_delta.is_empty() {
+                return Ok(());
+            }
+            emit_stream(
+                app,
+                &running_report,
+                "delta",
+                &visible_delta,
+                selected.len() as i64,
+                None,
+                None,
+            )?;
+            if native_stream
+                .visible()
+                .len()
+                .saturating_sub(native_persisted_at)
+                >= 2_048
+            {
+                state
+                    .storage
+                    .save_analysis_progress(&report.id, native_stream.visible())?;
+                native_persisted_at = native_stream.visible().len();
+            }
+            Ok(())
+        },
         |activity| {
             let (phase, message) = match activity {
                 grok_runtime::GrokActivity::Reasoning => (
@@ -430,6 +462,32 @@ async fn run_analysis(
         },
     )
     .await;
+    let native_stream_result = (|| -> Result<(), String> {
+        if !analysis_settings.streaming_output {
+            return Ok(());
+        }
+        let tail = native_stream.finish();
+        if !tail.is_empty() {
+            emit_stream(
+                app,
+                &running_report,
+                "delta",
+                &tail,
+                selected.len() as i64,
+                None,
+                None,
+            )?;
+        }
+        if !native_stream.visible().is_empty()
+            && native_stream.visible().len() != native_persisted_at
+        {
+            state
+                .storage
+                .save_analysis_progress(&report.id, native_stream.visible())?;
+        }
+        Ok(())
+    })();
+    let native_runtime_result = native_stream_result.and(native_runtime_result);
     match native_runtime_result {
         Ok(Some(runtime_report)) => {
             state
@@ -451,17 +509,6 @@ async fn run_analysis(
                 for gap in graph_gaps {
                     content.push_str(&format!("- {gap}\n"));
                 }
-            }
-            if analysis_settings.streaming_output {
-                emit_stream(
-                    app,
-                    &running_report,
-                    "delta",
-                    &content,
-                    selected.len() as i64,
-                    None,
-                    None,
-                )?;
             }
             return finish_graph_analysis(
                 app,
@@ -494,6 +541,18 @@ async fn run_analysis(
             state
                 .storage
                 .finish_ai_request_log(&native_log_id, "failed", Some(&error))?;
+            if analysis_settings.streaming_output && !native_stream.visible().is_empty() {
+                state.storage.save_analysis_progress(&report.id, "")?;
+                emit_stream(
+                    app,
+                    &running_report,
+                    "content-reset",
+                    "",
+                    selected.len() as i64,
+                    None,
+                    None,
+                )?;
+            }
             emit_stream(
                 app,
                 &running_report,
@@ -1180,16 +1239,61 @@ fn graph_skill_prompt(
     )
 }
 
+#[derive(Default)]
+struct NativeReportStream {
+    pending: String,
+    visible: String,
+    artifact_block_started: bool,
+}
+
+impl NativeReportStream {
+    fn push(&mut self, delta: &str) -> String {
+        if self.artifact_block_started || delta.is_empty() {
+            return String::new();
+        }
+        self.pending.push_str(delta);
+        if let Some(start) = self.pending.find(GRAPH_ARTIFACT_MARKER) {
+            let visible = self.pending[..start].to_string();
+            self.pending.clear();
+            self.artifact_block_started = true;
+            self.visible.push_str(&visible);
+            return visible;
+        }
+
+        let retained = (1..GRAPH_ARTIFACT_MARKER.len())
+            .rev()
+            .find(|length| self.pending.ends_with(&GRAPH_ARTIFACT_MARKER[..*length]))
+            .unwrap_or(0);
+        let emit_end = self.pending.len().saturating_sub(retained);
+        let visible = self.pending[..emit_end].to_string();
+        self.pending.drain(..emit_end);
+        self.visible.push_str(&visible);
+        visible
+    }
+
+    fn finish(&mut self) -> String {
+        if self.artifact_block_started {
+            return String::new();
+        }
+        let visible = std::mem::take(&mut self.pending);
+        self.visible.push_str(&visible);
+        visible
+    }
+
+    fn visible(&self) -> &str {
+        &self.visible
+    }
+}
+
 fn extract_graph_artifacts(content: &str) -> (String, Vec<Value>, Option<String>) {
-    let marker = "```graph-artifacts";
-    let Some(start) = content.find(marker) else {
+    let Some(start) = content.find(GRAPH_ARTIFACT_MARKER) else {
         return (
             content.to_string(),
             Vec::new(),
             Some("GrokBuild 报告缺少 graph-artifacts 产物块".to_string()),
         );
     };
-    let body_start = start + marker.len();
+    let body_start = start + GRAPH_ARTIFACT_MARKER.len();
     let Some(relative_end) = content[body_start..].find("```") else {
         return (
             content.to_string(),
@@ -3258,6 +3362,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         let value: Value = serde_json::from_str(&events[0]).unwrap();
         assert_eq!(content_delta(&value).as_deref(), Some("中文"));
+    }
+
+    #[test]
+    fn native_report_streams_visible_text_and_hides_split_artifacts() {
+        let mut stream = NativeReportStream::default();
+        assert_eq!(stream.push("# 分析报告\n\n结论"), "# 分析报告\n\n结论");
+        assert_eq!(stream.push("已生成。\n\n```graph-art"), "已生成。\n\n");
+        assert_eq!(
+            stream.push("ifacts\n{\"artifacts\":[{\"skillId\":\"api\"}]}\n```"),
+            ""
+        );
+        assert_eq!(stream.finish(), "");
+        assert_eq!(stream.visible(), "# 分析报告\n\n结论已生成。\n\n");
+    }
+
+    #[test]
+    fn native_report_flushes_trailing_marker_prefix_when_no_artifact_block_arrives() {
+        let mut stream = NativeReportStream::default();
+        assert_eq!(stream.push("报告正文```graph-art"), "报告正文");
+        assert_eq!(stream.finish(), "```graph-art");
+        assert_eq!(stream.visible(), "报告正文```graph-art");
     }
 
     #[test]
