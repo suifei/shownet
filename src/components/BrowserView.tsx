@@ -1226,12 +1226,11 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     const host = challengeHost;
     if (!host || browserConnecting) return;
     const destination = currentUrl;
+    const previousHooksEnabled = hooksEnabledRef.current;
     // Keep MITM decryption. Outbound is always wreq Chrome when the stack is
     // linked (no rustls product path). Challenge retry only drops page Hooks
     // that rewrite SubtleCrypto / fetch (Turnstile-hostile), then reloads.
-    hooksEnabledRef.current = false;
-    setHooksEnabled(false);
-    setBusNote(`正在为 ${host} 关闭 Hook 后重试（MITM + Chrome 出站 JA4 保持）`);
+    setBusNote(`正在检查 ${host} 的 Chrome 出站状态`);
     try {
       const status = await invoke<OutboundTlsProfileStatus>("get_outbound_tls_profile");
       if (!status.realImpersonateStackAvailable || status.engine !== "impersonate") {
@@ -1240,10 +1239,15 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         );
         return;
       }
+      hooksEnabledRef.current = false;
+      setHooksEnabled(false);
+      setBusNote(`正在为 ${host} 关闭 Hook 后重试（MITM + Chrome 出站 JA4 保持）`);
       await stopProxyChrome();
       await startProxyChrome(destination);
       setBusNote(`${host}：Hook 已关 · MITM + engine=impersonate，请再完成真人验证`);
     } catch (error) {
+      hooksEnabledRef.current = previousHooksEnabled;
+      setHooksEnabled(previousHooksEnabled);
       setBrowserError(`验证兼容重试失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
@@ -1451,7 +1455,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                   <div>
                     <strong>{reloadLoopHost} 正在反复刷新</strong>
                     <small>
-                      该站点的风控挑战没有通过。优先在高级控制台确认「用逐字节 Chrome 出站」已开启
+                      该站点的风控挑战没有通过。优先在高级控制台核对逐字节 Chrome 出站状态
                       （入站/出站 JA4 应对齐），并关闭页面 Hook；不要用 TLS 绕行换验证通过，否则会丢解密正文。
                     </small>
                   </div>

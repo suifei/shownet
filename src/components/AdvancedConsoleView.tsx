@@ -748,14 +748,14 @@ export function AdvancedConsoleView({
                     <>
                       出站引擎<strong>固定</strong>为 wreq 逐字节 Chrome（不可关闭）：
                       <strong>engine={outboundTls?.engine ?? "impersonate"}</strong>，JA4{" "}
-                      <code>t13d1516h2_8daaf6152771_d8a2da3f94cd</code>，HTTP/2 伪头{" "}
+                      <code>t13d1516h2_8daaf6152771_806a8c22fdea</code>，HTTP/2 伪头{" "}
                       <code>m,a,s,p</code>。
                       supportsFullBrowserJa3=
                       {String(outboundTls?.supportsFullBrowserJa3 ?? false)}、ja3Parity=
                       {String(outboundTls?.ja3Parity ?? false)}。
                       <br />
-                      入站 ClientHello 终止在 ShowNet；源站只看出站指纹。抓包浏览器关闭
-                      ML-DSA 后，入站 JA4 与上式一致。产品路径<strong>不再提供 rustls 出站回退</strong>
+                      入站 ClientHello 终止在 ShowNet；源站只看出站指纹。出站包含 Chrome 151 的
+                      ML-DSA 0x0904/0905/0906，入站 JA4 与上式一致。产品路径<strong>不再提供 rustls 出站回退</strong>
                       （曾导致 JA4 分裂与 Cloudflare 循环）。WebSocket 升级仍需原始 TLS 流，为协议特例。
                     </>
                   ) : (

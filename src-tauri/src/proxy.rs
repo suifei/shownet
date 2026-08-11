@@ -25,6 +25,8 @@ use brotli::Decompressor;
 use bytes::Bytes;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures_util::{SinkExt, StreamExt};
+#[cfg(feature = "impersonate-boring")]
+use http_body_util::StreamBody;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::ext::Protocol;
@@ -189,6 +191,60 @@ impl RuleEngine {
 const MAX_PENDING_RULE_TRACE_REQUESTS: usize = 1_000;
 type BodyCaptureCallback = Box<dyn FnOnce(BodyCaptureSnapshot) + Send>;
 type BodyChunkCallback = Box<dyn FnMut(&[u8]) + Send>;
+
+/// `wreq::Body::wrap` accepts an HTTP body that is `Sync`. Proxy request bodies
+/// are polled by one task and intentionally use an unsynchronised box, so wrap
+/// them in `SyncWrapper` without changing their single-owner polling model.
+#[cfg(feature = "impersonate-boring")]
+struct WreqRequestBody<B> {
+    inner: sync_wrapper::SyncWrapper<B>,
+    size_hint: SizeHint,
+    end_stream: bool,
+}
+
+#[cfg(feature = "impersonate-boring")]
+impl<B> WreqRequestBody<B>
+where
+    B: Body,
+{
+    fn new(body: B) -> Self {
+        let size_hint = body.size_hint();
+        let end_stream = body.is_end_stream();
+        Self {
+            inner: sync_wrapper::SyncWrapper::new(body),
+            size_hint,
+            end_stream,
+        }
+    }
+}
+
+#[cfg(feature = "impersonate-boring")]
+impl<B> Body for WreqRequestBody<B>
+where
+    B: Body + Unpin,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let result = Pin::new(self.inner.get_mut()).poll_frame(context);
+        if matches!(result, Poll::Ready(None)) {
+            self.end_stream = true;
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.end_stream
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.size_hint.clone()
+    }
+}
 /// Shared MITM origin client: HTTP/1.1 or HTTP/2 depending on negotiated ALPN.
 enum HttpsRequestSender {
     Http1(hyper::client::conn::http1::SendRequest<TapBody<ProxyBody>>),
@@ -199,7 +255,7 @@ enum HttpsRequestSender {
     /// wreq client pools its own connections.
     #[cfg(feature = "impersonate-boring")]
     Impersonate {
-        client: wreq::Client,
+        client: crate::impersonate_egress::ImpersonateClient,
         base: String,
     },
 }
@@ -236,7 +292,7 @@ impl HttpsRequestSender {
 
     /// Returns the response with its body already boxed into `ProxyBody`. The
     /// hyper variants carry an `Incoming`; the impersonate variant carries a
-    /// buffered body from wreq — both box to the same type, and every consumer
+    /// streaming body from wreq — both box to the same type, and every consumer
     /// boxed it immediately anyway, so unifying here lets a non-hyper engine
     /// return through the same seam. The error is `BoxError` rather than
     /// `hyper::Error` because a wreq failure cannot be a hyper one.
@@ -265,7 +321,7 @@ impl HttpsRequestSender {
 /// response the rest of the path expects.
 #[cfg(feature = "impersonate-boring")]
 async fn send_via_impersonate(
-    client: &wreq::Client,
+    client: &crate::impersonate_egress::ImpersonateClient,
     base: &str,
     request: Request<TapBody<ProxyBody>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
@@ -282,32 +338,26 @@ async fn send_via_impersonate(
         .iter()
         .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
         .collect();
-    // Bounded: the reconstructed origin request is buffered anyway on this path.
-    let collected = body.collect().await.map_err(|error| error as BoxError)?;
-    let bytes = collected.to_bytes();
-    let request_body = if bytes.is_empty() {
-        None
-    } else {
-        Some(bytes.to_vec())
-    };
-
+    let request_body = wreq::Body::wrap(WreqRequestBody::new(body));
     let response =
-        crate::impersonate_egress::send(client, &method, &url, &headers, request_body).await?;
+        crate::impersonate_egress::send(client, &method, &url, &headers, Some(request_body))
+            .await?;
 
-    let mut builder = Response::builder().status(response.status);
-    for (name, value) in &response.headers {
-        // Content-Length is recomputed by the framing below; a copied one from
-        // a chunked upstream would contradict the buffered body.
-        if name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-        {
+    let mut builder = Response::builder().status(response.status().as_u16());
+    for (name, value) in response.headers() {
+        // Hyper owns browser-side transfer framing. Content-Length remains
+        // valid because the response body is relayed byte-for-byte.
+        if name.as_str().eq_ignore_ascii_case("transfer-encoding") {
             continue;
         }
-        builder = builder.header(name.as_str(), value.as_slice());
+        builder = builder.header(name.as_str(), value.as_bytes());
     }
-    let body = Full::new(Bytes::from(response.body))
-        .map_err(|never| match never {})
-        .boxed_unsync();
+    let stream = response.bytes_stream().map(|chunk| {
+        chunk
+            .map(Frame::data)
+            .map_err(|error| Box::new(error) as BoxError)
+    });
+    let body = StreamBody::new(stream).boxed_unsync();
     builder
         .body(body)
         .map_err(|error| Box::new(error) as BoxError)
@@ -6048,7 +6098,7 @@ where
     Ok(())
 }
 
-fn should_bypass(host: &str, patterns: &[String]) -> bool {
+pub(crate) fn should_bypass(host: &str, patterns: &[String]) -> bool {
     let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
     if matches!(host.as_str(), "localhost" | "::1")
         || host
@@ -8737,7 +8787,7 @@ mod tests {
         let inbound = crate::tls_fingerprint::ClientTlsFingerprint {
             ja3: "inbound-ja3".to_string(),
             ja3_raw: "771,4865,,,".to_string(),
-            ja4: "t13d1516h2_8daaf6152771_d8a2da3f94cd".to_string(),
+            ja4: "t13d1516h2_8daaf6152771_806a8c22fdea".to_string(),
             ja4_raw: "t13d1516h2".to_string(),
             sni: Some("example.test".to_string()),
             alpn: vec!["h2".to_string()],

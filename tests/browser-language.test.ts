@@ -47,6 +47,14 @@ describe("Cloudflare challenge detection", () => {
     assert.match(view, /cloudflareChallengeHost/);
     assert.match(view, /hooksEnabledRef\.current = false/);
     assert.match(view, /get_outbound_tls_profile/);
+    assert.ok(
+      view.indexOf('invoke<OutboundTlsProfileStatus>("get_outbound_tls_profile")') <
+        view.indexOf("hooksEnabledRef.current = false"),
+      "the app must verify impersonate capability before disabling page Hooks",
+    );
+    assert.match(view, /hooksEnabledRef\.current = previousHooksEnabled/);
+    assert.match(view, /setHooksEnabled\(previousHooksEnabled\)/);
+    assert.doesNotMatch(view, /确认「用逐字节 Chrome 出站」已开启/);
     assert.match(view, /关闭 Hook 并重试/);
     assert.doesNotMatch(view, /tlsBypassHost/);
     assert.doesNotMatch(view, /set_outbound_impersonate/);
