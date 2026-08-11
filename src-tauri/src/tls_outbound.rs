@@ -996,18 +996,14 @@ mod tests {
         }
     }
 
-    /// The cargo feature compiles the impersonate lane in; it links nothing.
-    /// Both lanes must therefore agree that no real stack is present, so the
-    /// feature can be built and tested in CI without manufacturing a claim.
-    /// Phase 1 changes this only by linking an actual connector.
+    /// The default lane remains rustls-only. The feature lane links the wreq
+    /// BoringSSL connector and exercises the mandatory impersonate engine in
+    /// its own feature-gated tests below.
     #[test]
     #[cfg(not(feature = "impersonate-boring"))]
-    fn compiling_the_feature_does_not_by_itself_provide_a_stack() {
+    fn default_build_stays_rustls_without_a_linked_stack() {
         let _guard = preset_lock();
-        assert!(
-            !real_impersonate_stack_available(),
-            "no connector is linked in any current build, feature flag or not"
-        );
+        assert!(!real_impersonate_stack_available());
         assert_eq!(active_engine(), OutboundTlsEngine::Rustls);
         assert!(!active_engine().supports_full_browser_ja3());
         let reason = impersonate_unavailable_reason();
@@ -1015,12 +1011,6 @@ mod tests {
             reason.contains("no linked"),
             "reason must say a stack is not linked, got: {reason}"
         );
-        if cfg!(feature = "impersonate-boring") {
-            assert!(
-                reason.contains("feature compiled in"),
-                "the feature lane should say the flag is on but nothing is linked, got: {reason}"
-            );
-        }
     }
 
     /// Status must split golden ceiling from measured alignment: a tool golden
