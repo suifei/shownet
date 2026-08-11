@@ -174,6 +174,11 @@ impl VerificationReport {
 const LOOP_LIMIT: u64 = 5_000_000;
 const RECURSION_LIMIT: usize = 512;
 const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
+// Compiled runtimes include process and VM startup in the measured window;
+// Windows runners can spend several seconds starting dotnet while the machine
+// is compiling other candidates in parallel. Keep that cost bounded separately
+// from the tighter scripted-runtime limit.
+const COMPILED_CANDIDATE_TIMEOUT: Duration = Duration::from_secs(15);
 const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -532,7 +537,7 @@ fn verify_python(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         );
     };
     let TimedCommandOutput::Completed(output) = output else {
-        return timeout_failure("python", &python, cases);
+        return timeout_failure("python", &python, cases, CANDIDATE_TIMEOUT);
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     match outcomes_from_stdout(&stdout, cases) {
@@ -839,14 +844,19 @@ fn run_with_timeout(
     }
 }
 
-fn timeout_failure(language: &str, runtime: &str, cases: &[GroundTruthCase]) -> VerificationReport {
+fn timeout_failure(
+    language: &str,
+    runtime: &str,
+    cases: &[GroundTruthCase],
+    timeout: Duration,
+) -> VerificationReport {
     build_failure(
         language,
         runtime,
         cases,
         &format!(
             "candidate exceeded the {} ms execution limit",
-            CANDIDATE_TIMEOUT.as_millis()
+            timeout.as_millis()
         ),
     )
 }
@@ -1014,14 +1024,14 @@ fn verify_go(implementation: &Implementation, cases: &[GroundTruthCase]) -> Veri
 
     let mut command = Command::new(dir.join(executable_name));
     command.current_dir(&dir);
-    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
+    let output = run_with_timeout(&mut command, COMPILED_CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
         return VerificationReport::unverifiable("go", "go", "verification run failed to start");
     };
     let TimedCommandOutput::Completed(output) = output else {
-        return timeout_failure("go", "go", cases);
+        return timeout_failure("go", "go", cases, COMPILED_CANDIDATE_TIMEOUT);
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     match outcomes_from_stdout(&stdout, cases) {
@@ -1090,7 +1100,7 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
 
     let mut command = Command::new("java");
     command.arg("Driver").current_dir(&dir);
-    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
+    let output = run_with_timeout(&mut command, COMPILED_CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
@@ -1101,7 +1111,7 @@ fn verify_java(implementation: &Implementation, cases: &[GroundTruthCase]) -> Ve
         );
     };
     let TimedCommandOutput::Completed(output) = output else {
-        return timeout_failure("java", "java", cases);
+        return timeout_failure("java", "java", cases, COMPILED_CANDIDATE_TIMEOUT);
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     match outcomes_from_stdout(&stdout, cases) {
@@ -1199,7 +1209,7 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         .current_dir(&dir)
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .env("DOTNET_NOLOGO", "1");
-    let output = run_with_timeout(&mut command, CANDIDATE_TIMEOUT);
+    let output = run_with_timeout(&mut command, COMPILED_CANDIDATE_TIMEOUT);
     std::fs::remove_dir_all(&dir).ok();
 
     let Ok(output) = output else {
@@ -1210,7 +1220,7 @@ fn verify_csharp(implementation: &Implementation, cases: &[GroundTruthCase]) -> 
         );
     };
     let TimedCommandOutput::Completed(output) = output else {
-        return timeout_failure("csharp", "dotnet", cases);
+        return timeout_failure("csharp", "dotnet", cases, COMPILED_CANDIDATE_TIMEOUT);
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     match outcomes_from_stdout(&stdout, cases) {
