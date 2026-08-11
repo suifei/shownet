@@ -64,7 +64,7 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 #### 内嵌浏览器启动、Cloudflare 验证与语言设置（0.4.16+）
 
 - **启动不再弹出本地 Chrome 窗口。** 内嵌浏览器改用跨 Chrome 版本兼容的无头启动参数；若 Chrome 在 CDP 连接前退出，ShowNet 会立即显示明确错误，不再一直停在“正在连接”。
-- **入站/出站 JA4 必须一致。** 正式包（`impersonate-boring`）MITM 出站**固定** wreq 逐字节 Chrome，**不再提供 rustls 出站回退或开关**；出站 JA4 与抓包浏览器入站 JA4 对齐（`t13d1516h2_8daaf6152771_d8a2da3f94cd`）。检测到 Cloudflare 挑战可「关闭 Hook 并重试」：只关会改写 SubtleCrypto/fetch 的页面 Hook，**不会**临时绕过 TLS 拦截。
+- **入站/出站 JA4 必须一致。** 正式包（`impersonate-boring`）MITM 出站**固定** wreq 逐字节 Chrome，**不再提供 rustls 出站回退或开关**；出站 JA4 与 Chrome 151 抓包浏览器对齐（`t13d1516h2_8daaf6152771_806a8c22fdea`，含 ML-DSA 0x0904/0905/0906）。检测到 Cloudflare 挑战可「关闭 Hook 并重试」：只关会改写 SubtleCrypto/fetch 的页面 Hook，**不会**临时绕过 TLS 拦截。
 - **浏览器语言可自由设置。** 在内嵌浏览器右上角菜单输入 `th-TH`、`zh-Hans-CN` 等 BCP 47 语言标签并应用。ShowNet 会统一页面语言、Chrome Profile 与 `Accept-Language`，保存选择，并在运行中修改时自动重启浏览器。
 
 #### API SDK：把一次抓包变成一个客户端（0.4.14 新增）
@@ -94,17 +94,19 @@ Python 包,所以 `fingerprint.py` 记录目标 JA3、由 `curl_cffi` 的 impers
 在此之前这个开关是**空的**:feature 默认关闭且没有任何打包命令开启它,所以用户把
 「逐字节 Chrome 出站」打开、配置里写下 `impersonate: true`,线上走的仍是 rustls——
 一次真实会话里入站 JA4 是 `t13d1516h2_8daaf6152771_d8a2da3f94cd`,出站从未与之相符。
-现在同一站点实测两侧相同:
+Chrome 151 开始默认加入 ML-DSA 后，ShowNet 0.4.19 将 wreq/btls 升级到支持这些签名算法的版本；
+本地 ClientHello 捕获回归测试验证两侧目标为:
 
 ```
 engine=impersonate
-ja4 in  t13d1516h2_8daaf6152771_d8a2da3f94cd
-ja4 out t13d1516h2_8daaf6152771_d8a2da3f94cd
+ja4 in  t13d1516h2_8daaf6152771_806a8c22fdea
+ja4 out t13d1516h2_8daaf6152771_806a8c22fdea
 ```
 
 对比的是 **JA4 而不是 JA3**:JA3 覆盖 Chrome 每条连接随机化的 GREASE 值,
 一次页面加载里量到 16 个互不相同的入站 JA3 对应同一个 JA4。指纹面板据此改为记录出站 JA4,
-一致性从「声明」变成「比对」。流式(SSE)与 WebSocket 仍走 rustls 回退。
+一致性从「声明」变成「比对」。普通 HTTPS 与流式 SSE 都保持 wreq 出站并逐块转发；
+只有需要原始 Upgrade 流的 WebSocket 是协议特例。
 
 #### 抓包浏览器不再自报无头(0.4.14 新增)
 
@@ -321,7 +323,7 @@ Android 也可用「设备证书与代理」由电脑协助推送证书与代理
 
 - 显式 HTTP 代理默认 `127.0.0.1:8888`；可选私有局域网监听与设备二维码  
 - 上游直连 / HTTP / HTTPS / SOCKS5；系统代理可选接管并自动恢复  
-- HTTPS HTTP/1.1 与 HTTP/2 MITM；入站 JA3/JA4、出站版本化 ClientHello 预置。默认 rustls 配方（**不宣称**位级浏览器 JA3 克隆）；开启「逐字节 Chrome 出站」后走 wreq，出站 JA4 与抓包浏览器实测相同，见 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)  
+- HTTPS HTTP/1.1 与 HTTP/2 MITM；入站 JA3/JA4、出站版本化 ClientHello 预置。正式包固定使用 wreq Chrome 出站；未链接 `impersonate-boring` 的开发构建才使用 rustls 配方（**不宣称**位级浏览器 JA3 克隆），见 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)
 - WebSocket / SSE 有序有界捕获与专用检视  
 - MITM 高级控制台：阶段工作流、指纹、PX 证据、预置选择、抓包/分析能力表  
 - Agent 自动取证：TLS 指纹、出站 TLS 状态、PX 证据/结构解码（只读，诚实边界内）  

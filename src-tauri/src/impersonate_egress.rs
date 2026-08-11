@@ -15,28 +15,19 @@
 #![cfg(feature = "impersonate-boring")]
 
 use crate::models::EffectiveUpstreamProxy;
-use wreq::Client;
-use wreq_util::Emulation;
+use std::borrow::Cow;
+use wreq::{Body, Client, IntoEmulation, Response, Uri};
+use wreq_util::Profile;
 
-/// The Chrome build wreq emulates — the newest wreq-util 2.x offers.
-///
-/// Trailing the installed browser by a dozen major versions matters far less than
-/// it looks, and an earlier revision of this comment was wrong about it. Measured:
-/// real Chrome 137 and real Chrome 151 present the *same* ClientHello
-/// (t13d1516h2_8daaf6152771_d8a2da3f94cd) once ML-DSA is off, because ML-DSA is
-/// the only difference across that range. So the wire says "some Chrome between
-/// 137 and 151", which is exactly what the forwarded v=151 UA claims — not the
-/// version mismatch it reads as.
-///
-/// Do not "fix" this by moving to wreq-util 3.x. Its Chrome140+ profiles add
-/// extension 0x0029 (17 extensions, t13d1517h2), which no measured Chrome in this
-/// range sends, so it is further from the browser rather than closer. Its
-/// signature algorithms still omit ML-DSA, and 3.x/wreq 6.x are release
-/// candidates that swap the TLS backend from boring2 to btls.
-///
-/// Verified against a reflector by wreq_egress_is_byte_exact_chrome, and against
-/// the actual installed browser by browser_and_egress_present_one_fingerprint.
-pub const EMULATION: Emulation = Emulation::Chrome137;
+/// The newest Chrome profile provided by the linked wreq-util release. Chrome
+/// 151 keeps this profile's ClientHello and HTTP/2 shape, but prepends the three
+/// ML-DSA signature schemes below.
+pub const EMULATION: Profile = Profile::Chrome149;
+
+const CHROME_151_SIGNATURE_ALGORITHMS: &str = "mldsa44:mldsa65:mldsa87:\
+ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
+rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
 
 /// The JA4 `EMULATION` puts on the wire. Fixed per emulation, so it is a constant
 /// rather than a per-handshake measurement — but it is a measured constant:
@@ -44,44 +35,88 @@ pub const EMULATION: Emulation = Emulation::Chrome137;
 /// browser_and_egress_present_one_fingerprint checks the installed browser
 /// presents the same one. Changing EMULATION without changing this is caught by
 /// both.
-pub const EGRESS_JA4: &str = "t13d1516h2_8daaf6152771_d8a2da3f94cd";
+pub const EGRESS_JA4: &str = "t13d1516h2_8daaf6152771_806a8c22fdea";
 
-/// A gathered response: everything the MITM path needs to relay it back to the
-/// calling browser.
-pub struct ImpersonateResponse {
-    pub status: u16,
-    pub headers: Vec<(String, Vec<u8>)>,
-    pub body: Vec<u8>,
+#[derive(Clone)]
+pub struct ImpersonateClient {
+    direct: Client,
+    proxied: Option<Client>,
+    bypass: Vec<String>,
+}
+
+fn chrome_151_emulation() -> Result<wreq::Emulation, String> {
+    let mut emulation = EMULATION.into_emulation();
+    let tls = emulation
+        .tls_options
+        .as_mut()
+        .ok_or_else(|| "Chrome 149 emulation is missing TLS options".to_string())?;
+    tls.sigalgs_list = Some(Cow::Borrowed(CHROME_151_SIGNATURE_ALGORITHMS));
+    Ok(emulation)
 }
 
 /// Builds a wreq client that egresses like Chrome, honoring ShowNet's upstream
 /// proxy so the impersonate path reaches the network the same way the rest of
 /// the proxy does.
-pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<Client, String> {
+pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<ImpersonateClient, String> {
     // no_proxy() first: wreq, like reqwest, reads http_proxy/https_proxy from
     // the environment by default, and ShowNet points the system proxy at
     // itself — an inherited env proxy would loop the app's own egress back
     // through its capture proxy. The explicit upstream below is the only proxy
     // this client may use. (Invariant enforced by upstream-egress-ui.test.ts.)
-    let mut builder = Client::builder().no_proxy().emulation(EMULATION);
-    if upstream.mode == "http" && !upstream.host.trim().is_empty() {
-        let auth = if upstream.username.trim().is_empty() {
-            String::new()
-        } else {
-            // The password is decrypted upstream of this call.
-            format!(
-                "{}:{}@",
-                upstream.username,
-                upstream.password.as_deref().unwrap_or("")
-            )
-        };
-        let url = format!("http://{auth}{}:{}", upstream.host, upstream.port);
-        let proxy = wreq::Proxy::all(&url).map_err(|error| format!("代理配置无效: {error}"))?;
-        builder = builder.proxy(proxy);
-    }
-    builder
+    let direct = Client::builder()
+        .no_proxy()
+        .emulation(chrome_151_emulation()?)
         .build()
-        .map_err(|error| format!("构建 wreq 客户端失败: {error}"))
+        .map_err(|error| format!("构建 wreq 直连客户端失败: {error}"))?;
+    let proxied = if upstream.mode == "direct" {
+        None
+    } else {
+        let proxy_uri = explicit_proxy_uri(upstream)?;
+        let mut proxy =
+            wreq::Proxy::all(proxy_uri).map_err(|error| format!("代理配置无效: {error}"))?;
+        if !upstream.username.is_empty() || upstream.password.is_some() {
+            proxy = proxy.basic_auth(
+                &upstream.username,
+                upstream.password.as_deref().unwrap_or_default(),
+            );
+        }
+        Some(
+            Client::builder()
+                .no_proxy()
+                .emulation(chrome_151_emulation()?)
+                .proxy(proxy)
+                .build()
+                .map_err(|error| format!("构建 wreq 代理客户端失败: {error}"))?,
+        )
+    };
+    Ok(ImpersonateClient {
+        direct,
+        proxied,
+        bypass: upstream.bypass.clone(),
+    })
+}
+
+fn explicit_proxy_uri(upstream: &EffectiveUpstreamProxy) -> Result<Uri, String> {
+    let scheme = match upstream.mode.as_str() {
+        "http" => "http",
+        "https" => "https",
+        // The existing SOCKS connector resolves the destination through the
+        // proxy, so preserve that privacy behavior with socks5h.
+        "socks5" => "socks5h",
+        mode => return Err(format!("不支持的出口代理类型: {mode}")),
+    };
+    let host = upstream.host.trim().trim_matches(['[', ']']);
+    if host.is_empty() || upstream.port == 0 {
+        return Err("出口代理主机或端口无效".to_string());
+    }
+    let authority = if host.contains(':') {
+        format!("[{host}]:{}", upstream.port)
+    } else {
+        format!("{host}:{}", upstream.port)
+    };
+    format!("{scheme}://{authority}")
+        .parse()
+        .map_err(|error| format!("代理配置无效: {error}"))
 }
 
 /// Headers a client owns and must not be copied from the captured request —
@@ -99,17 +134,27 @@ fn is_client_owned(name: &str) -> bool {
     )
 }
 
-/// Sends one reconstructed origin request through wreq and gathers the response.
+/// Sends one reconstructed origin request through wreq and returns its streaming response.
 pub async fn send(
-    client: &Client,
+    client: &ImpersonateClient,
     method: &str,
     url: &str,
     headers: &[(String, Vec<u8>)],
-    body: Option<Vec<u8>>,
-) -> Result<ImpersonateResponse, String> {
+    body: Option<Body>,
+) -> Result<Response, String> {
     let method = wreq::Method::from_bytes(method.as_bytes())
         .map_err(|error| format!("方法无效 {method}: {error}"))?;
-    let mut request = client.request(method, url);
+    let uri: Uri = url
+        .parse()
+        .map_err(|error| format!("请求地址无效 {url}: {error}"))?;
+    let target = if client.proxied.as_ref().is_some_and(|_| {
+        !crate::proxy::should_bypass(uri.host().unwrap_or_default(), &client.bypass)
+    }) {
+        client.proxied.as_ref().expect("checked above")
+    } else {
+        &client.direct
+    };
+    let mut request = target.request(method, uri);
     for (name, value) in headers {
         if is_client_owned(&name.to_ascii_lowercase()) {
             continue;
@@ -119,31 +164,363 @@ pub async fn send(
     if let Some(body) = body {
         request = request.body(body);
     }
-    let response = request
+    request
         .send()
         .await
-        .map_err(|error| format!("wreq 请求失败: {error}"))?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
-        .collect();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("wreq 读取响应体失败: {error}"))?
-        .to_vec();
-    Ok(ImpersonateResponse {
-        status,
-        headers,
-        body,
-    })
+        .map_err(|error| format!("wreq 请求失败: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::time::{timeout, Duration};
+
+    fn upstream(mode: &str, username: &str, password: Option<&str>) -> EffectiveUpstreamProxy {
+        EffectiveUpstreamProxy {
+            mode: mode.to_string(),
+            host: "2001:db8::10".to_string(),
+            port: 1080,
+            username: username.to_string(),
+            password: password.map(str::to_string),
+            bypass: vec!["localhost".to_string(), "*.local".to_string()],
+        }
+    }
+
+    #[test]
+    fn explicit_proxy_uri_supports_every_product_mode() {
+        let http = explicit_proxy_uri(&upstream("http", "user@example", Some("p@ss:/#")))
+            .expect("http proxy");
+        assert_eq!(http.scheme_str(), Some("http"));
+        assert_eq!(http.host(), Some("[2001:db8::10]"));
+        assert_eq!(http.port_u16(), Some(1080));
+
+        assert_eq!(
+            explicit_proxy_uri(&upstream("https", "", None))
+                .expect("https proxy")
+                .scheme_str(),
+            Some("https")
+        );
+        assert_eq!(
+            explicit_proxy_uri(&upstream("socks5", "", None))
+                .expect("socks proxy")
+                .scheme_str(),
+            Some("socks5h")
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_uri_rejects_unknown_modes() {
+        assert!(explicit_proxy_uri(&upstream("ftp", "", None)).is_err());
+    }
+
+    #[test]
+    fn chrome_151_http2_profile_keeps_the_observed_akamai_fingerprint() {
+        use wreq::http2::PseudoId;
+
+        let emulation = chrome_151_emulation().expect("Chrome 151 emulation");
+        let options = emulation.http2_options.expect("HTTP/2 options");
+        assert_eq!(options.header_table_size, Some(65_536));
+        assert_eq!(options.enable_push, Some(false));
+        assert_eq!(options.initial_window_size, 6_291_456);
+        assert_eq!(options.max_header_list_size, Some(262_144));
+        assert_eq!(options.initial_conn_window_size - 65_535, 15_663_105);
+        let pseudo_order = options
+            .headers_pseudo_order
+            .as_ref()
+            .expect("pseudo order")
+            .into_iter()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &pseudo_order[..4],
+            [
+                PseudoId::Method,
+                PseudoId::Authority,
+                PseudoId::Scheme,
+                PseudoId::Path,
+            ]
+        );
+    }
+
+    async fn read_http_head(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).await.expect("request byte");
+            bytes.push(byte[0]);
+            assert!(bytes.len() < 64 * 1024, "request header too large");
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn response_stream_yields_before_the_origin_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (release, released) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_http_head(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n13\r\ndata: first-event\n\n\r\n",
+                )
+                .await
+                .expect("first event");
+            stream.flush().await.expect("flush");
+            let _ = released.await;
+            stream.write_all(b"0\r\n\r\n").await.expect("finish");
+        });
+
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "direct".to_string(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        })
+        .expect("client");
+        let response = timeout(
+            Duration::from_secs(2),
+            send(
+                &client,
+                "GET",
+                &format!("http://{address}/events"),
+                &[],
+                None,
+            ),
+        )
+        .await
+        .expect("headers before EOF")
+        .expect("response");
+        assert_eq!(response.status(), 200);
+        let mut body = response.bytes_stream();
+        let first = timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("first body chunk before EOF")
+            .expect("body item")
+            .expect("body bytes");
+        assert_eq!(first, "data: first-event\n\n");
+
+        let _ = release.send(());
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn chrome_151_client_hello_includes_mldsa_and_matches_target_ja4() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            crate::tls_fingerprint::read_client_hello(&mut stream)
+                .await
+                .expect("read ClientHello")
+                .fingerprint
+                .expect("parse ClientHello")
+        });
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "direct".to_string(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        })
+        .expect("client");
+
+        let result = send(
+            &client,
+            "GET",
+            &format!("https://localhost:{}/", address.port()),
+            &[],
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "capture server intentionally closes after ClientHello"
+        );
+
+        let fingerprint = server.await.expect("capture task");
+        assert_eq!(
+            fingerprint.signature_algorithms,
+            [
+                "0904", "0905", "0906", "0403", "0804", "0401", "0503", "0805", "0501", "0806",
+                "0601",
+            ]
+        );
+        assert_eq!(
+            fingerprint
+                .extensions
+                .iter()
+                .filter(|value| {
+                    u16::from_str_radix(value, 16).is_ok_and(|id| id & 0x0f0f != 0x0a0a)
+                })
+                .count(),
+            16
+        );
+        assert_eq!(fingerprint.alpn, ["h2", "http/1.1"]);
+        assert_eq!(fingerprint.ja4, EGRESS_JA4);
+    }
+
+    #[tokio::test]
+    async fn http_proxy_receives_special_character_basic_auth() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let head = String::from_utf8(read_http_head(&mut stream).await).expect("http header");
+            assert!(head.starts_with("GET http://origin.invalid/proxied HTTP/1.1\r\n"));
+            let expected = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                "user@example:p@ss:/#",
+            );
+            assert!(
+                head.to_ascii_lowercase().contains(&format!(
+                    "proxy-authorization: basic {}\r\n",
+                    expected.to_ascii_lowercase()
+                )),
+                "proxy request did not contain expected auth header:\n{head}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("response");
+        });
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "http".to_string(),
+            host: address.ip().to_string(),
+            port: address.port(),
+            username: "user@example".to_string(),
+            password: Some("p@ss:/#".to_string()),
+            bypass: Vec::new(),
+        })
+        .expect("client");
+        let body = send(&client, "GET", "http://origin.invalid/proxied", &[], None)
+            .await
+            .expect("proxied request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "ok");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn socks5_proxy_receives_remote_dns_target_and_auth() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut greeting = [0_u8; 4];
+            stream.read_exact(&mut greeting).await.expect("greeting");
+            assert_eq!(greeting, [5, 2, 0, 2]);
+            stream.write_all(&[5, 2]).await.expect("select auth");
+
+            let mut auth = [0_u8; 3];
+            stream.read_exact(&mut auth).await.expect("auth prefix");
+            assert_eq!(auth, [1, 1, b'u']);
+            let password_len = stream.read_u8().await.expect("password length") as usize;
+            let mut password = vec![0_u8; password_len];
+            stream.read_exact(&mut password).await.expect("password");
+            assert_eq!(password, b"p@ss");
+            stream.write_all(&[1, 0]).await.expect("auth ok");
+
+            let mut connect = [0_u8; 5];
+            stream
+                .read_exact(&mut connect)
+                .await
+                .expect("connect prefix");
+            assert_eq!(&connect[..4], &[5, 1, 0, 3]);
+            let mut host = vec![0_u8; connect[4] as usize];
+            stream.read_exact(&mut host).await.expect("target host");
+            assert_eq!(host, b"origin.invalid");
+            let mut port = [0_u8; 2];
+            stream.read_exact(&mut port).await.expect("target port");
+            assert_eq!(u16::from_be_bytes(port), 80);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .expect("connect ok");
+
+            let head = String::from_utf8(read_http_head(&mut stream).await).expect("http header");
+            assert!(head.starts_with("GET /through-socks HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("response");
+        });
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "socks5".to_string(),
+            host: address.ip().to_string(),
+            port: address.port(),
+            username: "u".to_string(),
+            password: Some("p@ss".to_string()),
+            bypass: Vec::new(),
+        })
+        .expect("client");
+        let body = send(
+            &client,
+            "GET",
+            "http://origin.invalid/through-socks",
+            &[],
+            None,
+        )
+        .await
+        .expect("proxied request")
+        .text()
+        .await
+        .expect("body");
+        assert_eq!(body, "ok");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn bypass_rule_keeps_matching_target_off_the_proxy() {
+        let target = TcpListener::bind("127.0.0.1:0").await.expect("target");
+        let target_address = target.local_addr().expect("target address");
+        let proxy = TcpListener::bind("127.0.0.1:0").await.expect("proxy");
+        let proxy_address = proxy.local_addr().expect("proxy address");
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.expect("target accept");
+            let _ = read_http_head(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ndirect")
+                .await
+                .expect("response");
+        });
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "http".to_string(),
+            host: proxy_address.ip().to_string(),
+            port: proxy_address.port(),
+            username: String::new(),
+            password: None,
+            bypass: vec!["127.0.0.1".to_string()],
+        })
+        .expect("client");
+        let body = send(
+            &client,
+            "GET",
+            &format!("http://{target_address}/bypass"),
+            &[],
+            None,
+        )
+        .await
+        .expect("direct request")
+        .text()
+        .await
+        .expect("body");
+        assert_eq!(body, "direct");
+        assert!(timeout(Duration::from_millis(200), proxy.accept())
+            .await
+            .is_err());
+        target_task.await.expect("target task");
+    }
 
     /// The whole reason wreq was chosen: Chrome byte-exact on both axes a strict
     /// gate checks. Measured against a reflector, not asserted from the
@@ -155,7 +532,7 @@ mod tests {
     #[ignore = "network; run explicitly under --features impersonate-boring"]
     async fn wreq_egress_is_byte_exact_chrome() {
         let client = Client::builder()
-            .emulation(EMULATION)
+            .emulation(chrome_151_emulation().expect("Chrome 151 emulation"))
             .build()
             .expect("client");
         let text = client
@@ -213,7 +590,7 @@ mod tests {
 
         let egress = Client::builder()
             .no_proxy()
-            .emulation(EMULATION)
+            .emulation(chrome_151_emulation().expect("Chrome 151 emulation"))
             .build()
             .expect("client")
             .get(REFLECTOR)
@@ -236,9 +613,9 @@ mod tests {
             "the capture browser and the impersonate egress present different \
              ClientHellos, so ja3Parity now reports a difference nothing in the \
              product can close. If the browser grew an extension or signature \
-             algorithm wreq cannot reproduce, either suppress it in \
-             browser::DISABLED_FEATURES the way TlsMldsaSignatures is, or move \
-             EMULATION to a profile that matches. Do not read a mismatch here as \
+             algorithm wreq cannot reproduce, update the linked TLS backend and \
+             EMULATION to a profile that matches; do not hide the browser feature. \
+             Do not read a mismatch here as \
              the cause of an origin-side block: the origin never saw either of \
              these handshakes' differences, only the egress one."
         );

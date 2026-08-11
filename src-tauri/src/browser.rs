@@ -38,35 +38,13 @@ pub struct ProxyBrowserHandle {
 /// Chrome features the capture browser runs without, so a captured session is the
 /// site's own traffic rather than Google's background chatter.
 ///
-/// `TlsMldsaSignatures` is the one entry here that is not about noise, and it must
-/// not be dropped when this list is edited. Chrome 141+ offers the ML-DSA
-/// post-quantum signature algorithms 0x0904/0905/0906 in its ClientHello, and no
-/// BoringSSL the impersonate egress can link knows them — boring-sys2 has no
-/// ML-DSA at all — so wreq's Chrome profile cannot reproduce them.
-///
-/// This does not change what an origin sees. The browser's ClientHello terminates
-/// at ShowNet's own MITM listener; only the egress handshake leaves the machine.
-/// What it fixes is the `ja3Parity` readout, which compares the two: with the
-/// feature on, parity reports false for a difference the egress can never close,
-/// so the one diagnostic pointing at fingerprint trouble stays permanently red
-/// while naming nothing actionable. That cost real debugging time. With it off
-/// both sides measure t13d1516h2_8daaf6152771_d8a2da3f94cd, and the readout means
-/// something again — verified against a live reflector by
-/// browser_and_egress_present_one_fingerprint.
-///
-/// Worth recording because it is counterintuitive: real Chrome 137 and real Chrome
-/// 151 with this feature off produce the *same* JA4. ML-DSA is the only ClientHello
-/// difference across that whole range, so a Chrome 137-shaped handshake carrying a
-/// Chrome 151 User-Agent is not the version mismatch it looks like — a large share
-/// of real 151 installs look exactly like that.
 pub(crate) const DISABLED_FEATURES: &str = "AccountConsistency,AutofillServerCommunication,\
 CertificateTransparencyComponentUpdater,DiceWebSigninInterception,FedCm,\
 FedCmWithoutThirdPartyCookies,InterestFeedContentSuggestions,MediaRouter,\
 NetworkTimeServiceQuerying,NotificationTriggers,OptimizationGuideModelDownloading,\
 OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,\
 PrivacySandboxSettings4,PushMessaging,SafeBrowsingEnhancedProtection,\
-SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingRealTimeLookup,SigninPromo,\
-TlsMldsaSignatures,Translate";
+SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingRealTimeLookup,SigninPromo,Translate";
 
 /// The capture window, and the screen it claims to be on.
 ///
@@ -752,11 +730,6 @@ mod tests {
     };
     use std::path::Path;
 
-    /// The entry in `DISABLED_FEATURES` whose absence would silently cost JA4
-    /// parity with the egress. Named here rather than beside the list because the
-    /// assertion is its only reader.
-    const MLDSA_FEATURE: &str = "TlsMldsaSignatures";
-
     #[test]
     fn embedded_lab_script_falls_back_to_hook_bridge_for_status() {
         assert!(LAB_SCRIPT.contains("__SHOWNET_HOOK_BRIDGE__"));
@@ -767,7 +740,7 @@ mod tests {
     /// lines, which is exactly the shape where an edit silently drops or doubles an
     /// entry — and dropping this particular one costs JA4 parity with no error.
     #[test]
-    fn disabled_feature_list_stays_well_formed_and_keeps_ja4_parity() {
+    fn disabled_feature_list_stays_well_formed() {
         let entries: Vec<&str> = DISABLED_FEATURES.split(',').collect();
 
         assert!(
@@ -791,13 +764,7 @@ mod tests {
             sorted, entries,
             "the list is kept sorted so edits are reviewable; reorder to match"
         );
-
-        assert!(
-            entries.contains(&MLDSA_FEATURE),
-            "{MLDSA_FEATURE} is gone: the browser would offer ML-DSA signature \
-             algorithms the impersonate egress cannot reproduce, so its JA4 would \
-             stop matching what ShowNet sends upstream"
-        );
+        assert!(!entries.contains(&"TlsMldsaSignatures"));
     }
 
     /// The whole point of the flag is that `Headless` never reaches an origin, and

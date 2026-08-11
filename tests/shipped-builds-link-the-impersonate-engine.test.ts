@@ -6,7 +6,7 @@
  * config, finds no linked stack, and silently egresses through rustls instead.
  *
  * That is not hypothetical. It shipped: a real session recorded an inbound JA4
- * of t13d1516h2_8daaf6152771_d8a2da3f94cd against an outbound handshake that
+ * of t13d1516h2_8daaf6152771_806a8c22fdea against an outbound handshake that
  * never matched it, because no build the user had ever run could honour the
  * setting they had switched on.
  *

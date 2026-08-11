@@ -1,11 +1,12 @@
-## 0.4.18 更新
+## 0.4.19 更新
 
-- **正式包删除 rustls 出站回退与开关。** 链接 `impersonate-boring` 时 MITM 出站**固定** wreq 逐字节 Chrome（`engine=impersonate`），入站/出站 JA4 必须一致；不能再切回 rustls。
-- **Cloudflare 验证保持 MITM 抓包。** 「关闭 Hook 并重试」只关页面 Hook，不绕过 TLS 拦截。
-- **屏指纹不再被窗格尺寸覆盖。** CDP `screenWidth/Height` 固定桌面分辨率。
-- 继承 0.4.16：跨 Chrome 版本无头启动、语言设置、Chrome 提前退出明确报错。
+- **修复 Chrome 151 JA4 不一致（#10）。** 出站 ClientHello 现在包含 ML-DSA `0x0904/0905/0906`，JA4 从 `...d8a2da3f94cd` 更新为与真实 Chrome 151 一致的 `t13d1516h2_8daaf6152771_806a8c22fdea`。
+- **HTTP/2 指纹保持不变。** SETTINGS、连接窗口与伪头顺序继续为 `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`。
+- **SSE 和大请求不再被整包缓冲。** wreq 路径现在流式转发请求体和响应体，首个 SSE 事件可在源站关闭前到达。
+- **wreq 出站完整遵守上游代理。** HTTP、HTTPS、SOCKS5（远程 DNS）、认证和直连域名规则均走统一产品路径。
+- **Cloudflare 重试更稳健。** 先确认正式 impersonate 能力再关闭页面 Hook；重启失败会恢复原 Hook 状态。
 
-升级后无需再打开「逐字节 Chrome 出站」开关——正式包始终开启。遇到真人验证时保持抓包，点「关闭 Hook 并重试」后手动完成验证。
+正式包仍固定启用逐字节 Chrome 出站，无需额外开关。遇到真人验证时保持抓包，点「关闭 Hook 并重试」后手动完成验证。
 
 ## 安装
 
