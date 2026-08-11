@@ -890,6 +890,7 @@ export interface AnalysisStreamEvent {
     | "artifact-invalid"
     | "graph-complete"
     | "generating"
+    | "content-reset"
     | "delta"
     | "complete"
     | "error"
