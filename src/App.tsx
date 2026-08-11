@@ -45,6 +45,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import shownetAppIcon from "./assets/shownet-app-icon.png";
 import { isShownetSessionPath } from "./browserDrag";
+import { ensureCaptureSession } from "./captureSession";
 import { clientAccessModeSummary } from "./clientAccess";
 import {
   filterCommands,
@@ -352,6 +353,8 @@ function App() {
   const [requestListLoading, setRequestListLoading] = useState(false);
   const [requestQueryCancelling, setRequestQueryCancelling] = useState(false);
   const [capturing, setCapturing] = useState(!hasNativeRuntime);
+  const [captureTransitioning, setCaptureTransitioning] = useState(false);
+  const [sessionCatalogReady, setSessionCatalogReady] = useState(!hasNativeRuntime);
   const [runtime, setRuntime] = useState<RuntimeStatus>(fallbackRuntime);
   const [connectOpen, setConnectOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -393,6 +396,7 @@ function App() {
   );
   const [aiConfigured, setAiConfigured] = useState(false);
   const setupAutoOpenedRef = useRef(false);
+  const captureTransitioningRef = useRef(false);
   const sessionToolsRef = useRef<HTMLDivElement>(null);
   const lastLocalEditableRef = useRef<HTMLElement | null>(null);
   const transferringRef = useRef(transferring);
@@ -839,6 +843,9 @@ function App() {
       })
       .catch((error) => {
         if (!disposed) setToast(`原生服务初始化失败：${String(error)}`);
+      })
+      .finally(() => {
+        if (!disposed) setSessionCatalogReady(true);
       });
     return () => {
       disposed = true;
@@ -1058,40 +1065,7 @@ function App() {
     if (shouldAutoOpenSetup(setupState, setupDismissed)) setSetupOpen(true);
   }, [sessions.length, setupDismissed, setupState]);
 
-  const toggleCapture = async () => {
-    if (!activeSession.id) return false;
-    const next = !capturing;
-    if (!hasNativeRuntime) {
-      setCapturing(next);
-      setSessions((items) =>
-        items.map((session) =>
-          session.id === activeSessionId ? { ...session, active: next } : { ...session, active: false },
-        ),
-      );
-      setRuntime((status) => ({
-        ...status,
-        proxyRunning: next,
-        activeSessionId: next ? activeSessionId : undefined,
-      }));
-    } else {
-      try {
-        const status = await invoke<RuntimeStatus>("set_capture_running", {
-          running: next,
-          sessionId: next ? activeSessionId : null,
-        });
-        setRuntime(withClientAccessDefaults(status));
-        setCapturing(status.proxyRunning);
-        await refreshSessions();
-      } catch (error) {
-        setToast(`抓包状态切换失败：${String(error)}`);
-        return false;
-      }
-    }
-    setToast(next ? "抓包已开始，流量正在汇入当前会话" : "抓包已暂停");
-    return next;
-  };
-
-  const createSession = async () => {
+  const createSession = async (announce = true): Promise<Session | null> => {
     const name = defaultCaptureSessionName();
     if (hasNativeRuntime) {
       try {
@@ -1107,11 +1081,12 @@ function App() {
         setRequestWindowTargetOffset(undefined);
         setRequestWindowOffset(0);
         setActiveView("traffic");
-        setToast("新会话已创建");
+        if (announce) setToast("新会话已创建");
+        return created;
       } catch (error) {
         setToast(`创建会话失败：${String(error)}`);
+        return null;
       }
-      return;
     }
     const id = `session-${Date.now()}`;
     const newSession: Session = {
@@ -1127,7 +1102,61 @@ function App() {
     setSessions((items) => [newSession, ...items]);
     setActiveSessionId(id);
     setActiveView("traffic");
-    setToast("新会话已创建");
+    if (announce) setToast("新会话已创建");
+    return newSession;
+  };
+
+  const toggleCapture = async () => {
+    if (captureTransitioningRef.current) return false;
+    if (!sessionCatalogReady) {
+      setToast("会话仍在加载，请稍候再试");
+      return false;
+    }
+    captureTransitioningRef.current = true;
+    setCaptureTransitioning(true);
+    const next = !capturing;
+    try {
+      const target = next
+        ? await ensureCaptureSession(activeSession.id, async () => {
+          setToast("当前没有会话，正在自动创建并启动抓包");
+          return createSession(false);
+        })
+        : { sessionId: activeSession.id, created: false };
+      if (!target) return false;
+      const sessionId = target.sessionId;
+
+      if (!hasNativeRuntime) {
+        setCapturing(next);
+        setSessions((items) =>
+          items.map((session) =>
+            session.id === sessionId ? { ...session, active: next } : { ...session, active: false },
+          ),
+        );
+        setRuntime((status) => ({
+          ...status,
+          proxyRunning: next,
+          activeSessionId: next ? sessionId : undefined,
+        }));
+      } else {
+        const status = await invoke<RuntimeStatus>("set_capture_running", {
+          running: next,
+          sessionId: next ? sessionId : null,
+        });
+        setRuntime(withClientAccessDefaults(status));
+        setCapturing(status.proxyRunning);
+        await refreshSessions();
+      }
+      setToast(target.created
+        ? "已自动创建会话并开始抓包"
+        : next ? "抓包已开始，流量正在汇入当前会话" : "抓包已暂停");
+      return next;
+    } catch (error) {
+      setToast(`抓包状态切换失败：${String(error)}`);
+      return false;
+    } finally {
+      captureTransitioningRef.current = false;
+      setCaptureTransitioning(false);
+    }
   };
 
   const deleteSession = async (session: Session) => {
@@ -1419,8 +1448,8 @@ function App() {
       keywords: ["capture", "start", "stop", "proxy", "record", "kbz", "zbb"],
       badge: capturing ? "运行中" : "已暂停",
       badgeTone: capturing ? "ok" : "neutral",
-      disabled: !activeSession.id,
-      disabledReason: "先创建一个会话",
+      disabled: captureTransitioning || !sessionCatalogReady,
+      disabledReason: captureTransitioning ? "抓包状态正在切换" : "会话仍在加载",
       run: () => { setCommandOpen(false); void toggleCapture(); },
     },
     {
@@ -1464,6 +1493,8 @@ function App() {
       subtitle: "把接下来的流量记进一个干净的会话",
       group: "session",
       keywords: ["new", "session", "create", "xjhh"],
+      disabled: captureTransitioning,
+      disabledReason: "抓包状态正在切换",
       run: () => { setCommandOpen(false); void createSession(); },
     },
     {
@@ -1607,7 +1638,7 @@ function App() {
           </button>
         </div>
 
-        <button className="new-session-button" onClick={createSession}>
+        <button className="new-session-button" onClick={() => void createSession()} disabled={captureTransitioning}>
           <Plus size={16} />
           <span>新建会话</span>
         </button>
@@ -1749,9 +1780,9 @@ function App() {
               <span>{activeSession.sources.length} 个来源</span>
               <ChevronDown size={14} />
             </button>
-            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={toggleCapture}>
+            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={() => void toggleCapture()} disabled={captureTransitioning || !sessionCatalogReady}>
               {capturing ? <Square size={13} fill="currentColor" /> : <CircleDot size={15} />}
-              <span>{capturing ? "停止抓包" : "开始抓包"}</span>
+              <span>{!sessionCatalogReady ? "加载会话" : captureTransitioning ? "处理中" : capturing ? "停止抓包" : "开始抓包"}</span>
             </button>
           </div>
         </header>
