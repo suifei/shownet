@@ -1,7 +1,7 @@
 {
   "name": "shownet",
   "private": true,
-  "version": "0.4.24",
+  "version": "0.4.25",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
