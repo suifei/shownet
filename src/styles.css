@@ -553,6 +553,27 @@ kbd {
   white-space: nowrap;
 }
 
+.session-item__title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.session-item__title strong { min-width: 0; }
+
+.session-item__title em {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  color: var(--danger-ink);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+}
+
 .session-item__meta {
   display: flex;
   min-width: 0;
@@ -722,6 +743,13 @@ kbd {
 .proxy-mini-status__meta {
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.proxy-mini-status__top > span:last-child {
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .proxy-mini-status__meta {
@@ -966,6 +994,39 @@ kbd {
 }
 .breakpoint-alert-button:hover { background: var(--accent-bg); border-color: var(--codex-accent); }
 .breakpoint-alert-button strong { padding: 2px 4px; color: var(--text-primary); font-size: 11px; background: var(--codex-accent); border-radius: 8px; }
+
+.capture-context-button {
+  display: inline-flex;
+  align-items: center;
+  max-width: 210px;
+  height: 38px;
+  gap: 7px;
+  padding: 0 9px;
+  color: var(--text-secondary);
+  text-align: left;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+}
+
+.capture-context-button > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.capture-context-button small,
+.capture-context-button strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-context-button small { color: var(--text-muted); font-size: 10px; }
+.capture-context-button strong { color: var(--warning-ink); font-size: 12px; }
+.capture-context-button > svg { flex: 0 0 auto; }
+.capture-context-button:hover { background: var(--warning-bg); border-color: var(--border-strong); }
 
 .status-button,
 .capture-button {
@@ -5990,6 +6051,7 @@ kbd {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
   background: var(--surface-panel);
 }
 
@@ -6027,6 +6089,20 @@ kbd {
 .cdp-state { display: inline-flex; align-items: center; height: 26px; gap: 5px; padding: 0 7px; color: var(--text-muted); font-size: 12px; }
 .cdp-state.is-connected { color: var(--success-ink); }
 .browser-tabs .icon-button { height: 26px; margin-bottom: 3px; }
+
+.browser-owner {
+  display: inline-flex;
+  align-items: center;
+  max-width: 190px;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--warning-ink);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-owner svg { flex: 0 0 auto; }
 
 .browser-menu-anchor { position: relative; }
 .browser-menu-popover { position: absolute; z-index: 40; top: 30px; right: 0; display: grid; width: 224px; padding: 5px; background: var(--surface-panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 14px 34px rgba(26, 31, 34, .16); }
@@ -7472,11 +7548,16 @@ kbd {
   .col-type, .col-source { display: none; }
   .analysis-view { grid-template-columns: 270px minmax(0, 1fr); }
   .browser-view.has-hooks { grid-template-columns: minmax(500px, 1fr) 290px; }
-  .browser-view.has-probe .hook-toggle { width: 30px; padding: 0; }
-  .browser-view.has-probe .hook-toggle span { display: none; }
   .browser-view.has-probe .browser-statusbar > span:nth-child(3),
   .browser-view.has-probe .browser-statusbar > span:nth-child(4) { display: none; }
   .skill-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Side panels and the session rail both change usable browser width, so the
+   address bar must respond to its own container instead of the viewport. */
+@container (max-width: 830px) {
+  .browser-toolbar .hook-toggle { width: 30px; padding: 0; }
+  .browser-toolbar .hook-toggle span { display: none; }
 }
 
 @media (max-width: 1060px) {
@@ -7497,6 +7578,8 @@ kbd {
   .ai-service-entry { width: 36px; padding: 0; justify-content: center; }
   .ai-service-entry__desktop { display: none !important; }
   .breakpoint-alert-button strong { display: none; }
+  .capture-context-button { width: 36px; padding: 0; justify-content: center; }
+  .capture-context-button span, .capture-context-button > svg:last-child { display: none; }
   .traffic-summary .summary-metric:nth-child(4),
   .traffic-summary .summary-metric:nth-child(5) { display: none; }
   .method-filter button:nth-child(n+4) { display: none; }
@@ -7508,6 +7591,7 @@ kbd {
   .analysis-progress { grid-template-columns: 1fr; }
   .progress-line { width: 1px; height: 18px; margin-left: 13px; }
   .browser-view.has-hooks { grid-template-columns: minmax(0, 1fr); }
+  .browser-owner { display: none; }
   .hook-panel { display: none; }
   .skills-layout, .mcp-layout { grid-template-columns: 250px minmax(0, 1fr); }
   .mcp-connections { display: none; }

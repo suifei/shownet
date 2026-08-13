@@ -78,3 +78,59 @@ test("view switching does not tear down the page", async ({ page }) => {
   expect(await page.locator(".browser-viewport").count()).toBe(before);
   await expect(page.locator(".browser-viewport").first()).toBeVisible();
 });
+
+test("the browser toolbar fits without covering the hook panel", async ({ page }) => {
+  await gotoApp(page);
+  await openView(page, "浏览器");
+
+  const toolbar = page.locator(".browser-toolbar");
+  const assertToolbarFits = async () => {
+    const geometry = await toolbar.evaluate((element) => {
+      const address = element.querySelector<HTMLInputElement>(".address-bar input");
+      return {
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        addressWidth: address?.getBoundingClientRect().width ?? 0,
+      };
+    });
+
+    expect(geometry.scrollWidth, "浏览器工具栏越过了自己的面板").toBeLessThanOrEqual(geometry.clientWidth + 1);
+    expect(geometry.addressWidth, "地址栏被工具按钮挤到无法操作").toBeGreaterThanOrEqual(96);
+  };
+
+  await assertToolbarFits();
+
+  // Labels used to reappear immediately above 1250px and crush the input.
+  await page.setViewportSize({ width: 1251, height: 800 });
+  await expect(toolbar).toBeVisible();
+  await assertToolbarFits();
+});
+
+test("viewing another session does not take ownership from the live browser", async ({ page, viewport }) => {
+  test.skip((viewport?.width ?? 0) <= 1060, "会话面板在窄布局下整体隐藏");
+  await gotoApp(page);
+  await openView(page, "浏览器");
+
+  const address = page.locator(".browser-toolbar input").first();
+  await address.fill("https://example.com/login?state=still-here");
+
+  await page.getByRole("button", { name: /桌面客户端同步 今天/ }).click();
+  await expect(page.getByRole("heading", { name: "实时流量" })).toBeVisible();
+  await expect(page.getByText("抓包写入", { exact: true })).toBeVisible();
+
+  await openView(page, "浏览器");
+  await expect(address).toHaveValue("https://example.com/login?state=still-here");
+  await expect(page.locator(".browser-owner")).toContainText("写入 电商登录链路");
+});
+
+test("a session with no browser history starts from the default address", async ({ page }) => {
+  await gotoApp(page);
+  await page.getByRole("button", { name: "停止抓包" }).click();
+  await page.getByTitle("快捷命令").click();
+  const palette = page.getByRole("dialog", { name: "快捷命令" });
+  await palette.getByRole("textbox").fill("新建会话");
+  await palette.getByRole("option", { name: /新建会话/ }).click();
+  await openView(page, "浏览器");
+
+  await expect(page.locator(".browser-toolbar input").first()).toHaveValue("about:blank");
+});

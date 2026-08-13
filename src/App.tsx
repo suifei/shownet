@@ -45,6 +45,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import shownetAppIcon from "./assets/shownet-app-icon.png";
 import { isShownetSessionPath } from "./browserDrag";
+import { forgetStoredBrowserUrl } from "./browserSessionUrl";
+import { getProxyBrowserStatus } from "./browserBus";
 import { ensureCaptureSession } from "./captureSession";
 import { clientAccessModeSummary } from "./clientAccess";
 import {
@@ -423,6 +425,14 @@ function App() {
   useDismissibleLayer(sessionToolsOpen, sessionToolsRef, () => setSessionToolsOpen(false));
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? loadingSession;
+  const captureSessionId = capturing
+    ? (runtime.activeSessionId ?? sessions.find((session) => session.active)?.id ?? "")
+    : "";
+  const captureSession = sessions.find((session) => session.id === captureSessionId);
+  const browserSession = capturing
+    ? (captureSession ?? { ...loadingSession, id: captureSessionId, name: "活动抓包会话" })
+    : activeSession;
+  const viewingCaptureSession = Boolean(captureSessionId && activeSession.id === captureSessionId);
 
   const setupSteps = useMemo(() => buildSetupSteps({
     capturing,
@@ -495,7 +505,13 @@ function App() {
   const refreshSessions = useCallback(async () => {
     if (!hasNativeRuntime) return;
     const loaded = await invoke<Session[]>("list_sessions");
-    setSessions(loaded);
+    setSessions((current) => {
+      const loadedIds = new Set(loaded.map((session) => session.id));
+      current.forEach((session) => {
+        if (!loadedIds.has(session.id)) forgetStoredBrowserUrl(session.id);
+      });
+      return loaded;
+    });
     setActiveSessionId((current) =>
       loaded.some((session) => session.id === current) ? current : (loaded[0]?.id ?? ""),
     );
@@ -1081,7 +1097,9 @@ function App() {
         setRequestWindowTargetOffset(undefined);
         setRequestWindowOffset(0);
         setActiveView("traffic");
-        if (announce) setToast("新会话已创建");
+        if (announce) setToast(capturing && captureSession
+          ? `新会话已创建；抓包仍写入“${captureSession.name}”`
+          : "新会话已创建");
         return created;
       } catch (error) {
         setToast(`创建会话失败：${String(error)}`);
@@ -1102,7 +1120,9 @@ function App() {
     setSessions((items) => [newSession, ...items]);
     setActiveSessionId(id);
     setActiveView("traffic");
-    if (announce) setToast("新会话已创建");
+    if (announce) setToast(capturing && captureSession
+      ? `新会话已创建；抓包仍写入“${captureSession.name}”`
+      : "新会话已创建");
     return newSession;
   };
 
@@ -1115,13 +1135,26 @@ function App() {
     captureTransitioningRef.current = true;
     setCaptureTransitioning(true);
     const next = !capturing;
+    if (!next && hasNativeRuntime) {
+      const browser = await getProxyBrowserStatus().catch(() => null);
+      if (browser?.running && !await confirm({
+        title: `停止“${captureSession?.name ?? "当前会话"}”的抓包？`,
+        detail: "内嵌浏览器也会关闭；临时登录状态、表单内容、页面历史和长连接将被清除。",
+        confirmLabel: "停止并清除",
+        tone: "danger",
+      })) {
+        captureTransitioningRef.current = false;
+        setCaptureTransitioning(false);
+        return false;
+      }
+    }
     try {
       const target = next
         ? await ensureCaptureSession(activeSession.id, async () => {
           setToast("当前没有会话，正在自动创建并启动抓包");
           return createSession(false);
         })
-        : { sessionId: activeSession.id, created: false };
+        : { sessionId: captureSessionId || activeSession.id, created: false };
       if (!target) return false;
       const sessionId = target.sessionId;
 
@@ -1161,7 +1194,7 @@ function App() {
 
   const deleteSession = async (session: Session) => {
     setSessionToolsOpen(false);
-    if (capturing && session.id === activeSessionId) {
+    if (capturing && session.id === captureSessionId) {
       setToast("请先停止抓包，再删除当前会话");
       return;
     }
@@ -1174,12 +1207,14 @@ function App() {
 
     if (!hasNativeRuntime) {
       setSessions((items) => items.filter((item) => item.id !== session.id));
+      forgetStoredBrowserUrl(session.id);
       setToast(`已删除 ${session.name}`);
       return;
     }
     setTransferring(true);
     try {
       await invoke("delete_session", { sessionId: session.id });
+      forgetStoredBrowserUrl(session.id);
       await refreshSessions();
       setToast(`已删除 ${session.name}`);
     } catch (error) {
@@ -1463,7 +1498,7 @@ function App() {
     {
       id: "open-browser-capture",
       title: "打开内嵌浏览器抓包",
-      subtitle: "零配置路径，不需要先安装证书",
+      subtitle: runtime.caInstalled ? "代理 Chrome · CDP 与 JS Hook 已就绪" : "首次使用需先安装并信任 HTTPS Root CA",
       group: "capture",
       keywords: ["browser", "chrome", "embedded", "cdp", "llq"],
       run: () => navigate("browser"),
@@ -1489,8 +1524,10 @@ function App() {
     },
     {
       id: "session-new",
-      title: "新建会话",
-      subtitle: "把接下来的流量记进一个干净的会话",
+      title: capturing ? "新建空会话" : "新建会话",
+      subtitle: capturing && captureSession
+        ? `创建空会话；抓包继续写入 ${captureSession.name}`
+        : "创建一个干净的会话",
       group: "session",
       keywords: ["new", "session", "create", "xjhh"],
       disabled: captureTransitioning,
@@ -1523,8 +1560,8 @@ function App() {
       subtitle: `${activeSession.name} · ${activeSession.requestCount} 条请求`,
       group: "session",
       keywords: ["delete", "remove", "drop", "schh", "shanchu"],
-      disabled: !activeSession.id || capturing,
-      disabledReason: capturing ? "请先停止抓包" : "当前没有会话",
+      disabled: !activeSession.id || (capturing && activeSession.id === captureSessionId),
+      disabledReason: capturing && activeSession.id === captureSessionId ? "请先停止抓包" : "当前没有会话",
       run: () => { setCommandOpen(false); void deleteSession(activeSession); },
     },
     {
@@ -1638,9 +1675,9 @@ function App() {
           </button>
         </div>
 
-        <button className="new-session-button" onClick={() => void createSession()} disabled={captureTransitioning}>
+        <button className="new-session-button" onClick={() => void createSession()} disabled={captureTransitioning} title={capturing && captureSession ? `创建空会话；抓包仍写入 ${captureSession.name}` : "新建会话"}>
           <Plus size={16} />
-          <span>新建会话</span>
+          <span>{capturing ? "新建空会话" : "新建会话"}</span>
         </button>
 
         <div className="sessions-label">
@@ -1665,11 +1702,12 @@ function App() {
         <div className="session-list">
           {sessions.map((session) => {
             const editing = renamingSessionId === session.id;
+            const isCaptureTarget = capturing && session.id === captureSessionId;
             return (
             <div className={`session-entry ${editing ? "is-editing" : ""}`} key={session.id}>
               {editing ? (
                 <form className="session-rename-editor" onSubmit={(event) => { event.preventDefault(); void saveSessionName(session.id); }}>
-                  <span className={`session-status ${session.active ? "is-live" : ""}`} />
+                  <span className={`session-status ${isCaptureTarget ? "is-live" : ""}`} />
                   <input
                     autoFocus
                     maxLength={60}
@@ -1697,14 +1735,14 @@ function App() {
                       setActiveSessionId(session.id);
                       setActiveView("traffic");
                     }}
-                    title={`打开 ${session.name} 的抓包记录`}
+                    title={isCaptureTarget ? `${session.name} 正在接收抓包；点击查看记录` : `打开 ${session.name} 的抓包记录`}
                   >
-                    <span className={`session-status ${session.active ? "is-live" : ""}`} />
+                    <span className={`session-status ${isCaptureTarget ? "is-live" : ""}`} />
                     {/* Collapsed, the row is 72px wide and the body is hidden;
                         without this the sessions are indistinguishable dots. */}
                     <span className="session-item__initial" aria-hidden="true">{sessionInitial(session.name)}</span>
                     <span className="session-item__body">
-                      <strong>{session.name}</strong>
+                      <span className="session-item__title"><strong>{session.name}</strong>{isCaptureTarget && <em>抓包中</em>}</span>
                       <span className="session-item__meta">
                         <span>{formatSessionTime(session.createdAt)} · {session.requestCount} 条</span>
                         <span className="session-sources">
@@ -1765,7 +1803,7 @@ function App() {
           <div className="proxy-mini-status__top">
             <span className={`live-dot ${capturing ? "is-on" : ""}`} />
             <strong><span className="proxy-mini-status__label">代理 :</span>{runtime.proxyPort}</strong>
-            <span>{capturing ? "运行中" : "已暂停"}</span>
+            <span title={captureSession?.name}>{capturing ? `写入 ${captureSession?.name ?? "活动会话"}` : "已暂停"}</span>
           </div>
           <div className="proxy-mini-status__meta">
             <span>{runtime.caInstalled ? "CA 已信任" : "CA 待安装"}</span>
@@ -1777,10 +1815,21 @@ function App() {
       <section className="workspace">
         <header className="topbar" data-tauri-drag-region>
           <div className="topbar__title">
-            <span className="topbar__eyebrow">{activeSession.name}</span>
+            <span className="topbar__eyebrow">
+              {activeView === "browser" && captureSession
+                ? `浏览器写入 · ${captureSession.name}`
+                : viewingCaptureSession ? `${activeSession.name} · 抓包中` : `正在查看 · ${activeSession.name}`}
+            </span>
             <h1>{viewMeta[activeView].title}</h1>
           </div>
           <div className="topbar__actions">
+            {capturing && captureSession && !viewingCaptureSession && (
+              <button className="capture-context-button" onClick={() => { setActiveSessionId(captureSession.id); setActiveView("traffic"); }} title={`返回正在抓包的会话 ${captureSession.name}`}>
+                <Radio size={14} />
+                <span><small>抓包写入</small><strong>{captureSession.name}</strong></span>
+                <ChevronRight size={13} />
+              </button>
+            )}
             {!setupState.ready && (
               <button className="setup-pill" onClick={() => setSetupOpen(true)} title="打开新手引导，看看还差哪一步">
                 <Compass size={14} />
@@ -1799,10 +1848,10 @@ function App() {
                 <Wifi size={14} />
                 <Terminal size={14} />
               </span>
-              <span>{activeSession.sources.length} 个来源</span>
+              <span>{(captureSession ?? activeSession).sources.length} 个来源</span>
               <ChevronDown size={14} />
             </button>
-            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={() => void toggleCapture()} disabled={captureTransitioning || !sessionCatalogReady}>
+            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={() => void toggleCapture()} disabled={captureTransitioning || !sessionCatalogReady} title={capturing && captureSession ? `停止“${captureSession.name}”的抓包` : "开始抓包"}>
               {capturing ? <Square size={13} fill="currentColor" /> : <CircleDot size={15} />}
               <span>{!sessionCatalogReady ? "加载会话" : captureTransitioning ? "处理中" : capturing ? "停止抓包" : "开始抓包"}</span>
             </button>
@@ -1822,7 +1871,9 @@ function App() {
               facets={requestListPage?.facets ?? emptyRequestFacets}
               loading={requestListLoading}
               cancelling={requestQueryCancelling}
-              capturing={capturing}
+              capturing={capturing && viewingCaptureSession}
+              captureElsewhere={capturing && !viewingCaptureSession}
+              captureSessionName={captureSession?.name}
               liveDisplay={liveDisplay}
               sessionId={activeSession.id}
               focusRequestId={evidenceRequestId}
@@ -1906,8 +1957,9 @@ function App() {
             <BrowserView
               active={activeView === "browser"}
               capturing={capturing}
-              sessionId={activeSession.id}
-              onAnalyzeCryptoLab={() => void analyzeCryptoLab(activeSession.id)}
+              sessionId={browserSession.id}
+              sessionName={browserSession.name}
+              onAnalyzeCryptoLab={() => void analyzeCryptoLab(browserSession.id)}
             />
           </div>
           {activeView === "skills" && <SkillsView sessionId={activeSession.id} requests={requests} onOpenMcpSettings={() => openSettingsTab("mcp")} mode={analysisMode} onModeChange={chooseAnalysisMode} />}
@@ -1924,7 +1976,7 @@ function App() {
 
       {connectOpen && (
         <ConnectDialog
-          sessionId={activeSession.id}
+          sessionId={browserSession.id}
           runtime={runtime}
           capturing={capturing}
           onClose={() => setConnectOpen(false)}

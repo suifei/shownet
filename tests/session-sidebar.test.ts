@@ -12,7 +12,7 @@ describe("session sidebar", () => {
     const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 
     assert.doesNotMatch(source, /setActiveView\(session\.analysisReportCount/);
-    assert.match(source, /title={`打开 \${session\.name} 的抓包记录`}/);
+    assert.match(source, /title=\{isCaptureTarget \? `\${session\.name} 正在接收抓包；点击查看记录` : `打开 \${session\.name} 的抓包记录`\}/);
     assert.match(source, /aria-label={`打开 \${session\.name} 的最近 AI 报告`}/);
     assert.match(source, /invoke<Session>\("rename_session"/);
   });

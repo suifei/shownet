@@ -319,6 +319,10 @@ impl ProxyBrowserHandle {
         self.status.clone()
     }
 
+    pub fn set_owner_session_id(&mut self, session_id: String) {
+        self.status.owner_session_id = session_id;
+    }
+
     pub fn bus(&self) -> Arc<BrowserBus> {
         Arc::clone(&self.bus)
     }

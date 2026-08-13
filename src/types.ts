@@ -1258,6 +1258,7 @@ export interface BrowserHookEvent {
 
 export interface ProxyBrowserStatus {
   running: boolean;
+  ownerSessionId: string;
   debugPort: number;
   targetId: string;
   webSocketDebuggerUrl: string;

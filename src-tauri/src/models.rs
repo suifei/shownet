@@ -73,6 +73,8 @@ pub struct BrowserHookEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyBrowserStatus {
     pub running: bool,
+    /// Capture session this browser's proxy traffic and JS Hooks belong to.
+    pub owner_session_id: String,
     pub debug_port: u16,
     pub target_id: String,
     pub web_socket_debugger_url: String,

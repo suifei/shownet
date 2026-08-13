@@ -34,6 +34,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
+import { DEFAULT_BROWSER_URL, readStoredBrowserUrl, writeStoredBrowserUrl } from "../browserSessionUrl";
 import { userAgentMetadataFor } from "../browserIdentity";
 import {
   BROWSER_LANGUAGE_STORAGE_KEY,
@@ -44,6 +45,7 @@ import {
   normalizeBrowserLanguage,
 } from "../browserLanguage";
 import { useDismissibleLayer } from "../useDismissibleLayer";
+import { useConfirm } from "./ConfirmDialog";
 import {
   browserInstallLab,
   browserReload,
@@ -61,7 +63,9 @@ interface BrowserViewProps {
   /** When false the view stays mounted (keep-alive) but is not the active workspace. */
   active: boolean;
   capturing: boolean;
+  /** The capture session that owns this browser, not the session selected for history viewing. */
   sessionId: string;
+  sessionName: string;
   onAnalyzeCryptoLab: () => void;
 }
 
@@ -88,32 +92,6 @@ const LAB_BINDING = "__SHOWNET_LAB_BINDING__";
 /** Must match `browser.rs` SCREEN_WIDTH / SCREEN_HEIGHT and `--screen-info`. */
 const BROWSER_SCREEN_WIDTH = 1920;
 const BROWSER_SCREEN_HEIGHT = 1080;
-/** sessionStorage key prefix for last navigated URL (P2 optional keep-alive restore). */
-const LAST_URL_STORAGE_KEY = "shownet.browser.lastUrl";
-
-function browserUrlStorageKey(sessionId: string): string {
-  return `${LAST_URL_STORAGE_KEY}:${encodeURIComponent(sessionId)}`;
-}
-
-function readStoredBrowserUrl(sessionId: string): string | null {
-  try {
-    const value = sessionStorage.getItem(browserUrlStorageKey(sessionId))?.trim() ?? "";
-    if (/^https?:\/\//i.test(value) && !/^chrome/i.test(value)) return value;
-  } catch {
-    /* private mode / SSR */
-  }
-  return null;
-}
-
-function writeStoredBrowserUrl(sessionId: string, url: string) {
-  try {
-    if (/^https?:\/\//i.test(url) && !/^chrome/i.test(url)) {
-      sessionStorage.setItem(browserUrlStorageKey(sessionId), url);
-    }
-  } catch {
-    /* ignore */
-  }
-}
 const REMOTE_SELECTION_EXPRESSION = `(() => {
   const active = document.activeElement;
   if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
@@ -143,9 +121,10 @@ type CdpSend = (method: string, params?: Record<string, unknown>, onResult?: Cdp
 type LabStatusPayload = { phase?: string; status?: number; endpoint?: string; message?: string };
 type BrowserFileDropState = { phase: "ready" | "delivered"; count: number } | null;
 
-export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }: BrowserViewProps) {
-  const [address, setAddress] = useState(() => readStoredBrowserUrl(sessionId) ?? "https://example.com");
-  const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl(sessionId) ?? "https://example.com");
+export function BrowserView({ active, capturing, sessionId, sessionName, onAnalyzeCryptoLab }: BrowserViewProps) {
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [address, setAddress] = useState(() => readStoredBrowserUrl(sessionId) ?? DEFAULT_BROWSER_URL);
+  const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl(sessionId) ?? DEFAULT_BROWSER_URL);
   const [externalPage, setExternalPage] = useState<string | null>(null);
   const [hookPanel, setHookPanel] = useState(true);
   const [hookFilter, setHookFilter] = useState("all");
@@ -201,30 +180,35 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const nativeDropPointRef = useRef<{ x: number; y: number } | null>(null);
   const nativeDropClearTimerRef = useRef(0);
   const challengeProbeTimerRef = useRef(0);
-  const currentSessionIdRef = useRef(sessionId);
   const windowScaleFactorRef = useRef(window.devicePixelRatio || 1);
   const desktop = isTauri();
 
   useDismissibleLayer(browserMenuOpen, browserMenuRef, () => setBrowserMenuOpen(false));
 
-  useEffect(() => {
-    const previousSessionId = currentSessionIdRef.current;
-    currentSessionIdRef.current = sessionId;
-    if (previousSessionId && previousSessionId !== sessionId) {
-      cdpSendRef.current?.("Page.stopScreencast");
-      cdpSocketRef.current?.close();
-      cdpSocketRef.current = null;
-      cdpSendRef.current = null;
-      cdpPendingRef.current.clear();
-      setProxyBrowser(null);
-      setScreencastFrame(null);
-      screencastFrameRef.current = null;
-      setBrowserLoading(false);
-      setBrowserConnecting(false);
-      if (desktop) void invoke("stop_proxy_browser").catch(() => undefined);
+  const requireMatchingBrowserOwner = (status: ProxyBrowserStatus) => {
+    if (status.ownerSessionId !== sessionId) {
+      throw new Error(`内嵌浏览器属于其他抓包会话，已拒绝连接`);
     }
+    return status;
+  };
+
+  const confirmBrowserReset = (reason: string) => confirm({
+    title: reason,
+    detail: "Chrome 将以新的临时环境重启；当前登录状态、表单内容、页面历史和长连接会被清除。",
+    confirmLabel: "重启并清除",
+    tone: "danger",
+  });
+
+  const confirmBrowserStop = () => confirm({
+    title: "停止内嵌浏览器？",
+    detail: "Chrome 将关闭；当前登录状态、表单内容、页面历史和长连接会被清除。",
+    confirmLabel: "停止并清除",
+    tone: "danger",
+  });
+
+  useEffect(() => {
     const stored = readStoredBrowserUrl(sessionId);
-    const nextUrl = stored ?? "https://example.com";
+    const nextUrl = stored ?? DEFAULT_BROWSER_URL;
     setAddress(nextUrl);
     setCurrentUrl(nextUrl);
     setExternalPage(null);
@@ -232,7 +216,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     setChallengeHost("");
     setReloadLoopHost("");
     navigationLogRef.current = [];
-  }, [desktop, sessionId]);
+  }, [sessionId]);
 
   const handleLabStatus = useCallback((payload: LabStatusPayload) => {
     if (payload.phase !== "running" && payload.phase !== "complete" && payload.phase !== "error") return;
@@ -278,7 +262,8 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     if (desktopRef.current) void invoke("stop_proxy_browser").catch(() => undefined);
   }, []);
 
-  // Stop capture tears down the isolated proxy Chrome (documented default). Switching nav tabs does not.
+  // The backend owns capture-stop teardown. Release only this UI's CDP state here;
+  // sending a second async stop can arrive after a fast restart and kill the new browser.
   useEffect(() => {
     if (capturing || !proxyBrowser?.running) return;
     cdpSendRef.current?.("Page.stopScreencast");
@@ -289,7 +274,6 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     setProxyBrowser(null);
     screencastFrameRef.current = null;
     setScreencastFrame(null);
-    void invoke("stop_proxy_browser").catch((error) => setBrowserError(String(error)));
   }, [capturing, proxyBrowser?.running]);
 
   useEffect(() => {
@@ -348,6 +332,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
       try {
         const status = await getProxyBrowserStatus().catch(() => null);
         if (cancelled || !status?.running || !status.webSocketDebuggerUrl) return;
+        requireMatchingBrowserOwner(status);
         if (cdpSendRef.current) return;
         setProxyBrowser(status);
         setBusNote("正在重连 CDP…");
@@ -407,7 +392,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     event.preventDefault();
     let target = address.trim();
     if (!target) return;
-    if (!/^https?:\/\//i.test(target)) target = `https://${target}`;
+    if (target !== DEFAULT_BROWSER_URL && !/^https?:\/\//i.test(target)) target = `https://${target}`;
     setAddress(target);
     setCurrentUrl(target);
     setExternalPage(target);
@@ -663,7 +648,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
               ? status.labUrl
               : destination
                 ? destination
-                : (stored ?? status.labUrl);
+                : (stored ?? DEFAULT_BROWSER_URL);
           setAddress(navigateUrl);
           setCurrentUrl(navigateUrl);
           writeStoredBrowserUrl(sessionId, navigateUrl);
@@ -675,6 +660,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         resolve();
       });
       socket.addEventListener("message", (message) => {
+        if (cdpSocketRef.current !== socket) return;
         let packet: { id?: number; method?: string; result?: Record<string, unknown>; params?: Record<string, unknown>; error?: { message?: string } };
         try { packet = JSON.parse(String(message.data)); } catch { return; }
         if (packet.id != null) {
@@ -791,12 +777,14 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         }
       });
       socket.addEventListener("error", () => {
+        if (cdpSocketRef.current !== socket) return;
         setBrowserError("无法连接 Chrome CDP");
         setBusNote("CDP 连接错误");
         setBrowserConnecting(false);
         if (!opened) reject(new Error("无法连接 Chrome CDP"));
       });
       socket.addEventListener("close", () => {
+        if (cdpSocketRef.current !== socket) return;
         cdpSendRef.current = null;
         cdpSocketRef.current = null;
         cdpPendingRef.current.clear();
@@ -814,6 +802,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   async function launchProxyChrome(destination?: string) {
     if (!desktop || browserConnecting) return;
     if (proxyBrowser?.running) {
+      if (!await confirmBrowserStop()) return;
       await stopProxyChrome();
       return;
     }
@@ -828,7 +817,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     cdpSocketRef.current = null;
     cdpSendRef.current = null;
     cdpPendingRef.current.clear();
-    await invoke("stop_proxy_browser");
+    await invoke("stop_proxy_browser", { expectedInstanceId: proxyBrowser?.sourceInstanceId ?? null });
     setProxyBrowser(null);
     screencastFrameRef.current = null;
     setScreencastFrame(null);
@@ -859,7 +848,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         browserLanguage: options?.browserLanguage ?? browserLanguage,
       });
       const busStatus = await getProxyBrowserStatus().catch(() => null);
-      const resolved = busStatus?.running ? busStatus : status;
+      const resolved = requireMatchingBrowserOwner(busStatus?.running ? busStatus : status);
       setProxyBrowser(resolved);
       setBusNote(busStatus?.running ? "Browser 总线已就绪" : "Browser 已启动");
       await attachCdpSession(resolved, destination, { navigate: true });
@@ -1237,6 +1226,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
       setBrowserLanguageError("请输入有效语言，例如 th-TH");
       return;
     }
+    if (proxyBrowser?.running && !await confirmBrowserReset(`应用浏览器语言 ${normalized}？`)) return;
     setBrowserLanguage(normalized);
     setBrowserLanguageDraft(normalized);
     setBrowserLanguageError("");
@@ -1272,6 +1262,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         );
         return;
       }
+      if (proxyBrowser?.running && !await confirmBrowserReset(`关闭 Hook 并重试 ${host}？`)) return;
       hooksEnabledRef.current = false;
       setHooksEnabled(false);
       setBusNote(`正在为 ${host} 关闭 Hook 后重试（MITM + Chrome 出站 JA4 保持）`);
@@ -1312,7 +1303,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     }
   };
 
-  const closeCurrentPage = () => {
+  const closeBrowserWorkspace = () => {
     setBrowserMenuOpen(false);
     if (desktop && proxyBrowser?.running) {
       void launchProxyChrome();
@@ -1324,12 +1315,28 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     setPageTitle("新标签页");
   };
 
+  const toggleHooks = async () => {
+    const next = !hooksEnabled;
+    if (proxyBrowser?.running && !await confirmBrowserReset(`${next ? "开启" : "关闭"} JS Hook？`)) return;
+    hooksEnabledRef.current = next;
+    setHooksEnabled(next);
+    if (!proxyBrowser?.running) return;
+    const destination = currentUrl;
+    try {
+      await stopProxyChrome();
+      await startProxyChrome(destination);
+    } catch (error) {
+      setBrowserError(`重启内嵌浏览器失败：${String(error)}`);
+    }
+  };
+
   return (
     <section className={`browser-view ${probePanelOpen ? "has-probe" : hookPanel ? "has-hooks" : ""}`}>
       <div className="embedded-browser">
         <div className="browser-tabs">
-          <div className="browser-tab is-active"><span className="target-favicon">{pageTitle.trim().charAt(0).toUpperCase() || "S"}</span><span>{pageTitle}</span><button type="button" onClick={closeCurrentPage} disabled={!proxyBrowser?.running && !externalPage} title="关闭当前页面" aria-label="关闭当前页面"><X size={13} /></button></div>
+          <div className="browser-tab is-active"><span className="target-favicon">{pageTitle.trim().charAt(0).toUpperCase() || "S"}</span><span>{pageTitle}</span></div>
           <div className="browser-tabs__spacer" />
+          <span className="browser-owner" title={`浏览器流量与 Hook 写入 ${sessionName}`}><CircleDot size={13} />写入 {sessionName}</span>
           <span className={`cdp-state ${receiverReady ? "is-connected" : ""}`}><CircleDot size={13} />Hook 接收器 {receiverReady ? "已就绪" : "连接中"}</span>
           <div className="browser-menu-anchor" ref={browserMenuRef}>
             <button className={`icon-button ${browserMenuOpen ? "is-active" : ""}`} onClick={() => setBrowserMenuOpen((open) => !open)} title="浏览器菜单" aria-expanded={browserMenuOpen}><MoreHorizontal size={17} /></button>
@@ -1354,7 +1361,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                   {BROWSER_LANGUAGE_SUGGESTIONS.map((language) => <option key={language} value={language} />)}
                 </datalist>
               </form>
-              <button role="menuitem" onClick={closeCurrentPage} disabled={!proxyBrowser?.running && !externalPage}><X size={14} />关闭当前页面</button>
+              <button role="menuitem" onClick={closeBrowserWorkspace} disabled={!proxyBrowser?.running && !externalPage}><X size={14} />停止内嵌浏览器</button>
             </div>}
           </div>
         </div>
@@ -1386,30 +1393,11 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             <FlaskConical size={16} />
             <span>{fixtureProbing ? "探针中" : "样本探针"}</span>
           </button>
-          <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "CDP" : "Chrome"}</span></button>
+          <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器（会清除临时登录状态）" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "停止" : "Chrome"}</span></button>
           <button
             className={`hook-toggle ${hooksEnabled ? "is-active" : ""}`}
             disabled={browserConnecting}
-            onClick={() => {
-              const next = !hooksEnabled;
-              hooksEnabledRef.current = next;
-              setHooksEnabled(next);
-              // addScriptToEvaluateOnNewDocument is registered at document
-              // creation, so the choice only reaches a fresh browser.
-              // launchProxyChrome is a toggle — calling it once on a running
-              // browser only stopped it and dropped the user on a dead surface.
-              if (proxyBrowser?.running) {
-                const destination = currentUrl;
-                void (async () => {
-                  try {
-                    await stopProxyChrome();
-                    await startProxyChrome(destination);
-                  } catch (error) {
-                    setBrowserError(`重启内嵌浏览器失败：${String(error)}`);
-                  }
-                })();
-              }
-            }}
+            onClick={() => void toggleHooks()}
             title={hooksEnabled ? "关闭 JS Hook 注入（风控站点可先关掉验证；流量仍在代理侧抓取）" : "开启 JS Hook 注入"}
           >
             <Code2 size={16} /><span>{hooksEnabled ? "Hook 开" : "Hook 关"}</span>
@@ -1644,6 +1632,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
           <footer className="hook-panel__footer"><span><span className={`live-dot ${pausedDisplay ? "" : "is-on"}`} />{pausedDisplay ? "显示已暂停" : "实时记录"}</span><button onClick={() => setPausedDisplay((paused) => !paused)}>{pausedDisplay ? <Eye size={14} /> : <EyeOff size={14} />}{pausedDisplay ? "继续显示" : "暂停显示"}</button></footer>
         </aside>
       )}
+      {confirmDialog}
     </section>
   );
 }
