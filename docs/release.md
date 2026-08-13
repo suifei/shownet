@@ -100,9 +100,10 @@ archives unless a separately documented option explicitly says so.
 ## Update source
 
 The published GitHub release is the update manifest. `src-tauri/src/updates.rs`
-reads `/releases/latest`, validates SemVer and HTTPS asset URLs, and selects an
-artifact by platform and architecture. A missing compatible asset opens the
-release page instead of offering an unusable download.
+reads `https://api.github.com/repos/suifei/shownet/releases/latest`, validates
+SemVer and HTTPS asset URLs, and selects an artifact by platform and
+architecture. A missing compatible asset opens the release page instead of
+offering an unusable download.
 
 Keep these names stable:
 
