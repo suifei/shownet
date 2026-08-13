@@ -4,15 +4,9 @@
     "macOS": {
       "hardenedRuntime": true
     },
-    "externalBin": [
-      "binaries/grok-build"
-    ],
     "resources": {
       "../LICENSE": "licenses/ShowNet/LICENSE",
-      "../THIRD_PARTY_NOTICES.md": "licenses/ShowNet/THIRD_PARTY_NOTICES.md",
-      "../third-party/grok-build/LICENSE": "licenses/grok-build/LICENSE",
-      "../third-party/grok-build/THIRD-PARTY-NOTICES": "licenses/grok-build/THIRD-PARTY-NOTICES",
-      "binaries/grok-build-source.json": "licenses/grok-build/SOURCE.json"
+      "../THIRD_PARTY_NOTICES.md": "licenses/ShowNet/THIRD_PARTY_NOTICES.md"
     }
   }
 }

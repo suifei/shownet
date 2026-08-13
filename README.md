@@ -25,7 +25,7 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 | **Skill 编排** | 动态签名、风控标记、证据过滤等内置 Skill 自动入选，带权限与工具列表 |
 | **Graph 阶段** | 范围确认 → 调用链关联 → 证据核验 → 报告；进度可回看 |
 | **可回查结论** | 报告中的发现可链回原始请求；Skill 运行有审计（工具调用、时长、状态） |
-| **内置 Agent** | 正式包携带官方 `xai-org/grok-build` 无头运行时（sidecar），也可接 OpenAI 兼容 API |
+| **Agent 运行时** | 优先使用系统 Grok；未安装时可运行 x.ai 官方 stable 安装器，也可手动选择可执行文件。ShowNet 发布包不再内置或编译 Grok，应用端点 / Skills / MCP 只注入本次子进程 |
 | **MCP** | 本地 ShowNet MCP + 可选外部 Streamable HTTP MCP，工具按需取证 |
 
 适合：看不懂协议字段、要还原签名 / 加密顺序、需要可复查的分析流水线，而不是一次性聊天总结。
@@ -352,21 +352,18 @@ npm run tauri dev
 npm run test:rust:network
 ```
 
-内置 Agent sidecar 使用 x.ai 官方 stable 二进制，不在 ShowNet 仓库编译：
-
-```bash
-npm run download:agent-sidecar -- --resolve-version
-npm run download:agent-sidecar -- --target aarch64-apple-darwin --version <version>
-npm run check:release -- --require-agent-target aarch64-apple-darwin
-npm run test:agent-sidecar
-```
+ShowNet 不再编译或捆绑 Agent。应用会先探测系统 Grok；未安装时可在
+“设置 / AI 模型 / Agent 运行时”中运行 x.ai 官方 stable 安装器。官方安装器
+会维护 `~/.grok/bin`、用户 PATH 与 Grok 安装元数据；ShowNet 的 AI 端点、
+API Key、Skills、MCP 和可选出口代理只注入本次 Agent 进程，不写入 Grok
+全局业务配置。
 
 ## 状态
 
-当前桌面里程碑已覆盖：会话与请求持久化、MITM HTTPS/H2、Root CA 与设备引导、系统代理恢复、内嵌浏览器与 Hook、AST 加密代码提取、两阶段 AI 分析、Skill/MCP/Agent sidecar、算法重放与多语言代码导出、版本化出站 TLS 预置与高级控制台等。TUN、商店级签名安装包与完整物理机矩阵仍为后续项。
+当前桌面里程碑已覆盖：会话与请求持久化、MITM HTTPS/H2、Root CA 与设备引导、系统代理恢复、内嵌浏览器与 Hook、AST 加密代码提取、两阶段 AI 分析、Skill/MCP/系统 Agent 集成、算法重放与多语言代码导出、版本化出站 TLS 预置与高级控制台等。TUN、商店级签名安装包与完整物理机矩阵仍为后续项。
 
 ## License
 
 Copyright (C) 2026 ShowNet contributors.
 
-ShowNet is free software licensed under the [GNU General Public License version 3](LICENSE) (`GPL-3.0-only`). Bundled Agent and other dependencies: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+ShowNet is free software licensed under the [GNU General Public License version 3](LICENSE) (`GPL-3.0-only`). Optional Agent and other dependency notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

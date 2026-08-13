@@ -105,15 +105,14 @@ describe("signed macOS release gate", () => {
     assert.match(workflow, /shownet-macos-aarch64/);
     assert.match(workflow, /shownet-windows-x86_64/);
     assert.match(workflow, /softprops\/action-gh-release/);
-    assert.match(workflow, /Resolve latest official stable Grok version/);
-    assert.match(workflow, /npm run download:agent-sidecar/);
-    assert.match(workflow, /npm run test:agent-sidecar/);
+    assert.doesNotMatch(workflow, /download:agent-sidecar|resolve-agent|require-agent-target|x\.ai\/cli\/install\.(?:sh|ps1)/);
+    assert.doesNotMatch(config, /externalBin|grok-build/);
     assert.doesNotMatch(workflow, /arduino\/setup-protoc@v3/);
     assert.doesNotMatch(workflow, /build:agent-sidecar/);
     assert.match(verifier, /codesign[\s\S]*--deep[\s\S]*--strict/);
     assert.match(verifier, /stapler[\s\S]*validate/);
     assert.match(verifier, /runTool\("spctl"/);
     assert.match(verifier, /source=Notarized Developer ID/);
-    assert.match(verifier, /Contents\/MacOS\/grok-build/);
+    assert.doesNotMatch(verifier, /Contents\/MacOS\/grok-build|Agent sidecar/);
   });
 });

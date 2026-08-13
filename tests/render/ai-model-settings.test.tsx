@@ -62,6 +62,30 @@ function stubBackend(discoveredModels = DISCOVERED, savedModel = SAVED_MODEL, di
           allowMcpTools: true,
           streamingOutput: true,
         };
+      case "get_agent_runtime_status":
+        return {
+          settings: { provider: "grok", useUpstreamProxy: false },
+          available: false,
+          compatible: false,
+          installedByShownet: false,
+          updateAvailable: false,
+          installSupported: true,
+          platform: "macos-aarch64",
+          message: "系统中未找到 Grok",
+        };
+      case "install_official_agent_runtime":
+        return {
+          settings: { provider: "grok", executablePath: "/Users/test/.grok/bin/grok", useUpstreamProxy: false },
+          available: true,
+          compatible: true,
+          executablePath: "/Users/test/.grok/bin/grok",
+          version: "1.0.3",
+          installedByShownet: true,
+          updateAvailable: false,
+          installSupported: true,
+          platform: "macos-aarch64",
+          message: "Grok 已通过版本和命令行兼容性探测",
+        };
       case "save_ai_analysis_settings":
         return (args as { settings: Record<string, unknown> }).settings;
       default:
@@ -161,6 +185,28 @@ describe("model selection stays typable after discovery", () => {
     renderAiSettings();
 
     await waitFor(() => expect(screen.getByText("同步模型")).toBeInTheDocument());
+  });
+});
+
+describe("Agent runtime setup", () => {
+  it("offers direct official installation without requiring a proxy", async () => {
+    renderAiSettings();
+    await waitFor(() => expect(screen.getByText("未找到可用的 Grok")).toBeInTheDocument());
+
+    expect(screen.getByRole("button", { name: "一键安装" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "下载与检查更新时使用 ShowNet 出口代理" })).toBeDisabled();
+    expect(screen.getByText(/部分网络环境可能需要海外代理，默认使用直连/)).toBeInTheDocument();
+  });
+
+  it("installs from the backend and shows the detected global path", async () => {
+    renderAiSettings();
+    await waitFor(() => expect(screen.getByRole("button", { name: "一键安装" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "一键安装" }));
+
+    await waitFor(() => expect(screen.getByText("Grok 1.0.3")).toBeInTheDocument());
+    expect(screen.getByText("/Users/test/.grok/bin/grok")).toBeInTheDocument();
+    const call = vi.mocked(invoke).mock.calls.find(([command]) => command === "install_official_agent_runtime");
+    expect(call?.[1]).toEqual({ useUpstreamProxy: false });
   });
 });
 

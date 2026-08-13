@@ -1,5 +1,7 @@
+use crate::agent_runtime;
 use crate::models::{
-    EffectiveAiProviderSettings, EffectiveMcpServerSettings, EffectiveUpstreamProxy,
+    AgentRuntimeSettings, EffectiveAiProviderSettings, EffectiveMcpServerSettings,
+    EffectiveUpstreamProxy,
 };
 use crate::skills::{self, SkillPlan};
 use serde_json::Value;
@@ -53,6 +55,7 @@ pub async fn try_run<F, A>(
     upstream: &EffectiveUpstreamProxy,
     skill_plan: &SkillPlan,
     max_agent_turns: u32,
+    runtime_settings: &AgentRuntimeSettings,
     prompt: &str,
     on_delta: F,
     on_activity: A,
@@ -61,21 +64,23 @@ where
     F: FnMut(&str) -> Result<(), String>,
     A: FnMut(GrokActivity) -> Result<(), String>,
 {
-    let Some(binary) = discover_binary() else {
-        return Ok(None);
+    let runtime = match agent_runtime::resolve(app, runtime_settings).await {
+        Ok(runtime) => runtime,
+        Err(_) => return Ok(None),
     };
     let base_dir = app
         .path()
         .app_cache_dir()
         .map_err(|error| format!("无法定位内置 Agent 缓存目录: {error}"))?
         .join("agent-runtime");
+    let injected_upstream = runtime_settings.use_upstream_proxy.then_some(upstream);
     run_with_binary(
-        &binary,
+        &runtime.executable,
         &base_dir,
         report_id,
         settings,
         mcp,
-        upstream,
+        injected_upstream,
         skill_plan,
         max_agent_turns,
         prompt,
@@ -94,7 +99,7 @@ async fn run_with_binary<F, A>(
     report_id: &str,
     settings: &EffectiveAiProviderSettings,
     mcp: Option<&EffectiveMcpServerSettings>,
-    upstream: &EffectiveUpstreamProxy,
+    upstream: Option<&EffectiveUpstreamProxy>,
     skill_plan: &SkillPlan,
     max_agent_turns: u32,
     prompt: &str,
@@ -363,22 +368,17 @@ fn runtime_config(
 
 fn configure_upstream_proxy(
     command: &mut Command,
-    upstream: &EffectiveUpstreamProxy,
+    upstream: Option<&EffectiveUpstreamProxy>,
     target_base_url: &str,
 ) -> Result<(), String> {
-    command.env("NO_PROXY", "127.0.0.1,localhost,::1");
-    command.env("no_proxy", "127.0.0.1,localhost,::1");
+    let local_bypass = merge_local_no_proxy();
+    command.env("NO_PROXY", &local_bypass);
+    command.env("no_proxy", &local_bypass);
+    let Some(upstream) = upstream else {
+        return Ok(());
+    };
     if upstream.mode == "direct" || target_is_bypassed(target_base_url, &upstream.bypass) {
-        for name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            command.env_remove(name);
-        }
+        remove_proxy_environment(command);
         return Ok(());
     }
     let scheme = if upstream.mode == "socks5" {
@@ -408,6 +408,43 @@ fn configure_upstream_proxy(
     Ok(())
 }
 
+fn remove_proxy_environment(command: &mut Command) {
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env_remove(name);
+    }
+}
+
+fn merge_local_no_proxy() -> String {
+    let mut entries = ["NO_PROXY", "no_proxy"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for local in ["127.0.0.1", "localhost", "::1"] {
+        if !entries
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(local))
+        {
+            entries.push(local.to_string());
+        }
+    }
+    entries.join(",")
+}
+
 fn target_is_bypassed(base_url: &str, bypass: &[String]) -> bool {
     let host = base_url
         .split_once("://")
@@ -430,6 +467,7 @@ fn target_is_bypassed(base_url: &str, bypass: &[String]) -> bool {
     })
 }
 
+#[cfg(test)]
 fn discover_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SHOWNET_GROK_BINARY") {
         let path = PathBuf::from(path);
@@ -437,31 +475,7 @@ fn discover_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let executable_name = if cfg!(windows) {
-        "grok-build.exe"
-    } else {
-        "grok-build"
-    };
-    let target_name = format!("grok-build-{}{}", target_triple(), executable_suffix());
-    let mut candidates = Vec::new();
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(parent) = current.parent() {
-            candidates.push(parent.join(executable_name));
-            candidates.push(parent.join(&target_name));
-        }
-    }
-    candidates.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join(&target_name),
-    );
-    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
-        return Some(path);
-    }
-    if cfg!(debug_assertions) {
-        return find_on_path(if cfg!(windows) { "grok.exe" } else { "grok" });
-    }
-    None
+    find_on_path(if cfg!(windows) { "grok.exe" } else { "grok" })
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -470,26 +484,6 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
-}
-
-fn target_triple() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        _ => "unsupported-target",
-    }
-}
-
-fn executable_suffix() -> &'static str {
-    if cfg!(windows) {
-        ".exe"
-    } else {
-        ""
-    }
 }
 
 fn toml_string(value: &str) -> String {
@@ -625,12 +619,12 @@ mod tests {
             let size = socket.read(&mut chunk).await.unwrap();
             assert!(
                 size > 0,
-                "sidecar closed the connection before sending a request"
+                "Grok closed the connection before sending a request"
             );
             request.extend_from_slice(&chunk[..size]);
             assert!(
                 request.len() <= 2 * 1024 * 1024,
-                "sidecar request exceeded test limit"
+                "Grok request exceeded test limit"
             );
 
             if expected_length.is_none() {
@@ -644,7 +638,7 @@ mod tests {
                         .lines()
                         .find_map(|line| line.strip_prefix("content-length:"))
                         .and_then(|value| value.trim().parse::<usize>().ok())
-                        .expect("sidecar request must include content-length");
+                        .expect("Grok request must include content-length");
                     expected_length = Some(header_end + content_length);
                 }
             }
@@ -774,15 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn target_sidecar_name_matches_tauri_convention() {
-        assert_ne!(target_triple(), "unsupported-target");
-        assert!(
-            format!("grok-build-{}{}", target_triple(), executable_suffix())
-                .starts_with("grok-build-")
-        );
-    }
-
-    #[test]
     fn agent_turn_limit_uses_configured_value_without_a_fixed_ceiling() {
         assert_eq!(normalized_agent_turn_limit(0), 1);
         assert_eq!(normalized_agent_turn_limit(8), 8);
@@ -794,21 +779,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires the built Agent sidecar and local socket permissions"]
-    async fn real_sidecar_streams_openai_report_and_cleans_runtime_directory() {
-        let binary = discover_binary().expect(
-            "download the current target sidecar with `npm run download:agent-sidecar -- --target <target> --version <version>` before this test",
-        );
+    #[ignore = "requires a compatible system Grok and local socket permissions"]
+    async fn real_system_grok_streams_openai_report_and_cleans_runtime_directory() {
+        let binary = discover_binary()
+            .expect("install Grok globally or set SHOWNET_GROK_BINARY before this test");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let base_dir = std::env::temp_dir().join(format!(
-            "shownet-sidecar-integration-{}",
+            "shownet-system-grok-integration-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let server_base_dir = base_dir.clone();
         let response_body = concat!(
             "data: {\"id\":\"chatcmpl-shownet\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-sidecar-test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"checking local evidence\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-shownet\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-sidecar-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"# Sidecar report\\n\\nSIDECAR_E2E_OK\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-shownet\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-sidecar-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"# System Grok report\\n\\nSYSTEM_GROK_E2E_OK\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: {\"id\":\"chatcmpl-shownet\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-sidecar-test\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
             "data: [DONE]\n\n"
         )
@@ -830,7 +814,7 @@ mod tests {
                     let run_dir = fs::read_dir(&server_base_dir)
                         .unwrap()
                         .next()
-                        .expect("runtime directory should exist while the sidecar is running")
+                        .expect("runtime directory should exist while Grok is running")
                         .unwrap()
                         .path();
                     let config = fs::read_to_string(run_dir.join("home/config.toml")).unwrap();
@@ -910,10 +894,10 @@ mod tests {
         let run_result = run_with_binary(
             &binary,
             &base_dir,
-            "sidecar-e2e",
+            "system-grok-e2e",
             &settings,
             None,
-            &upstream,
+            Some(&upstream),
             &skill_plan,
             8,
             "SIDECAR_E2E_PROMPT",
@@ -935,7 +919,7 @@ mod tests {
             .map(|request| request.lines().next().unwrap_or_default().to_string())
             .collect::<Vec<_>>();
         let result = run_result
-            .unwrap_or_else(|error| panic!("{error}; sidecar HTTP requests: {request_lines:?}"));
+            .unwrap_or_else(|error| panic!("{error}; Grok HTTP requests: {request_lines:?}"));
         let chat_requests = requests
             .iter()
             .filter(|request| request.starts_with("POST /v1/chat/completions HTTP/1.1"))
@@ -960,7 +944,7 @@ mod tests {
                 })
             })
             .unwrap_or_else(|| {
-                panic!("main sidecar prompt was not sent; request models: {request_models:?}")
+                panic!("main Grok prompt was not sent; request models: {request_models:?}")
             });
         let request_lower = request.to_ascii_lowercase();
         assert!(request_lower.contains("authorization: bearer integration-secret"));
@@ -977,7 +961,7 @@ mod tests {
         assert_eq!(payload["stream"], true);
         assert_eq!(payload["stream_options"]["include_usage"], true);
         assert!(payload.to_string().contains("SIDECAR_E2E_PROMPT"));
-        assert_eq!(result.content, "# Sidecar report\n\nSIDECAR_E2E_OK");
+        assert_eq!(result.content, "# System Grok report\n\nSYSTEM_GROK_E2E_OK");
         assert_eq!(output, result.content);
         assert_eq!(
             activities,
@@ -988,17 +972,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires the built Agent sidecar and local socket permissions"]
-    async fn real_sidecar_discovers_calls_and_consumes_shownet_mcp_tool() {
-        let binary = discover_binary().expect(
-            "download the current target sidecar with `npm run download:agent-sidecar -- --target <target> --version <version>` before this test",
-        );
+    #[ignore = "requires a compatible system Grok and local socket permissions"]
+    async fn real_system_grok_discovers_calls_and_consumes_shownet_mcp_tool() {
+        let binary = discover_binary()
+            .expect("install Grok globally or set SHOWNET_GROK_BINARY before this test");
         let model_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let model_address = model_listener.local_addr().unwrap();
         let mcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mcp_address = mcp_listener.local_addr().unwrap();
         let base_dir = std::env::temp_dir().join(format!(
-            "shownet-sidecar-mcp-integration-{}",
+            "shownet-system-grok-mcp-integration-{}",
             uuid::Uuid::new_v4().simple()
         ));
 
@@ -1021,7 +1004,7 @@ mod tests {
                 let response = if serialized.contains("generating the session title") {
                     text_sse("ShowNet MCP integration")
                 } else if serialized.contains("MCP_EVIDENCE_OK") {
-                    text_sse("# MCP sidecar report\n\nMCP_TOOL_E2E_OK")
+                    text_sse("# MCP system Grok report\n\nMCP_TOOL_E2E_OK")
                 } else {
                     let tool_names = payload["tools"]
                         .as_array()
@@ -1174,10 +1157,10 @@ mod tests {
         let run_result = run_with_binary(
             &binary,
             &base_dir,
-            "sidecar-mcp-e2e",
+            "system-grok-mcp-e2e",
             &settings,
             Some(&mcp),
-            &upstream,
+            Some(&upstream),
             &skill_plan,
             8,
             "Use the ShowNet request tool before writing the report.",
@@ -1204,7 +1187,10 @@ mod tests {
             )
         });
 
-        assert_eq!(result.content, "# MCP sidecar report\n\nMCP_TOOL_E2E_OK");
+        assert_eq!(
+            result.content,
+            "# MCP system Grok report\n\nMCP_TOOL_E2E_OK"
+        );
         assert_eq!(output, result.content);
         assert!(mcp_requests
             .iter()

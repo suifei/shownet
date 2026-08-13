@@ -1292,6 +1292,48 @@ pub struct AiAnalysisSettings {
     pub max_agent_turns: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AgentRuntimeSettings {
+    pub provider: String,
+    pub executable_path: Option<String>,
+    pub use_upstream_proxy: bool,
+}
+
+impl Default for AgentRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            provider: "grok".to_string(),
+            executable_path: None,
+            use_upstream_proxy: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeSettingsInput {
+    pub provider: String,
+    pub executable_path: Option<String>,
+    pub use_upstream_proxy: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeStatus {
+    pub settings: AgentRuntimeSettings,
+    pub available: bool,
+    pub compatible: bool,
+    pub executable_path: Option<String>,
+    pub version: Option<String>,
+    pub installed_by_shownet: bool,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub install_supported: bool,
+    pub platform: String,
+    pub message: String,
+}
+
 impl Default for AiAnalysisSettings {
     fn default() -> Self {
         Self {

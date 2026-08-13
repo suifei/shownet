@@ -145,19 +145,7 @@ export async function verifyMacosRelease(options) {
   if (version !== packageJson.version) throw new Error(`bundle version ${version} does not match ${packageJson.version}`);
 
   const mainExecutable = resolve(appPath, "Contents/MacOS", executableName);
-  const sidecar = resolve(appPath, "Contents/MacOS/grok-build");
   await assertFile(mainExecutable, "main executable");
-  await assertFile(sidecar, "Agent sidecar");
-
-  const resources = resolve(appPath, "Contents/Resources/licenses/grok-build");
-  for (const file of ["LICENSE", "THIRD-PARTY-NOTICES"]) {
-    await assertSameFile(resolve(root, "third-party/grok-build", file), resolve(resources, file), `bundled ${file}`);
-  }
-  await assertSameFile(
-    resolve(root, "src-tauri/binaries/grok-build-source.json"),
-    resolve(resources, "SOURCE.json"),
-    "bundled Agent download provenance",
-  );
   const projectResources = resolve(appPath, "Contents/Resources/licenses/ShowNet");
   await assertSameFile(resolve(root, "LICENSE"), resolve(projectResources, "LICENSE"), "bundled ShowNet LICENSE");
   await assertSameFile(
@@ -165,24 +153,15 @@ export async function verifyMacosRelease(options) {
     resolve(projectResources, "THIRD_PARTY_NOTICES.md"),
     "bundled ShowNet THIRD_PARTY_NOTICES.md",
   );
-  const agentSource = JSON.parse(await readFile(resolve(root, "src-tauri/binaries/grok-build-source.json"), "utf8"));
-  const actualAgentVersion = runTool(sidecar, ["--version"]).trim();
-  if (actualAgentVersion !== agentSource.versionOutput) {
-    throw new Error(`Agent version ${actualAgentVersion} does not match ${agentSource.versionOutput}`);
-  }
-
   runTool("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);
   runTool("codesign", ["--verify", "--strict", "--verbose=4", mainExecutable]);
-  runTool("codesign", ["--verify", "--strict", "--verbose=4", sidecar]);
   runTool("codesign", ["--verify", "--strict", "--verbose=4", dmgPath]);
 
   const appSignatureOutput = runTool("codesign", ["-d", "--verbose=4", appPath]);
   const mainSignatureOutput = runTool("codesign", ["-d", "--verbose=4", mainExecutable]);
-  const sidecarSignatureOutput = runTool("codesign", ["-d", "--verbose=4", sidecar]);
   const dmgSignatureOutput = runTool("codesign", ["-d", "--verbose=4", dmgPath]);
   const appSignature = assertDeveloperIdSignature("application bundle", appSignatureOutput, options.teamId);
   const mainSignature = assertDeveloperIdSignature("main executable", mainSignatureOutput, options.teamId);
-  const sidecarSignature = assertDeveloperIdSignature("Agent sidecar", sidecarSignatureOutput, options.teamId);
   const dmgSignature = assertDeveloperIdSignature("DMG", dmgSignatureOutput, options.teamId, { requireRuntime: false });
   if (appSignature.identifier !== identifier) {
     throw new Error(`signed bundle identifier ${appSignature.identifier ?? "<missing>"} does not match ${identifier}`);
@@ -193,12 +172,6 @@ export async function verifyMacosRelease(options) {
     runTool("lipo", ["-archs", mainExecutable]),
     options.architecture,
   );
-  const sidecarArchitectures = assertArchitecture(
-    "Agent sidecar",
-    runTool("lipo", ["-archs", sidecar]),
-    options.architecture,
-  );
-
   runTool("hdiutil", ["verify", dmgPath]);
   runTool("xcrun", ["stapler", "validate", appPath]);
   runTool("xcrun", ["stapler", "validate", dmgPath]);
@@ -229,12 +202,6 @@ export async function verifyMacosRelease(options) {
       authority: appSignature.authorities[0],
       gatekeeper: appGatekeeper,
     },
-    agent: {
-      version: actualAgentVersion,
-      executableSha256: await sha256(sidecar),
-      architectures: sidecarArchitectures,
-      authority: sidecarSignature.authorities[0],
-    },
     diskImage: {
       name: basename(dmgPath),
       sha256: await sha256(dmgPath),
@@ -247,7 +214,7 @@ export async function verifyMacosRelease(options) {
       applicationTicketStapled: true,
       diskImageTicketStapled: true,
       gatekeeperAccepted: true,
-      pinnedAgentNotices: true,
+      agentBundled: false,
     },
   };
   if (options.report) {

@@ -14,6 +14,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,6 +35,8 @@ enum McpAuthorization {
 #[derive(Clone)]
 struct GraphMcpScope {
     analysis_id: String,
+    session_id: String,
+    allowed_tools: HashSet<String>,
     audit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -360,11 +363,15 @@ async fn execute_graph_scoped_tool(
     arguments: Value,
     allow_writes: bool,
 ) -> Result<Value, String> {
+    if !scope.allowed_tools.contains(name) {
+        return Err(format!("ShowNet MCP 拒绝本次分析未授权的工具: {name}"));
+    }
     let definition = tool_definitions(allow_writes)
         .into_iter()
         .find(|definition| definition.name == name)
         .ok_or_else(|| format!("ShowNet MCP 未提供能力: {name}"))?;
     let state = app.state::<AppState>();
+    validate_analysis_scope(&state, scope, &arguments)?;
     let report = state.storage.get_analysis_report(&scope.analysis_id)?;
     let node_id = {
         let _audit_guard = scope.audit_lock.lock().await;
@@ -380,7 +387,7 @@ async fn execute_graph_scoped_tool(
         app,
         &report,
         "graph-node",
-        format!("GrokBuild 根据证据切换到 {node_id}"),
+        format!("Grok 根据证据切换到 {node_id}"),
     )?;
 
     analysis::emit_agent_activity(
@@ -427,6 +434,31 @@ async fn execute_graph_scoped_tool(
         }
     }
     result
+}
+
+fn validate_analysis_scope(
+    state: &AppState,
+    scope: &GraphMcpScope,
+    arguments: &Value,
+) -> Result<(), String> {
+    if let Some(session_id) = arguments.get("sessionId").and_then(Value::as_str) {
+        if session_id != scope.session_id {
+            return Err("ShowNet MCP 拒绝读取本次分析会话之外的数据".to_string());
+        }
+    }
+    if let Some(request_id) = arguments.get("requestId").and_then(Value::as_str) {
+        let request = state.storage.get_request_detail(request_id)?;
+        if request.session_id != scope.session_id {
+            return Err("ShowNet MCP 拒绝读取本次分析会话之外的请求".to_string());
+        }
+    }
+    if let Some(analysis_id) = arguments.get("analysisId").and_then(Value::as_str) {
+        let report = state.storage.get_analysis_report(analysis_id)?;
+        if report.session_id != scope.session_id {
+            return Err("ShowNet MCP 拒绝读取本次分析会话之外的报告".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn graph_now_ms() -> i64 {
@@ -546,8 +578,10 @@ fn tools(allow_writes: bool) -> Vec<Value> {
 }
 
 fn tools_for_authorization(allow_writes: bool, authorization: &McpAuthorization) -> Vec<Value> {
-    let _ = authorization;
-    let definitions = tool_definitions(allow_writes);
+    let mut definitions = tool_definitions(allow_writes);
+    if let McpAuthorization::Analysis(scope) = authorization {
+        definitions.retain(|definition| scope.allowed_tools.contains(&definition.name));
+    }
     definitions
         .into_iter()
         .map(|definition| {
@@ -909,6 +943,8 @@ fn resolve_authorization(
                 .map(|_| {
                     McpAuthorization::Analysis(GraphMcpScope {
                         analysis_id: analysis_id.clone(),
+                        session_id: execution.session_id.clone(),
+                        allowed_tools: execution.graph_mcp_tools.clone(),
                         audit_lock: execution.graph_audit_lock.clone(),
                     })
                 })
@@ -1093,6 +1129,31 @@ mod tests {
         assert!(tool_count(true) > tool_count(false));
         assert_eq!(tool_count(false), read_names.len());
         assert_eq!(tool_count(true), write_names.len());
+    }
+
+    #[test]
+    fn analysis_authorization_exposes_only_its_skill_tools() {
+        let authorization = McpAuthorization::Analysis(GraphMcpScope {
+            analysis_id: "analysis-1".to_string(),
+            session_id: "session-1".to_string(),
+            allowed_tools: HashSet::from([
+                "shownet_get_request".to_string(),
+                "shownet_list_requests".to_string(),
+            ]),
+            audit_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let names = tools_for_authorization(true, &authorization)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            names,
+            HashSet::from([
+                "shownet_get_request".to_string(),
+                "shownet_list_requests".to_string(),
+            ])
+        );
+        assert!(!names.contains("shownet_delete_session"));
     }
 
     #[test]

@@ -1,12 +1,12 @@
 ## 0.4.26 更新
 
-- **改用 Grok 官方预编译版本。** 发布时从官方仓库 README 指向的 `x.ai/cli` stable 渠道下载 Grok，不再拉取源码或在 ShowNet 流水线中编译 sidecar。
-- **按平台选择官方二进制。** macOS Apple Silicon 只接受 Mach-O arm64，Windows x64 只接受 PE AMD64；两个安装包使用发布开始时解析出的同一个 stable 版本，避免版本混装。
-- **发布前验证真实适配。** 每个平台都会检查 `grok --version`、文件格式、下载来源与 SHA-256，并运行 ShowNet 的流式分析和 MCP 工具调用端到端测试；上游接口不兼容时阻止发布。
-- **保留可审计来源记录。** 安装包内附带实际 Grok 版本、官方下载 URL、目标平台、版本输出和原始文件 SHA-256。Windows 签名只处理 ShowNet 自己构建的程序，不改写官方 Grok 二进制。
-- **移除旧 sidecar 构建依赖。** 发布流程不再安装 Grok 专用 Rust 工具链、protoc、ripgrep 构建包，也不再创建 sidecar 源码 checkout 或 Cargo 编译缓存。
+- **系统 Agent 集成。** ShowNet 优先探测用户已安装的 Grok，也允许选择已有可执行文件；发布包不再捆绑 Agent。
+- **官方一键安装。** 未检测到 Grok 时，可在应用内下载并运行 x.ai 官方 stable 安装器。安装默认直连，也可选用 ShowNet 已保存的出口代理。
+- **进程内配置隔离。** 官方安装器只负责 Grok 的用户级安装、PATH 和安装元数据；ShowNet 的 AI 端点、API Key、Skills、MCP 和可选代理只注入 ShowNet 发起的 Agent 进程。
+- **安装后兼容性检查。** 官方安装器完成后，ShowNet 会探测 `grok --version` 与所需命令行能力；不兼容版本不会被用于分析。
+- **移除 sidecar 构建与发布缓存。** GitHub Actions 不再下载或编译 Grok，macOS DMG 和 Windows Portable 均只打包 ShowNet。
 
-本版本包含 0.4.25 的会话隔离与浏览器状态保持修复；0.4.26 只修正发布方式，不改变“单活动抓包、单活动内嵌浏览器”的产品模型。
+本版本包含 0.4.25 的会话隔离与浏览器状态保持修复；不改变“单活动抓包、单活动内嵌浏览器”的产品模型。
 
 ## 安装
 

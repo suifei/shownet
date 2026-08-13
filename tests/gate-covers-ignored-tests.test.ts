@@ -21,10 +21,10 @@ const EXCLUDED: Record<string, string> = {
     "needs PROXY/HTTP(S)_PROXY pointing at a working egress; run via npm run test:egress",
   live_shownet_mitm_smoke_via_env_upstream:
     "needs an egress proxy and the ability to bind a listener; run via npm run test:mitm-smoke",
-  real_sidecar_streams_openai_report_and_cleans_runtime_directory:
-    "needs the downloaded official Agent sidecar; run via npm run test:agent-sidecar",
-  real_sidecar_discovers_calls_and_consumes_shownet_mcp_tool:
-    "needs the downloaded official Agent sidecar; run via npm run test:agent-sidecar",
+  real_system_grok_streams_openai_report_and_cleans_runtime_directory:
+    "needs a compatible globally installed Grok and local socket permissions",
+  real_system_grok_discovers_calls_and_consumes_shownet_mcp_tool:
+    "needs a compatible globally installed Grok and local socket permissions",
   request_list_performance_benchmark:
     "a benchmark, not a pass/fail check; run via npm run benchmark:request-list",
   dump_real_session_analysis:

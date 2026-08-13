@@ -40,7 +40,7 @@ import {
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { QRCodeCanvas } from "qrcode.react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -69,7 +69,7 @@ import {
   formatContextTokens,
   promptBudgetBytes,
 } from "../aiContextBudget";
-import type { AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
+import type { AgentRuntimeStatus, AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
 import {
@@ -188,6 +188,17 @@ const defaultAiAnalysisSettings: AiAnalysisSettings = {
   maxAgentTurns: 8,
 };
 
+const defaultAgentRuntimeStatus: AgentRuntimeStatus = {
+  settings: { provider: "grok", useUpstreamProxy: false },
+  available: false,
+  compatible: false,
+  installedByShownet: false,
+  updateAvailable: false,
+  installSupported: true,
+  platform: "--",
+  message: "正在探测系统 Grok",
+};
+
 const defaultStorageStats: StorageStats = {
   databaseBytes: 0,
   responseBodyBytes: 0,
@@ -258,6 +269,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   });
   const [qrOpen, setQrOpen] = useState(false);
   const [upstream, setUpstream] = useState(defaultUpstream);
+  const [savedUpstreamMode, setSavedUpstreamMode] = useState<UpstreamProxyMode>("direct");
   const [upstreamPassword, setUpstreamPassword] = useState("");
   const [envProxyHint, setEnvProxyHint] = useState<DetectedEnvProxy | null>(null);
   const [probingUpstream, setProbingUpstream] = useState(false);
@@ -273,6 +285,10 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const [aiAnalysisSettings, setAiAnalysisSettings] = useState(defaultAiAnalysisSettings);
   const [savingAi, setSavingAi] = useState(false);
+  const [agentRuntime, setAgentRuntime] = useState(defaultAgentRuntimeStatus);
+  const [agentRuntimeLoading, setAgentRuntimeLoading] = useState(false);
+  const [installingAgent, setInstallingAgent] = useState(false);
+  const [installAgentWithProxy, setInstallAgentWithProxy] = useState(false);
   const [mcpStatus, setMcpStatus] = useState(defaultMcpStatus);
   const [mcpToken, setMcpToken] = useState("");
   const [showMcpToken, setShowMcpToken] = useState(false);
@@ -365,6 +381,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     invoke<UpstreamProxySettings>("get_upstream_proxy_settings")
       .then((settings) => {
         setUpstream(settings);
+        setSavedUpstreamMode(settings.mode);
         commitBaseline("capture.upstream", settings);
         if (settings.mode === "direct") {
           void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
@@ -386,6 +403,50 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       })
       .catch((error) => onNotify(`读取 HTTPS 解密策略失败：${String(error)}`));
   }, [onNotify]);
+
+  const refreshAgentRuntime = useCallback(async (notifyResult = false) => {
+    if (!isTauri()) return;
+    setAgentRuntimeLoading(true);
+    try {
+      const status = await invoke<AgentRuntimeStatus>("get_agent_runtime_status", { checkLatest: false });
+      setAgentRuntime(status);
+      commitBaseline("ai.runtime", status.settings);
+      if (notifyResult) onNotify(status.available ? `已找到 Grok ${status.version ?? ""}`.trim() : status.message);
+    } catch (error) {
+      if (notifyResult) onNotify(`探测 Grok 失败：${String(error)}`);
+    } finally {
+      setAgentRuntimeLoading(false);
+    }
+  }, [commitBaseline, onNotify]);
+
+  const checkAgentUpdate = async () => {
+    if (!isTauri()) return;
+    setAgentRuntimeLoading(true);
+    try {
+      const status = await invoke<AgentRuntimeStatus>("get_agent_runtime_status", {
+        checkLatest: true,
+        useUpstreamProxy: installAgentWithProxy,
+      });
+      setAgentRuntime(status);
+      onNotify(status.updateAvailable
+        ? `发现 Grok ${status.latestVersion}`
+        : status.latestVersion
+          ? "Grok 已是官方最新 stable 版本"
+          : "暂时无法读取 Grok 官方版本");
+    } catch (error) {
+      onNotify(`检查 Grok 更新失败：${String(error)}`);
+    } finally {
+      setAgentRuntimeLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshAgentRuntime();
+  }, [refreshAgentRuntime]);
+
+  useEffect(() => {
+    if (savedUpstreamMode === "direct") setInstallAgentWithProxy(false);
+  }, [savedUpstreamMode]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -855,6 +916,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         settings: upstreamProbeInput(),
       });
       setUpstream(saved);
+      setSavedUpstreamMode(saved.mode);
       commitBaseline("capture.upstream", saved);
       setUpstreamPassword("");
       if (saved.mode === "direct") {
@@ -1166,6 +1228,56 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       onNotify(`保存 AI 配置失败：${String(error)}`);
     } finally {
       setSavingAi(false);
+    }
+  };
+
+  const saveAgentRuntime = async (executablePath: string | null, useUpstreamProxy: boolean) => {
+    if (!isTauri()) return;
+    setAgentRuntimeLoading(true);
+    try {
+      const status = await invoke<AgentRuntimeStatus>("save_agent_runtime_settings", {
+        settings: {
+          provider: "grok",
+          executablePath,
+          useUpstreamProxy,
+        },
+      });
+      setAgentRuntime(status);
+      commitBaseline("ai.runtime", status.settings);
+      onNotify(status.available ? `已使用 Grok ${status.version ?? ""}`.trim() : status.message);
+    } catch (error) {
+      onNotify(`保存 Agent 运行时失败：${String(error)}`);
+    } finally {
+      setAgentRuntimeLoading(false);
+    }
+  };
+
+  const chooseAgentRuntime = async () => {
+    if (!isTauri()) return;
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      title: "选择 Grok 可执行文件",
+    });
+    if (typeof selected === "string") {
+      await saveAgentRuntime(selected, agentRuntime.settings.useUpstreamProxy);
+    }
+  };
+
+  const installOfficialAgent = async () => {
+    if (!isTauri()) return;
+    setInstallingAgent(true);
+    try {
+      const status = await invoke<AgentRuntimeStatus>("install_official_agent_runtime", {
+        useUpstreamProxy: installAgentWithProxy,
+      });
+      setAgentRuntime(status);
+      commitBaseline("ai.runtime", status.settings);
+      onNotify(`Grok ${status.version ?? ""} 已安装到用户环境`.trim());
+    } catch (error) {
+      onNotify(`安装 Grok 失败：${String(error)}`);
+    } finally {
+      setInstallingAgent(false);
     }
   };
 
@@ -1503,11 +1615,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     "capture.https": serializeSectionValue(tlsInterception),
     "capture.devices": serializeSectionValue({ accessMode, rules: accessRulesDraft }),
     "ai.provider": serializeSectionValue({ provider, endpoint, model, contextTokens }),
+    "ai.runtime": serializeSectionValue(agentRuntime.settings),
     "ai.strategy": serializeSectionValue(aiAnalysisSettings),
     "data.database": serializeSectionValue(dataStorageSettings),
     "mcp.server": serializeSectionValue({ port: mcpStatus.port, enabled: mcpStatus.enabled, allowWrites: mcpStatus.allowWrites }),
   }), [
-    accessMode, accessRulesDraft, aiAnalysisSettings, contextTokens, dataStorageSettings, endpoint, model,
+    accessMode, accessRulesDraft, agentRuntime.settings, aiAnalysisSettings, contextTokens, dataStorageSettings, endpoint, model,
     mcpStatus.allowWrites, mcpStatus.enabled, mcpStatus.port, provider,
     systemProxy.enabled, systemProxyBypass, tlsInterception, upstream,
   ]);
@@ -1908,6 +2021,33 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         {!settingsQuery && tab === "ai" && (
           <>
             <SettingsHeader kicker="AI ENGINE" title="AI 模型" />
+            <SettingsSection id="ai.runtime" title="Agent 运行时">
+              <div className={`agent-runtime-status ${agentRuntime.available ? "is-ready" : "is-missing"}`}>
+                <span className="agent-runtime-status__icon"><SquareTerminal size={19} /></span>
+                <div className="agent-runtime-status__main">
+                  <strong>{agentRuntime.available ? `Grok ${agentRuntime.version ?? ""}`.trim() : "未找到可用的 Grok"}</strong>
+                  <small>{agentRuntime.message}</small>
+                  {agentRuntime.executablePath && <code title={agentRuntime.executablePath}>{agentRuntime.executablePath}</code>}
+                </div>
+                <div className="agent-runtime-status__actions">
+                  <button type="button" className="icon-button" onClick={() => void refreshAgentRuntime(true)} disabled={agentRuntimeLoading || installingAgent} title="重新探测系统 Grok" aria-label="重新探测系统 Grok"><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={15} /></button>
+                  {agentRuntime.settings.executablePath && <button type="button" className="secondary-button" onClick={() => void saveAgentRuntime(null, agentRuntime.settings.useUpstreamProxy)} disabled={agentRuntimeLoading || installingAgent}><Search size={14} />自动探测</button>}
+                  <button type="button" className="secondary-button" onClick={() => void chooseAgentRuntime()} disabled={agentRuntimeLoading || installingAgent}><FolderOpen size={14} />选择文件</button>
+                </div>
+              </div>
+              {(!agentRuntime.available || agentRuntime.updateAvailable) && (
+                <div className="agent-runtime-install">
+                  <div><strong>{agentRuntime.updateAvailable ? `更新到 Grok ${agentRuntime.latestVersion ?? "stable"}` : "安装官方 Grok"}</strong><small>运行 x.ai 官方 stable 安装器；它会安装到 ~/.grok/bin，并按官方规则更新用户 PATH 与安装元数据。部分网络环境可能需要海外代理，默认使用直连。</small></div>
+                  <button type="button" className="save-settings-button" onClick={() => void installOfficialAgent()} disabled={!agentRuntime.installSupported || installingAgent}><Download size={15} />{installingAgent ? "正在下载并验证" : agentRuntime.updateAvailable ? "更新" : "一键安装"}</button>
+                </div>
+              )}
+              <label className="agent-runtime-install__proxy"><input type="checkbox" checked={installAgentWithProxy} disabled={savedUpstreamMode === "direct" || installingAgent || agentRuntimeLoading} onChange={(event) => setInstallAgentWithProxy(event.target.checked)} /><span>下载与检查更新时使用 ShowNet 出口代理</span></label>
+              {savedUpstreamMode === "direct" && <small className="agent-runtime-install__hint">ShowNet 尚未配置出口代理；直连下载失败时，可先到“抓包设置 / 出口代理”配置并保存，再选择使用。</small>}
+              {agentRuntime.available && !agentRuntime.updateAvailable && <button type="button" className="secondary-button agent-runtime-update-check" onClick={() => void checkAgentUpdate()} disabled={agentRuntimeLoading || installingAgent}><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={14} />检查官方更新</button>}
+              <label className="settings-switch-row"><span><strong>Agent 使用 ShowNet 出口代理</strong><small>仅覆盖 ShowNet 发起的 Agent 进程；默认关闭，不写入 Grok 全局代理配置</small></span><input type="checkbox" checked={agentRuntime.settings.useUpstreamProxy} disabled={agentRuntimeLoading || savedUpstreamMode === "direct"} onChange={(event) => void saveAgentRuntime(agentRuntime.settings.executablePath ?? null, event.target.checked)} /><i /></label>
+              {savedUpstreamMode === "direct" && <div className="settings-notice"><CircleAlert size={15} /><span>当前已保存的 ShowNet 出口为直连。配置并保存出口代理后，才可向 Agent 注入同一套代理。</span></div>}
+              <div className="agent-runtime-boundary"><ShieldCheck size={16} /><span><strong>ShowNet 配置仅在应用内生效</strong><small>分析时临时注入当前 AI 端点、凭据、ShowNet Skills、MCP 与可选代理；退出进程后不影响 Grok 的全局端点、工具和运行配置。</small></span></div>
+            </SettingsSection>
             <SettingsSection id="ai.provider" title="分析提供商">
               <div className="recommended-service">
                 <span className="recommended-service__mark"><Sparkles size={20} /></span>

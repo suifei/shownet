@@ -936,6 +936,26 @@ export interface AiAnalysisSettings {
   maxAgentTurns: number;
 }
 
+export interface AgentRuntimeSettings {
+  provider: "grok";
+  executablePath?: string;
+  useUpstreamProxy: boolean;
+}
+
+export interface AgentRuntimeStatus {
+  settings: AgentRuntimeSettings;
+  available: boolean;
+  compatible: boolean;
+  executablePath?: string;
+  version?: string;
+  installedByShownet: boolean;
+  latestVersion?: string;
+  updateAvailable: boolean;
+  installSupported: boolean;
+  platform: string;
+  message: string;
+}
+
 export interface McpServerSettings {
   enabled: boolean;
   port: number;

@@ -76,6 +76,61 @@ describe("verified local build cleanup", () => {
       await rm(fixture, { recursive: true, force: true });
     }
   });
+
+  it("cleans allowlisted generated paths when no local archive exists", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "shownet-clean-no-archive-"));
+    try {
+      const target = join(fixture, "src-tauri", "target");
+      await mkdir(target, { recursive: true });
+      await writeFile(join(target, "artifact.bin"), "regenerable");
+
+      const result = await cleanLocalBuildCache({
+        projectRoot: fixture,
+        packageMetadata: { version: "1.2.3" },
+        projectPaths: [target],
+        generatedSidecars: [],
+        confirm: true,
+      });
+
+      assert.equal(result.cleaned, true);
+      assert.equal(result.archiveVerified, false);
+      await assert.rejects(stat(target));
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("does not traverse repository metadata or dependencies", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "shownet-clean-protected-"));
+    try {
+      const target = join(fixture, "target");
+      const gitMetadata = join(fixture, ".git", ".DS_Store");
+      const dependencyMetadata = join(fixture, "node_modules", "package", ".DS_Store");
+      await Promise.all([
+        mkdir(target),
+        mkdir(join(fixture, ".git"), { recursive: true }),
+        mkdir(join(fixture, "node_modules", "package"), { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(join(target, "artifact.bin"), "regenerable"),
+        writeFile(gitMetadata, "protected"),
+        writeFile(dependencyMetadata, "dependency"),
+      ]);
+
+      await cleanLocalBuildCache({
+        projectRoot: fixture,
+        packageMetadata: { version: "1.2.3" },
+        projectPaths: [target],
+        generatedSidecars: [],
+        confirm: true,
+      });
+
+      assert.equal(await readFile(gitMetadata, "utf8"), "protected");
+      assert.equal(await readFile(dependencyMetadata, "utf8"), "dependency");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
 });
 
 async function createVerifiedRelease(root: string) {

@@ -6,8 +6,8 @@
  *   1. default   — npm test, tsc --noEmit, cargo test --lib
  *   2. egress    — when PROXY / HTTP(S)_PROXY present: live_upstream_proxy_from_env*
  *   3. mitm      — when egress env present: live_shownet_mitm_smoke*
- *   4. agent     — when OPENAI_KEY (or SHOWNET_GROK_BINARY + key) and sidecar binary:
- *                  real_sidecar_streams_openai_report*
+ *   4. agent     — when OPENAI_KEY and a system Grok (or SHOWNET_GROK_BINARY) exist:
+ *                  real_system_grok_streams_openai_report*
  *
  * Usage:
  *   npm run test:windows
@@ -19,7 +19,7 @@
  * Never prints secret values from .env.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,8 +54,8 @@ logLine(loaded.loaded
 
 const hasEgress = Boolean(firstEnv(["PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"]));
 const hasAiKey = Boolean(firstEnv(["OPENAI_KEY", "OPENAI_API_KEY", "SHOWNET_AGENT_API_KEY"]));
-const sidecarBinary = discoverSidecarBinary();
-logLine(`layer flags: egress=${hasEgress} aiKey=${hasAiKey} sidecar=${sidecarBinary ? "yes" : "no"}`);
+const agentBinary = discoverAgentBinary();
+logLine(`layer flags: egress=${hasEgress} aiKey=${hasAiKey} agent=${agentBinary ? "yes" : "no"}`);
 
 const layers = selectLayers(args.layer);
 let failed = 0;
@@ -86,7 +86,7 @@ Always-on (default layer):
 Live layers (require project .env; never committed):
   egress  PROXY or HTTP(S)_PROXY → cargo test live_upstream_proxy_from_env -- --ignored
   mitm    same + bind local ShowNet listener → live_shownet_mitm_smoke
-  agent   OPENAI_KEY + built sidecar under src-tauri/binaries/ → real_sidecar_streams*
+  agent   OPENAI_KEY + system Grok (or SHOWNET_GROK_BINARY) → real_system_grok_streams*
 
 Feature pillars (machine-checked by tests/e2e-feature-pillars.test.ts):
   capture-mitm-proxy, egress, tls-interception-bypass, outbound-tls-clienthello,
@@ -153,15 +153,14 @@ function firstEnv(names) {
   return null;
 }
 
-function discoverSidecarBinary() {
+function discoverAgentBinary() {
   if (process.env.SHOWNET_GROK_BINARY && existsSync(process.env.SHOWNET_GROK_BINARY)) {
     return process.env.SHOWNET_GROK_BINARY;
   }
-  const triple = "x86_64-pc-windows-msvc";
-  const candidates = [
-    join(root, "src-tauri", "binaries", `grok-build-${triple}.exe`),
-    join(root, "src-tauri", "binaries", "grok-build.exe"),
-  ];
+  const candidates = (process.env.PATH ?? "")
+    .split(";")
+    .filter(Boolean)
+    .map((directory) => join(directory, "grok.exe"));
   return candidates.find((path) => existsSync(path)) || null;
 }
 
@@ -296,20 +295,20 @@ async function runAgentLayer() {
     return 0;
   }
 
-  if (!sidecarBinary) {
+  if (!agentBinary) {
     const msg = [
-      "AGENT_SIDECAR_MISSING",
-      "Download the official stable binary with npm run download:agent-sidecar before the live Agent layer.",
+      "SYSTEM_GROK_MISSING",
+      "Install Grok globally or set SHOWNET_GROK_BINARY before the live Agent layer.",
       "Default-layer agent unit tests still apply via cargo test --lib / npm test.",
     ].join("\n");
     writeFileSync(logFile, `${msg}\n`, "utf8");
     logLine(msg.split("\n")[0]);
     return 0;
   } else {
-    process.env.SHOWNET_GROK_BINARY = sidecarBinary;
+    process.env.SHOWNET_GROK_BINARY = agentBinary;
   }
 
-  // Map project OPENAI_* into the names the sidecar path expects when present.
+  // Map project OPENAI_* into the environment expected by the Agent test.
   if (process.env.OPENAI_KEY && !process.env.OPENAI_API_KEY) {
     process.env.OPENAI_API_KEY = process.env.OPENAI_KEY;
   }
@@ -321,7 +320,7 @@ async function runAgentLayer() {
     "--manifest-path",
     "src-tauri/Cargo.toml",
     "--lib",
-    "real_sidecar_streams_openai_report",
+    "real_system_grok_streams_openai_report",
     "--",
     "--ignored",
     "--nocapture",
@@ -332,7 +331,7 @@ async function runAgentLayer() {
       SHOWNET_GROK_BINARY: process.env.SHOWNET_GROK_BINARY,
     },
   });
-  if (r.status === 0 && /SIDECAR_E2E_OK|test result: ok/.test(r.out)) {
+  if (r.status === 0 && /SYSTEM_GROK_E2E_OK|test result: ok/.test(r.out)) {
     logLine("LAYER_AGENT_OK");
     return 0;
   }

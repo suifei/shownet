@@ -12,18 +12,31 @@ export async function cleanLocalBuildCache(options = {}) {
     ?? JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8"));
   const releaseDirectory = options.releaseDirectory
     ?? resolve(projectRoot, "release", `ShowNet-${packageMetadata.version}-local-qa`);
-  const manifest = JSON.parse(await readFile(resolve(releaseDirectory, "release-manifest.json"), "utf8"));
-  if (manifest.product !== "ShowNet"
-    || manifest.version !== packageMetadata.version
-    || manifest.channel !== "local-unsigned-qa") {
-    throw new Error("Refusing to clean without a matching verified ShowNet local QA archive");
+  const manifestPath = resolve(releaseDirectory, "release-manifest.json");
+  const manifestSource = await readFile(manifestPath, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  const manifest = manifestSource ? JSON.parse(manifestSource) : null;
+  if (manifest) {
+    if (manifest.product !== "ShowNet"
+      || manifest.version !== packageMetadata.version
+      || manifest.channel !== "local-unsigned-qa") {
+      throw new Error("Refusing to clean without a matching verified ShowNet local QA archive");
+    }
+    await verifyArchive(releaseDirectory, manifest);
   }
-  await verifyArchive(releaseDirectory, manifest);
 
   const projectPaths = options.projectPaths ?? [
     resolve(projectRoot, "src-tauri", "target"),
+    // Keep removing legacy sidecar build trees even though current releases
+    // use a user-installed official Grok binary.
+    resolve(projectRoot, "src-tauri", ".sidecar-src"),
+    resolve(projectRoot, "src-tauri", ".sidecar-target"),
     resolve(projectRoot, "packaging", "windows", "launcher", "target"),
     resolve(projectRoot, "dist"),
+    resolve(projectRoot, "test-results"),
+    resolve(projectRoot, "playwright-report"),
     resolve(projectRoot, "output"),
   ];
   const generatedSidecars = options.generatedSidecars ?? await listGeneratedSidecars(projectRoot);
@@ -42,7 +55,7 @@ export async function cleanLocalBuildCache(options = {}) {
   }
 
   if (!options.confirm) {
-    return { cleaned: false, bytes, paths: existing, releaseDirectory };
+    return { cleaned: false, bytes, paths: existing, releaseDirectory, archiveVerified: Boolean(manifest) };
   }
   for (const path of existing) {
     await rm(path, {
@@ -53,7 +66,7 @@ export async function cleanLocalBuildCache(options = {}) {
     });
   }
   await removeFinderMetadata(projectRoot);
-  return { cleaned: true, bytes, paths: existing, releaseDirectory };
+  return { cleaned: true, bytes, paths: existing, releaseDirectory, archiveVerified: Boolean(manifest) };
 }
 
 function assertAllowedCleanupPath(path, projectRoot, xwinCache) {
@@ -81,6 +94,7 @@ async function recursiveSize(path) {
 
 async function removeFinderMetadata(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory() && [".git", "node_modules"].includes(entry.name)) continue;
     const path = resolve(directory, entry.name);
     if (entry.name === ".DS_Store") await rm(path, { force: true });
     else if (entry.isDirectory()) await removeFinderMetadata(path);
@@ -120,7 +134,9 @@ async function main() {
     console.log(`Cleaned ${formatBytes(result.bytes)} of verified local build cache.`);
     return;
   }
-  console.log(`Verified release archive: ${result.releaseDirectory}`);
+  console.log(result.archiveVerified
+    ? `Verified release archive: ${result.releaseDirectory}`
+    : "No local QA archive found; only allowlisted regenerable build paths will be cleaned.");
   console.log(`Would clean ${formatBytes(result.bytes)} from:`);
   for (const path of result.paths) {
     const label = path.startsWith(`${root}${sep}`) ? relative(root, path) : path;

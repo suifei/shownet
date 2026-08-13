@@ -1,3 +1,4 @@
+mod agent_runtime;
 mod agent_tools;
 mod algorithm_ground_truth;
 mod algorithm_reconstruction;
@@ -64,25 +65,26 @@ use client_access::ClientAccessPolicy;
 use interchange::{render_export, ExportFormat, SessionBundle};
 use mcp::McpServerHandle;
 use models::{
-    AiAnalysisSettings, AiModelDiscoveryInput, AiProviderSettings, AiProviderSettingsInput,
-    AnalysisActivity, AnalysisChatMessage, AnalysisReport, BrowserHookEvent, BrowserHookInput,
-    CaptureEvent, CaptureEventInput, CaptureListenerSettings, CaptureRule, CaptureRuleInput,
-    CaptureRuleRevision, CaptureRuleRun, CapturedRequestInput, ClientAccessMode,
-    CollectionExportResult, CollectionImportCommitInput, CollectionImportPreview,
-    CollectionImportResult, CollectionSyncCommitInput, CollectionSyncPreview, CollectionSyncResult,
-    ConnectionDiagnostics, CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput,
-    DetectedEnvProxy, EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord,
-    EnvironmentVariableInput, FollowupAnalysisInput, McpClientSettings, McpClientSettingsInput,
-    McpClientTestResult, McpRecentClient, McpServerSettingsInput, McpServerStatus,
-    ProxyBrowserStatus, ReplayBatch, ReplayBatchInput, RequestAnnotation, RequestAnnotationInput,
-    RequestCollection, RequestCollectionFolder, RequestCollectionFolderInput,
-    RequestCollectionInput, RequestCollectionWorkspace, RequestCookieRecord, RequestDraft,
-    RequestDraftBatchUpdateInput, RequestDraftInput, RequestDraftLocationInput, RequestListEvent,
-    RequestListItem, RequestListPage, RequestListWindow, RequestQuery, RequestRecord, RequestRun,
-    RequestWindowQuery, ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus,
-    RulePreviewResult, SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit,
-    StartAnalysisInput, StorageStats, SystemProxySettings, SystemProxySettingsInput,
-    UpdateCheckResult, UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
+    AgentRuntimeSettingsInput, AgentRuntimeStatus, AiAnalysisSettings, AiModelDiscoveryInput,
+    AiProviderSettings, AiProviderSettingsInput, AnalysisActivity, AnalysisChatMessage,
+    AnalysisReport, BrowserHookEvent, BrowserHookInput, CaptureEvent, CaptureEventInput,
+    CaptureListenerSettings, CaptureRule, CaptureRuleInput, CaptureRuleRevision, CaptureRuleRun,
+    CapturedRequestInput, ClientAccessMode, CollectionExportResult, CollectionImportCommitInput,
+    CollectionImportPreview, CollectionImportResult, CollectionSyncCommitInput,
+    CollectionSyncPreview, CollectionSyncResult, ConnectionDiagnostics, CryptoCodeSnippet,
+    DataStorageSettings, DataStorageSettingsInput, DetectedEnvProxy, EffectiveUpstreamProxy,
+    EnvironmentInput, EnvironmentRecord, EnvironmentVariableInput, FollowupAnalysisInput,
+    McpClientSettings, McpClientSettingsInput, McpClientTestResult, McpRecentClient,
+    McpServerSettingsInput, McpServerStatus, ProxyBrowserStatus, ReplayBatch, ReplayBatchInput,
+    RequestAnnotation, RequestAnnotationInput, RequestCollection, RequestCollectionFolder,
+    RequestCollectionFolderInput, RequestCollectionInput, RequestCollectionWorkspace,
+    RequestCookieRecord, RequestDraft, RequestDraftBatchUpdateInput, RequestDraftInput,
+    RequestDraftLocationInput, RequestListEvent, RequestListItem, RequestListPage,
+    RequestListWindow, RequestQuery, RequestRecord, RequestRun, RequestWindowQuery,
+    ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus, RulePreviewResult,
+    SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit, StartAnalysisInput,
+    StorageStats, SystemProxySettings, SystemProxySettingsInput, UpdateCheckResult,
+    UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
 };
 use proxy::{ProxyHandle, ReverseProxyHandle};
 use serde::{Deserialize, Serialize};
@@ -524,6 +526,7 @@ struct AnalysisExecution {
     session_id: String,
     cancellation: tokio::sync::watch::Sender<bool>,
     graph_mcp_token: Option<String>,
+    graph_mcp_tools: HashSet<String>,
     graph_audit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -2566,6 +2569,82 @@ fn save_ai_analysis_settings(
 }
 
 #[tauri::command]
+async fn get_agent_runtime_status(
+    check_latest: Option<bool>,
+    use_upstream_proxy: Option<bool>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentRuntimeStatus, String> {
+    let settings = state.storage.get_agent_runtime_settings()?;
+    let configured_upstream = state.storage.effective_upstream_proxy()?;
+    let direct = direct_upstream_proxy();
+    let upstream = selected_download_upstream(
+        use_upstream_proxy.unwrap_or(false),
+        &configured_upstream,
+        &direct,
+    )?;
+    Ok(agent_runtime::status(&app, settings, upstream, check_latest.unwrap_or(false)).await)
+}
+
+#[tauri::command]
+async fn save_agent_runtime_settings(
+    settings: AgentRuntimeSettingsInput,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentRuntimeStatus, String> {
+    let settings = state.storage.save_agent_runtime_settings(settings)?;
+    let direct = direct_upstream_proxy();
+    Ok(agent_runtime::status(&app, settings, &direct, false).await)
+}
+
+fn direct_upstream_proxy() -> EffectiveUpstreamProxy {
+    EffectiveUpstreamProxy {
+        mode: "direct".to_string(),
+        host: String::new(),
+        port: 0,
+        username: String::new(),
+        password: None,
+        bypass: Vec::new(),
+    }
+}
+
+fn selected_download_upstream<'a>(
+    use_upstream_proxy: bool,
+    configured: &'a EffectiveUpstreamProxy,
+    direct: &'a EffectiveUpstreamProxy,
+) -> Result<&'a EffectiveUpstreamProxy, String> {
+    if use_upstream_proxy && configured.mode == "direct" {
+        return Err("ShowNet 尚未配置出口代理，请先在抓包设置中保存代理".to_string());
+    }
+    Ok(if use_upstream_proxy {
+        configured
+    } else {
+        direct
+    })
+}
+
+#[tauri::command]
+async fn install_official_agent_runtime(
+    use_upstream_proxy: bool,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentRuntimeStatus, String> {
+    let configured_upstream = state.storage.effective_upstream_proxy()?;
+    let direct = direct_upstream_proxy();
+    let upstream = selected_download_upstream(use_upstream_proxy, &configured_upstream, &direct)?;
+    let executable = agent_runtime::install_official(&app, upstream).await?;
+    let current = state.storage.get_agent_runtime_settings()?;
+    let settings = state
+        .storage
+        .save_agent_runtime_settings(AgentRuntimeSettingsInput {
+            provider: "grok".to_string(),
+            executable_path: Some(executable.display().to_string()),
+            use_upstream_proxy: current.use_upstream_proxy,
+        })?;
+    Ok(agent_runtime::status(&app, settings, upstream, true).await)
+}
+
+#[tauri::command]
 fn get_mcp_server_status(state: State<'_, AppState>) -> Result<McpServerStatus, String> {
     mcp_server_status(&state)
 }
@@ -3867,9 +3946,12 @@ pub fn run() {
             retry_system_proxy_recovery,
             get_ai_provider_settings,
             get_ai_analysis_settings,
+            get_agent_runtime_status,
             list_ai_models,
             save_ai_provider_settings,
             save_ai_analysis_settings,
+            save_agent_runtime_settings,
+            install_official_agent_runtime,
             get_mcp_server_status,
             list_built_in_skills,
             get_analysis_skill_plan,
