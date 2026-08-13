@@ -56,15 +56,21 @@ pub async fn status(
             let update_available = latest_version
                 .as_ref()
                 .is_some_and(|latest| version_is_newer(latest, &runtime.version));
+            let official_executable = official_install_directory()
+                .ok()
+                .map(|directory| directory.join(grok_executable_name()));
             AgentRuntimeStatus {
                 settings,
                 available: true,
                 compatible: true,
                 executable_path: Some(runtime.executable.display().to_string()),
                 version: Some(runtime.version),
-                installed_by_shownet: installation.as_ref().is_some_and(|metadata| {
-                    Path::new(&metadata.executable_path) == runtime.executable
-                }),
+                installed_by_shownet: official_executable
+                    .as_ref()
+                    .is_some_and(|path| path == &runtime.executable)
+                    || installation.as_ref().is_some_and(|metadata| {
+                        Path::new(&metadata.executable_path) == runtime.executable
+                    }),
                 latest_version,
                 update_available,
                 install_supported: managed_platform().is_some()
@@ -567,11 +573,21 @@ async fn probe_cli_compatibility(binary: &Path) -> Result<(), String> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output.status.success()
-        || !["prompt-file", "output-format"]
-            .iter()
-            .all(|flag| help.contains(flag))
-    {
+    let mut required_flags = vec![
+        "prompt-file",
+        "model",
+        "output-format",
+        "streaming-json",
+        "permission-mode",
+        "max-turns",
+        "no-auto-update",
+        "deny",
+        "disable-web-search",
+    ];
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        required_flags.push("sandbox");
+    }
+    if !output.status.success() || required_flags.iter().any(|flag| !help.contains(flag)) {
         return Err("当前 Grok 版本缺少 ShowNet 所需的命令行能力".to_string());
     }
     Ok(())

@@ -116,7 +116,7 @@ where
 
     let mut command = Command::new(binary);
     command
-        .current_dir(run_dir.path().join("workspace"))
+        .current_dir(run_dir.path())
         .arg("--prompt-file")
         .arg(run_dir.path().join("prompt.md"))
         .arg("--model")
@@ -125,6 +125,12 @@ where
         .arg("streaming-json")
         .arg("--permission-mode")
         .arg("bypassPermissions")
+        .arg("--disable-web-search")
+        .args(["--deny", "Bash"])
+        .args(["--deny", "Read"])
+        .args(["--deny", "Edit"])
+        .args(["--deny", "Grep"])
+        .args(["--deny", "WebFetch"])
         .arg("--max-turns")
         .arg(normalized_agent_turn_limit(max_agent_turns).to_string())
         .arg("--no-auto-update")
@@ -132,17 +138,16 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .env_clear()
         .env("GROK_HOME", run_dir.path().join("home"))
         .env("GROK_DISABLE_AUTOUPDATER", "1")
         .env("GROK_TELEMETRY_ENABLED", "0")
         .env("GROK_TELEMETRY_TRACE_UPLOAD", "0")
         .env("GROK_EXTERNAL_OTEL", "0")
         .env("OTEL_LOGS_EXPORTER", "none")
-        .env("OTEL_METRICS_EXPORTER", "none")
-        .env_remove("XAI_API_KEY")
-        .env_remove("GROK_CODE_XAI_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY");
+        .env("OTEL_METRICS_EXPORTER", "none");
+    configure_os_sandbox(&mut command);
+    copy_minimum_runtime_environment(&mut command);
     if let Some(api_key) = settings.api_key.as_deref() {
         command.env(API_KEY_ENV, api_key);
     } else {
@@ -331,7 +336,7 @@ fn write_runtime_files(
             .map_err(|error| format!("创建内置 Skill 目录失败: {error}"))?;
         set_private_dir(&directory)?;
         let body = format!(
-            "---\nname: {}\ndescription: {}。{}\n---\n\n# {}\n\n版本：{}\n\n## 目标\n\n{}\n\n## 建议使用的 ShowNet MCP 工具\n\n{}\n\n## 输出要求\n\n{}\n\n优先依据 ShowNet 会话中保留实际值的有界证据作答，区分已确认事实、合理推断和证据缺口。工具与步骤是建议路线；可按证据需要使用 GrokBuild 的完整规划、子 Agent、文件、终端、网页及其他内置能力。\n",
+            "---\nname: {}\ndescription: {}。{}\n---\n\n# {}\n\n版本：{}\n\n## 目标\n\n{}\n\n## 可用的 ShowNet MCP 工具\n\n{}\n\n## 输出要求\n\n{}\n\n优先依据 ShowNet 会话中保留实际值的有界证据作答，区分已确认事实、合理推断和证据缺口。仅使用本次分析授权的 ShowNet MCP 工具；本地文件、终端与外部网页能力已禁用。\n",
             skill.id,
             yaml_scalar(&skill.summary),
             yaml_scalar(&skill.trigger),
@@ -369,15 +374,18 @@ fn runtime_config(
 fn configure_upstream_proxy(
     command: &mut Command,
     upstream: Option<&EffectiveUpstreamProxy>,
-    target_base_url: &str,
+    _target_base_url: &str,
 ) -> Result<(), String> {
-    let local_bypass = merge_local_no_proxy();
-    command.env("NO_PROXY", &local_bypass);
-    command.env("no_proxy", &local_bypass);
     let Some(upstream) = upstream else {
+        command.env("NO_PROXY", "127.0.0.1,localhost,::1");
+        command.env("no_proxy", "127.0.0.1,localhost,::1");
+        remove_proxy_environment(command);
         return Ok(());
     };
-    if upstream.mode == "direct" || target_is_bypassed(target_base_url, &upstream.bypass) {
+    let no_proxy = agent_no_proxy(&upstream.bypass);
+    command.env("NO_PROXY", &no_proxy);
+    command.env("no_proxy", &no_proxy);
+    if upstream.mode == "direct" {
         remove_proxy_environment(command);
         return Ok(());
     }
@@ -408,6 +416,35 @@ fn configure_upstream_proxy(
     Ok(())
 }
 
+fn copy_minimum_runtime_environment(command: &mut Command) {
+    for name in [
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+fn configure_os_sandbox(command: &mut Command) {
+    // Grok's strict OS sandbox is currently supported by its upstream runtime
+    // on macOS and Linux. Windows still receives the same denied-tool policy,
+    // cleared environment and analysis-scoped MCP surface.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    command.args(["--sandbox", "strict"]);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = command;
+}
+
 fn remove_proxy_environment(command: &mut Command) {
     for name in [
         "HTTP_PROXY",
@@ -421,18 +458,12 @@ fn remove_proxy_environment(command: &mut Command) {
     }
 }
 
-fn merge_local_no_proxy() -> String {
-    let mut entries = ["NO_PROXY", "no_proxy"]
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .flat_map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+fn agent_no_proxy(configured: &[String]) -> String {
+    let mut entries = configured
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && *value != "*")
+        .map(str::to_string)
         .collect::<Vec<_>>();
     for local in ["127.0.0.1", "localhost", "::1"] {
         if !entries
@@ -442,29 +473,9 @@ fn merge_local_no_proxy() -> String {
             entries.push(local.to_string());
         }
     }
+    entries.sort_unstable();
+    entries.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     entries.join(",")
-}
-
-fn target_is_bypassed(base_url: &str, bypass: &[String]) -> bool {
-    let host = base_url
-        .split_once("://")
-        .map(|(_, tail)| tail)
-        .unwrap_or(base_url)
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    bypass.iter().any(|entry| {
-        let entry = entry.trim().to_ascii_lowercase();
-        entry == host
-            || entry == "*"
-            || entry
-                .strip_prefix("*.")
-                .is_some_and(|suffix| host == suffix || host.ends_with(&format!(".{suffix}")))
-    })
 }
 
 #[cfg(test)]
@@ -760,11 +771,14 @@ mod tests {
     }
 
     #[test]
-    fn proxy_bypass_matches_exact_and_wildcard_hosts() {
-        let bypass = vec!["localhost".to_string(), "*.example.com".to_string()];
-        assert!(target_is_bypassed("http://localhost:11434/v1", &bypass));
-        assert!(target_is_bypassed("https://api.example.com/v1", &bypass));
-        assert!(!target_is_bypassed("https://example.net/v1", &bypass));
+    fn agent_proxy_uses_only_saved_bypass_and_loopback() {
+        let bypass = vec!["*.example.com".to_string(), "*".to_string()];
+        let no_proxy = agent_no_proxy(&bypass);
+        assert!(no_proxy.contains("*.example.com"));
+        assert!(no_proxy.contains("localhost"));
+        assert!(no_proxy.contains("127.0.0.1"));
+        assert!(no_proxy.contains("::1"));
+        assert!(!no_proxy.split(',').any(|entry| entry == "*"));
     }
 
     #[test]

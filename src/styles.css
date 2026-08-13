@@ -7448,6 +7448,15 @@ kbd {
 .agent-runtime-install__proxy { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); font-size: 12px; }
 .agent-runtime-install__proxy input { width: 15px; height: 15px; }
 .agent-runtime-install__hint { grid-column: 1; }
+.agent-runtime-install__hint button {
+  padding: 0;
+  border: 0;
+  color: var(--codex-accent);
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .agent-runtime-install .save-settings-button { grid-column: 2; grid-row: 1 / span 2; margin: 0; white-space: nowrap; }
 .agent-runtime-update-check { align-self: flex-start; min-height: 30px; }
 .agent-runtime-boundary { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; color: var(--success-ink); background: var(--success-bg); border: 1px solid var(--success-border); border-radius: 8px; }

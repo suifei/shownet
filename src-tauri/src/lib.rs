@@ -65,33 +65,33 @@ use client_access::ClientAccessPolicy;
 use interchange::{render_export, ExportFormat, SessionBundle};
 use mcp::McpServerHandle;
 use models::{
-    AgentRuntimeSettingsInput, AgentRuntimeStatus, AiAnalysisSettings, AiModelDiscoveryInput,
-    AiProviderSettings, AiProviderSettingsInput, AnalysisActivity, AnalysisChatMessage,
-    AnalysisReport, BrowserHookEvent, BrowserHookInput, CaptureEvent, CaptureEventInput,
-    CaptureListenerSettings, CaptureRule, CaptureRuleInput, CaptureRuleRevision, CaptureRuleRun,
-    CapturedRequestInput, ClientAccessMode, CollectionExportResult, CollectionImportCommitInput,
-    CollectionImportPreview, CollectionImportResult, CollectionSyncCommitInput,
-    CollectionSyncPreview, CollectionSyncResult, ConnectionDiagnostics, CryptoCodeSnippet,
-    DataStorageSettings, DataStorageSettingsInput, DetectedEnvProxy, EffectiveUpstreamProxy,
-    EnvironmentInput, EnvironmentRecord, EnvironmentVariableInput, FollowupAnalysisInput,
-    McpClientSettings, McpClientSettingsInput, McpClientTestResult, McpRecentClient,
-    McpServerSettingsInput, McpServerStatus, ProxyBrowserStatus, ReplayBatch, ReplayBatchInput,
-    RequestAnnotation, RequestAnnotationInput, RequestCollection, RequestCollectionFolder,
-    RequestCollectionFolderInput, RequestCollectionInput, RequestCollectionWorkspace,
-    RequestCookieRecord, RequestDraft, RequestDraftBatchUpdateInput, RequestDraftInput,
-    RequestDraftLocationInput, RequestListEvent, RequestListItem, RequestListPage,
-    RequestListWindow, RequestQuery, RequestRecord, RequestRun, RequestWindowQuery,
-    ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus, RulePreviewResult,
-    SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit, StartAnalysisInput,
-    StorageStats, SystemProxySettings, SystemProxySettingsInput, UpdateCheckResult,
-    UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
+    AgentRuntimeSettings, AgentRuntimeSettingsInput, AgentRuntimeStatus, AiAnalysisSettings,
+    AiModelDiscoveryInput, AiProviderSettings, AiProviderSettingsInput, AnalysisActivity,
+    AnalysisChatMessage, AnalysisReport, BrowserHookEvent, BrowserHookInput, CaptureEvent,
+    CaptureEventInput, CaptureListenerSettings, CaptureRule, CaptureRuleInput, CaptureRuleRevision,
+    CaptureRuleRun, CapturedRequestInput, ClientAccessMode, CollectionExportResult,
+    CollectionImportCommitInput, CollectionImportPreview, CollectionImportResult,
+    CollectionSyncCommitInput, CollectionSyncPreview, CollectionSyncResult, ConnectionDiagnostics,
+    CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput, DetectedEnvProxy,
+    EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord, EnvironmentVariableInput,
+    FollowupAnalysisInput, McpClientSettings, McpClientSettingsInput, McpClientTestResult,
+    McpRecentClient, McpServerSettingsInput, McpServerStatus, ProxyBrowserStatus, ReplayBatch,
+    ReplayBatchInput, RequestAnnotation, RequestAnnotationInput, RequestCollection,
+    RequestCollectionFolder, RequestCollectionFolderInput, RequestCollectionInput,
+    RequestCollectionWorkspace, RequestCookieRecord, RequestDraft, RequestDraftBatchUpdateInput,
+    RequestDraftInput, RequestDraftLocationInput, RequestListEvent, RequestListItem,
+    RequestListPage, RequestListWindow, RequestQuery, RequestRecord, RequestRun,
+    RequestWindowQuery, ReverseProxySettings, ReverseProxySettingsInput, ReverseProxyStatus,
+    RulePreviewResult, SavedRequestView, SavedRequestViewInput, SessionRecord, SkillRunAudit,
+    StartAnalysisInput, StorageStats, SystemProxySettings, SystemProxySettingsInput,
+    UpdateCheckResult, UpstreamProbeResult, UpstreamProxySettings, UpstreamProxySettingsInput,
 };
 use proxy::{ProxyHandle, ReverseProxyHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use skills::{SkillDefinition, SkillPlan};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -2592,6 +2592,23 @@ async fn save_agent_runtime_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentRuntimeStatus, String> {
+    if settings
+        .executable_path
+        .as_ref()
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        let candidate = AgentRuntimeSettings {
+            provider: settings.provider.trim().to_ascii_lowercase(),
+            executable_path: settings
+                .executable_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
+            use_upstream_proxy: settings.use_upstream_proxy,
+        };
+        agent_runtime::resolve(&app, &candidate).await?;
+    }
     let settings = state.storage.save_agent_runtime_settings(settings)?;
     let direct = direct_upstream_proxy();
     Ok(agent_runtime::status(&app, settings, &direct, false).await)
@@ -2838,6 +2855,18 @@ fn save_upstream_proxy_settings(
     state: State<'_, AppState>,
 ) -> Result<UpstreamProxySettings, String> {
     let settings = state.storage.save_upstream_proxy_settings(settings)?;
+    if settings.mode == "direct" {
+        let runtime = state.storage.get_agent_runtime_settings()?;
+        if runtime.use_upstream_proxy {
+            state
+                .storage
+                .save_agent_runtime_settings(AgentRuntimeSettingsInput {
+                    provider: runtime.provider,
+                    executable_path: runtime.executable_path,
+                    use_upstream_proxy: false,
+                })?;
+        }
+    }
     emit(&app, "settings://upstream-proxy", &settings)?;
     Ok(settings)
 }

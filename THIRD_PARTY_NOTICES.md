@@ -12,9 +12,8 @@ ShowNet can optionally run the official installer for, and invoke, the following
 - Copyright: 2023-2026 SpaceXAI
 - License: Apache License 2.0
 
-Grok is not bundled with ShowNet releases. The complete upstream license and
-generated dependency notices are retained in `third-party/grok-build/` for
-attribution. When requested by the user, ShowNet downloads and runs the official
+Grok is not bundled with ShowNet releases. When requested by the user, ShowNet
+downloads and runs the official
 `install.sh` or `install.ps1`, then validates the installed version and command
 line compatibility. ShowNet-specific AI endpoints, credentials, Skills, MCP,
 and proxy choices are never written into Grok's global configuration.

@@ -920,6 +920,10 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
       commitBaseline("capture.upstream", saved);
       setUpstreamPassword("");
       if (saved.mode === "direct") {
+        setAgentRuntime((current) => ({
+          ...current,
+          settings: { ...current.settings, useUpstreamProxy: false },
+        }));
         onNotify("出口代理配置已加密保存（直连）");
         void invoke<DetectedEnvProxy | null>("detect_env_upstream_proxy")
           .then(setEnvProxyHint)
@@ -1266,6 +1270,12 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 
   const installOfficialAgent = async () => {
     if (!isTauri()) return;
+    if (agentRuntime.updateAvailable && agentRuntime.settings.executablePath && !agentRuntime.installedByShownet) {
+      const confirmed = window.confirm(
+        `当前使用的是手动选择的 Grok：${agentRuntime.executablePath ?? agentRuntime.settings.executablePath}\n\n继续将安装官方 stable 版本，并把 ShowNet 切换到 ~/.grok/bin/grok；原文件不会被修改。`,
+      );
+      if (!confirmed) return;
+    }
     setInstallingAgent(true);
     try {
       const status = await invoke<AgentRuntimeStatus>("install_official_agent_runtime", {
@@ -2030,19 +2040,20 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   {agentRuntime.executablePath && <code title={agentRuntime.executablePath}>{agentRuntime.executablePath}</code>}
                 </div>
                 <div className="agent-runtime-status__actions">
-                  <button type="button" className="icon-button" onClick={() => void refreshAgentRuntime(true)} disabled={agentRuntimeLoading || installingAgent} title="重新探测系统 Grok" aria-label="重新探测系统 Grok"><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={15} /></button>
-                  {agentRuntime.settings.executablePath && <button type="button" className="secondary-button" onClick={() => void saveAgentRuntime(null, agentRuntime.settings.useUpstreamProxy)} disabled={agentRuntimeLoading || installingAgent}><Search size={14} />自动探测</button>}
+                  <button type="button" className="icon-button" onClick={() => void refreshAgentRuntime(true)} disabled={agentRuntimeLoading || installingAgent} title="重新验证当前 Grok" aria-label="重新验证当前 Grok"><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={15} /></button>
+                  {agentRuntime.settings.executablePath && <button type="button" className="secondary-button" onClick={() => void saveAgentRuntime(null, agentRuntime.settings.useUpstreamProxy)} disabled={agentRuntimeLoading || installingAgent}><Search size={14} />改用自动探测</button>}
                   <button type="button" className="secondary-button" onClick={() => void chooseAgentRuntime()} disabled={agentRuntimeLoading || installingAgent}><FolderOpen size={14} />选择文件</button>
                 </div>
               </div>
               {(!agentRuntime.available || agentRuntime.updateAvailable) && (
                 <div className="agent-runtime-install">
-                  <div><strong>{agentRuntime.updateAvailable ? `更新到 Grok ${agentRuntime.latestVersion ?? "stable"}` : "安装官方 Grok"}</strong><small>运行 x.ai 官方 stable 安装器；它会安装到 ~/.grok/bin，并按官方规则更新用户 PATH 与安装元数据。部分网络环境可能需要海外代理，默认使用直连。</small></div>
-                  <button type="button" className="save-settings-button" onClick={() => void installOfficialAgent()} disabled={!agentRuntime.installSupported || installingAgent}><Download size={15} />{installingAgent ? "正在下载并验证" : agentRuntime.updateAvailable ? "更新" : "一键安装"}</button>
+                  <div><strong>{agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? `官方 Grok ${agentRuntime.latestVersion ?? "stable"} 可用` : `更新到 Grok ${agentRuntime.latestVersion ?? "stable"}` : "安装官方 Grok"}</strong><small>{agentRuntime.updateAvailable && agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? "当前为手动选择的 Grok。安装官方 stable 后，ShowNet 会明确切换到 ~/.grok/bin/grok，原文件不会被修改。" : "运行 x.ai 官方 stable 安装器；它会安装到 ~/.grok/bin，并按官方规则更新用户 PATH 与安装元数据。部分网络环境可能需要海外代理，默认使用直连。"}</small></div>
+                  <button type="button" className="save-settings-button" onClick={() => void installOfficialAgent()} disabled={!agentRuntime.installSupported || installingAgent}><Download size={15} />{installingAgent ? "正在下载并验证" : agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? "安装并切换" : "更新" : "一键安装"}</button>
                 </div>
               )}
+              {!agentRuntime.installSupported && <small className="agent-runtime-install__hint">当前平台暂不支持一键安装。请先按 x.ai 官方方式安装，再使用“选择文件”指定 Grok 可执行文件。</small>}
               <label className="agent-runtime-install__proxy"><input type="checkbox" checked={installAgentWithProxy} disabled={savedUpstreamMode === "direct" || installingAgent || agentRuntimeLoading} onChange={(event) => setInstallAgentWithProxy(event.target.checked)} /><span>下载与检查更新时使用 ShowNet 出口代理</span></label>
-              {savedUpstreamMode === "direct" && <small className="agent-runtime-install__hint">ShowNet 尚未配置出口代理；直连下载失败时，可先到“抓包设置 / 出口代理”配置并保存，再选择使用。</small>}
+              {savedUpstreamMode === "direct" && <small className="agent-runtime-install__hint">ShowNet 尚未配置出口代理；直连下载失败时，可先到<button type="button" onClick={() => revealSection("capture.upstream")}>抓包与 HTTPS / 出口代理与 TLS 指纹</button>配置并保存，再选择使用。</small>}
               {agentRuntime.available && !agentRuntime.updateAvailable && <button type="button" className="secondary-button agent-runtime-update-check" onClick={() => void checkAgentUpdate()} disabled={agentRuntimeLoading || installingAgent}><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={14} />检查官方更新</button>}
               <label className="settings-switch-row"><span><strong>Agent 使用 ShowNet 出口代理</strong><small>仅覆盖 ShowNet 发起的 Agent 进程；默认关闭，不写入 Grok 全局代理配置</small></span><input type="checkbox" checked={agentRuntime.settings.useUpstreamProxy} disabled={agentRuntimeLoading || savedUpstreamMode === "direct"} onChange={(event) => void saveAgentRuntime(agentRuntime.settings.executablePath ?? null, event.target.checked)} /><i /></label>
               {savedUpstreamMode === "direct" && <div className="settings-notice"><CircleAlert size={15} /><span>当前已保存的 ShowNet 出口为直连。配置并保存出口代理后，才可向 Agent 注入同一套代理。</span></div>}

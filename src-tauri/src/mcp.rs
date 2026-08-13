@@ -240,14 +240,18 @@ async fn dispatch_rpc(
     }
     let id = id.unwrap_or(Value::Null);
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+    if !method_available_for_authorization(method, authorization) {
+        return Some(rpc_error(
+            id,
+            -32601,
+            &format!("不支持的方法: {method}"),
+            None,
+        ));
+    }
     let result = match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": { "listChanged": false },
-                "resources": { "subscribe": false, "listChanged": false },
-                "prompts": { "listChanged": false },
-            },
+            "capabilities": capabilities_for_authorization(authorization),
             "serverInfo": {
                 "name": "shownet",
                 "title": "ShowNet Traffic Intelligence",
@@ -278,6 +282,31 @@ async fn dispatch_rpc(
     Some(match result {
         Ok(value) => rpc_result(id, value),
         Err((code, message, data)) => rpc_error(id, code, &message, data),
+    })
+}
+
+fn method_available_for_authorization(method: &str, authorization: &McpAuthorization) -> bool {
+    if matches!(authorization, McpAuthorization::Global) {
+        return true;
+    }
+    !matches!(
+        method,
+        "resources/list"
+            | "resources/templates/list"
+            | "resources/read"
+            | "prompts/list"
+            | "prompts/get"
+    )
+}
+
+fn capabilities_for_authorization(authorization: &McpAuthorization) -> Value {
+    if matches!(authorization, McpAuthorization::Analysis(_)) {
+        return json!({ "tools": { "listChanged": false } });
+    }
+    json!({
+        "tools": { "listChanged": false },
+        "resources": { "subscribe": false, "listChanged": false },
+        "prompts": { "listChanged": false },
     })
 }
 
@@ -441,22 +470,39 @@ fn validate_analysis_scope(
     scope: &GraphMcpScope,
     arguments: &Value,
 ) -> Result<(), String> {
+    validate_analysis_scope_ids(scope, arguments)?;
     if let Some(session_id) = arguments.get("sessionId").and_then(Value::as_str) {
-        if session_id != scope.session_id {
-            return Err("ShowNet MCP 拒绝读取本次分析会话之外的数据".to_string());
-        }
+        debug_assert_eq!(session_id, scope.session_id);
     }
     if let Some(request_id) = arguments.get("requestId").and_then(Value::as_str) {
-        let request = state.storage.get_request_detail(request_id)?;
-        if request.session_id != scope.session_id {
+        if state.storage.request_session_id_for_scope(request_id)? != scope.session_id {
             return Err("ShowNet MCP 拒绝读取本次分析会话之外的请求".to_string());
         }
     }
     if let Some(analysis_id) = arguments.get("analysisId").and_then(Value::as_str) {
+        debug_assert_eq!(analysis_id, scope.analysis_id);
         let report = state.storage.get_analysis_report(analysis_id)?;
         if report.session_id != scope.session_id {
-            return Err("ShowNet MCP 拒绝读取本次分析会话之外的报告".to_string());
+            return Err("ShowNet MCP 拒绝读取本次分析之外的报告".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_analysis_scope_ids(scope: &GraphMcpScope, arguments: &Value) -> Result<(), String> {
+    if arguments
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_some_and(|session_id| session_id != scope.session_id)
+    {
+        return Err("ShowNet MCP 拒绝读取本次分析会话之外的数据".to_string());
+    }
+    if arguments
+        .get("analysisId")
+        .and_then(Value::as_str)
+        .is_some_and(|analysis_id| analysis_id != scope.analysis_id)
+    {
+        return Err("ShowNet MCP 拒绝读取本次分析之外的报告".to_string());
     }
     Ok(())
 }
@@ -1154,6 +1200,44 @@ mod tests {
             ])
         );
         assert!(!names.contains("shownet_delete_session"));
+        assert_eq!(
+            capabilities_for_authorization(&authorization),
+            json!({ "tools": { "listChanged": false } })
+        );
+        for method in [
+            "resources/list",
+            "resources/templates/list",
+            "resources/read",
+            "prompts/list",
+            "prompts/get",
+        ] {
+            assert!(!method_available_for_authorization(method, &authorization));
+        }
+        assert!(method_available_for_authorization(
+            "tools/list",
+            &authorization
+        ));
+        assert!(method_available_for_authorization(
+            "tools/call",
+            &authorization
+        ));
+
+        assert!(validate_analysis_scope_ids(
+            match &authorization {
+                McpAuthorization::Analysis(scope) => scope,
+                McpAuthorization::Global => unreachable!(),
+            },
+            &json!({ "sessionId": "session-1", "analysisId": "analysis-1" }),
+        )
+        .is_ok());
+        assert!(validate_analysis_scope_ids(
+            match &authorization {
+                McpAuthorization::Analysis(scope) => scope,
+                McpAuthorization::Global => unreachable!(),
+            },
+            &json!({ "analysisId": "analysis-2" }),
+        )
+        .is_err());
     }
 
     #[test]

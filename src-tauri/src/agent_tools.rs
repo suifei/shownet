@@ -271,10 +271,6 @@ pub fn read_tool_definitions() -> Vec<ToolDefinition> {
                         "enum": ["auto", "api", "security", "performance", "crypto"],
                         "default": "crypto"
                     },
-                    "outputPath": {
-                        "type": "string",
-                        "description": "可选；写入 scorecard.json 的本地路径"
-                    }
                 },
                 "additionalProperties": false
             }),
@@ -1269,21 +1265,6 @@ fn eval_scorecard_tool(state: &AppState, arguments: &Value) -> Result<Value, Str
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("crypto");
-    let output_path = arguments
-        .get("outputPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = output_path.as_ref() {
-        if path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            return Err("outputPath 不能包含 ..".to_string());
-        }
-    }
-
     let _ = mode; // reserved for future mode-specific gate weights
     let card = if let Some(session_id) = arguments
         .get("sessionId")
@@ -1296,9 +1277,6 @@ fn eval_scorecard_tool(state: &AppState, arguments: &Value) -> Result<Value, Str
         scorecard::run_fixture_scorecard()?
     };
 
-    if let Some(path) = output_path.as_ref() {
-        scorecard::write_scorecard_json(path, &card)?;
-    }
     Ok(card.to_json())
 }
 

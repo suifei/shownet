@@ -1,8 +1,0 @@
-{
-  "name": "xai-org/grok-build",
-  "repository": "https://github.com/xai-org/grok-build",
-  "distribution": "https://x.ai/cli",
-  "fallbackDistribution": "https://storage.googleapis.com/grok-build-public-artifacts/cli",
-  "channel": "stable",
-  "license": "Apache-2.0"
-}

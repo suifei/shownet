@@ -4995,6 +4995,10 @@ impl Storage {
         self.request_session_id(request_id)
     }
 
+    pub(crate) fn request_session_id_for_scope(&self, request_id: &str) -> Result<String, String> {
+        self.request_session_id(request_id)
+    }
+
     pub fn recent_device_request_count(&self, session_id: &str) -> Result<i64, String> {
         self.with_connection(|connection| {
             connection.query_row(
