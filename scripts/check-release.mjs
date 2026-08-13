@@ -11,7 +11,7 @@ const requiredAgentTarget = options.requireAgentTarget ?? process.env.SHOWNET_AG
 const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const tauriConfig = JSON.parse(await readFile(resolve(root, "src-tauri/tauri.conf.json"), "utf8"));
 const agentBundleConfig = JSON.parse(await readFile(resolve(root, "src-tauri/tauri.grok.conf.json"), "utf8"));
-const agentSource = JSON.parse(await readFile(resolve(root, "third-party/grok-build/SOURCE.json"), "utf8"));
+const agentDistribution = JSON.parse(await readFile(resolve(root, "third-party/grok-build/DISTRIBUTION.json"), "utf8"));
 const releaseWorkflow = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
 const portableLauncher = await readFile(resolve(root, "packaging/windows/launcher/src/main.rs"), "utf8");
 const portablePackager = await readFile(resolve(root, "scripts/package-windows-portable.mjs"), "utf8");
@@ -58,12 +58,12 @@ for (const file of requiredBundleIcons) {
 }
 await validateAppIconSet(root);
 
-validateAgentSource(agentSource);
-await validateAgentLicenses(agentSource);
+validateAgentDistribution(agentDistribution);
+await validateAgentLicenses(agentDistribution);
 validateAgentBundleConfig(agentBundleConfig);
 validateMacBundleSigningConfig(agentBundleConfig);
 validateWindowsPortableRelease(packageJson, releaseWorkflow, desktopMain, portableLauncher, portablePackager);
-if (requiredAgentTarget) await validateAgentSidecar(requiredAgentTarget, agentSource);
+if (requiredAgentTarget) await validateAgentSidecar(requiredAgentTarget, agentDistribution);
 
 console.log(`ShowNet ${packageJson.version} release metadata is consistent${requiredAgentTarget ? ` for ${requiredAgentTarget}` : ""}.`);
 
@@ -83,15 +83,17 @@ function parseArguments(args) {
   return parsed;
 }
 
-function validateAgentSource(source) {
-  if (source.name !== "xai-org/grok-build") throw new Error("Unexpected Agent source name");
+function validateAgentDistribution(source) {
+  if (source.name !== "xai-org/grok-build") throw new Error("Unexpected Agent distribution name");
   if (!/^https:\/\/github\.com\/xai-org\/grok-build(?:\.git)?$/.test(source.repository ?? "")) {
     throw new Error("Agent source repository must be the official xai-org/grok-build repository");
   }
-  if (!/^\d+\.\d+\.\d+$/.test(source.version ?? "")) throw new Error("Agent source version is invalid");
-  if (!/^[0-9a-f]{40}$/.test(source.commit ?? "")) throw new Error("Agent source commit must be a full Git SHA");
+  if (source.distribution !== "https://x.ai/cli") throw new Error("Agent distribution must use x.ai/cli");
+  if (source.fallbackDistribution !== "https://storage.googleapis.com/grok-build-public-artifacts/cli") {
+    throw new Error("Agent fallback must use the official public artifact bucket");
+  }
+  if (source.channel !== "stable") throw new Error("Agent distribution channel must be stable");
   if (source.license !== "Apache-2.0") throw new Error("Agent source license must be Apache-2.0");
-  if (!/^\d+\.\d+\.\d+$/.test(source.rustToolchain ?? "")) throw new Error("Agent Rust toolchain is invalid");
 }
 
 function validateProjectLicense(packageMetadata, cargoMetadata, license, packager) {
@@ -121,7 +123,7 @@ async function validateAgentLicenses(source) {
   if (Buffer.byteLength(notices) < 100_000 || !notices.includes("THIRD-PARTY")) {
     throw new Error("grok-build THIRD-PARTY-NOTICES is missing or incomplete");
   }
-  for (const value of [source.version, source.commit, source.repository]) {
+  for (const value of [source.repository, `${source.distribution}/stable`, `${source.fallbackDistribution}/stable`]) {
     if (!projectNotices.includes(value)) throw new Error(`THIRD_PARTY_NOTICES.md does not reference ${value}`);
   }
 }
@@ -136,7 +138,7 @@ function validateAgentBundleConfig(config) {
     ["../THIRD_PARTY_NOTICES.md", "licenses/ShowNet/THIRD_PARTY_NOTICES.md"],
     ["../third-party/grok-build/LICENSE", "licenses/grok-build/LICENSE"],
     ["../third-party/grok-build/THIRD-PARTY-NOTICES", "licenses/grok-build/THIRD-PARTY-NOTICES"],
-    ["../third-party/grok-build/SOURCE.json", "licenses/grok-build/SOURCE.json"],
+    ["binaries/grok-build-source.json", "licenses/grok-build/SOURCE.json"],
   ]);
   for (const [source, destination] of requiredResources) {
     if (config.bundle?.resources?.[source] !== destination) {
@@ -180,7 +182,7 @@ function validateWindowsPortableRelease(packageMetadata, workflow, desktop, laun
   }
 }
 
-async function validateAgentSidecar(target, source) {
+async function validateAgentSidecar(target, distribution) {
   if (!/^[a-zA-Z0-9_.-]+$/.test(target)) throw new Error(`Invalid Agent target: ${target}`);
   const suffix = target.includes("windows") ? ".exe" : "";
   const binary = resolve(root, `src-tauri/binaries/grok-build-${target}${suffix}`);
@@ -197,15 +199,32 @@ async function validateAgentSidecar(target, source) {
   }
   const metadata = JSON.parse(await readFile(`${binary}.metadata.json`, "utf8"));
   const expected = {
-    name: source.name,
-    version: source.version,
-    repository: source.repository,
-    commit: source.commit,
-    rustToolchain: source.rustToolchain,
+    schemaVersion: 1,
+    name: distribution.name,
+    repository: distribution.repository,
+    distribution: distribution.distribution,
+    channel: distribution.channel,
     target,
-    sha256: checksum,
+    downloadSha256: checksum,
   };
   for (const [key, value] of Object.entries(expected)) {
     if (metadata[key] !== value) throw new Error(`Agent sidecar metadata ${key} does not match ${value}`);
+  }
+  if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9._]+)?$/.test(metadata.version ?? "")) {
+    throw new Error("Agent sidecar metadata version is invalid");
+  }
+  const officialNames = target === "aarch64-apple-darwin"
+    ? [`grok-${metadata.version}-macos-aarch64`]
+    : [`grok-${metadata.version}-windows-x86_64.exe`];
+  const officialBases = [distribution.distribution, distribution.fallbackDistribution];
+  if (!officialBases.some((base) => officialNames.some((name) => metadata.artifactUrl === `${base}/${name}`))) {
+    throw new Error(`Agent artifact URL is not an official distribution URL: ${metadata.artifactUrl}`);
+  }
+  if (typeof metadata.versionOutput !== "string" || !metadata.versionOutput.includes(metadata.version)) {
+    throw new Error("Agent sidecar metadata versionOutput does not match its version");
+  }
+  const bundledSource = JSON.parse(await readFile(resolve(root, "src-tauri/binaries/grok-build-source.json"), "utf8"));
+  if (JSON.stringify(bundledSource) !== JSON.stringify(metadata)) {
+    throw new Error("Bundled Agent provenance does not match the downloaded sidecar");
   }
 }

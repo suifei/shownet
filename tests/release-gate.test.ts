@@ -105,9 +105,11 @@ describe("signed macOS release gate", () => {
     assert.match(workflow, /shownet-macos-aarch64/);
     assert.match(workflow, /shownet-windows-x86_64/);
     assert.match(workflow, /softprops\/action-gh-release/);
-    // Agent sidecar needs a real protoc on both release runners (not the vendored stub).
-    assert.match(workflow, /arduino\/setup-protoc@v3/);
-    assert.match(workflow, /GROK_TOOLS_BUNDLE_RG_PATH/);
+    assert.match(workflow, /Resolve latest official stable Grok version/);
+    assert.match(workflow, /npm run download:agent-sidecar/);
+    assert.match(workflow, /npm run test:agent-sidecar/);
+    assert.doesNotMatch(workflow, /arduino\/setup-protoc@v3/);
+    assert.doesNotMatch(workflow, /build:agent-sidecar/);
     assert.match(verifier, /codesign[\s\S]*--deep[\s\S]*--strict/);
     assert.match(verifier, /stapler[\s\S]*validate/);
     assert.match(verifier, /runTool\("spctl"/);

@@ -22,9 +22,9 @@ const EXCLUDED: Record<string, string> = {
   live_shownet_mitm_smoke_via_env_upstream:
     "needs an egress proxy and the ability to bind a listener; run via npm run test:mitm-smoke",
   real_sidecar_streams_openai_report_and_cleans_runtime_directory:
-    "needs the built Agent sidecar; run via npm run test:agent-sidecar",
+    "needs the downloaded official Agent sidecar; run via npm run test:agent-sidecar",
   real_sidecar_discovers_calls_and_consumes_shownet_mcp_tool:
-    "needs the built Agent sidecar; run via npm run test:agent-sidecar",
+    "needs the downloaded official Agent sidecar; run via npm run test:agent-sidecar",
   request_list_performance_benchmark:
     "a benchmark, not a pass/fail check; run via npm run benchmark:request-list",
   dump_real_session_analysis:

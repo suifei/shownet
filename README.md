@@ -352,11 +352,13 @@ npm run tauri dev
 npm run test:rust:network
 ```
 
-内置 Agent sidecar：
+内置 Agent sidecar 使用 x.ai 官方 stable 二进制，不在 ShowNet 仓库编译：
 
 ```bash
-npm run build:agent-sidecar
+npm run download:agent-sidecar -- --resolve-version
+npm run download:agent-sidecar -- --target aarch64-apple-darwin --version <version>
 npm run check:release -- --require-agent-target aarch64-apple-darwin
+npm run test:agent-sidecar
 ```
 
 ## 状态

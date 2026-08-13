@@ -1,7 +1,7 @@
 {
   "name": "shownet",
   "private": true,
-  "version": "0.4.25",
+  "version": "0.4.26",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
@@ -20,7 +20,7 @@
     "build:windows:portable-launcher:cross": "node scripts/rust-stable.mjs xwin build --release --target x86_64-pc-windows-msvc --target-dir src-tauri/target --manifest-path packaging/windows/launcher/Cargo.toml --locked",
     "archive:local-release": "node scripts/archive-local-release.mjs",
     "clean:local-build-cache": "node scripts/clean-local-build-cache.mjs",
-    "build:agent-sidecar": "node scripts/build-grok-sidecar.mjs",
+    "download:agent-sidecar": "node scripts/download-grok-sidecar.mjs",
     "package:windows:portable": "node scripts/package-windows-portable.mjs",
     "test:windows:portable": "node --experimental-strip-types --test tests/windows-portable-package.test.ts",
     "check:rust": "node scripts/rust-stable.mjs cargo check --manifest-path src-tauri/Cargo.toml",

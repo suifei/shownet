@@ -5,8 +5,6 @@ src-tauri/target/
 *.log
 .env
 .env.local
-src-tauri/.sidecar-src/
-src-tauri/.sidecar-target/
 src-tauri/binaries/grok-build-*
 !src-tauri/binaries/.gitkeep
 packaging/windows/launcher/target/

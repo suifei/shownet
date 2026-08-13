@@ -24,8 +24,6 @@ import { describe, it } from "node:test";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const generatedCrateTrees = new Set([
   ".git",
-  ".sidecar-src",
-  ".sidecar-target",
   "node_modules",
   "target",
 ]);
@@ -62,9 +60,9 @@ async function hasRustTests(manifest: string): Promise<boolean> {
 }
 
 describe("the release gate runs every crate's tests", () => {
-  it("does not treat generated sidecar sources or cache output as product crates", () => {
-    assert.equal(shouldSkipDirectory(".sidecar-src"), true);
-    assert.equal(shouldSkipDirectory(".sidecar-target"), true);
+  it("ignores only repository and ordinary dependency/build output trees", () => {
+    assert.equal(shouldSkipDirectory("node_modules"), true);
+    assert.equal(shouldSkipDirectory("target"), true);
     assert.equal(shouldSkipDirectory("packaging"), false);
   });
 

@@ -150,9 +150,14 @@ export async function verifyMacosRelease(options) {
   await assertFile(sidecar, "Agent sidecar");
 
   const resources = resolve(appPath, "Contents/Resources/licenses/grok-build");
-  for (const file of ["LICENSE", "THIRD-PARTY-NOTICES", "SOURCE.json"]) {
+  for (const file of ["LICENSE", "THIRD-PARTY-NOTICES"]) {
     await assertSameFile(resolve(root, "third-party/grok-build", file), resolve(resources, file), `bundled ${file}`);
   }
+  await assertSameFile(
+    resolve(root, "src-tauri/binaries/grok-build-source.json"),
+    resolve(resources, "SOURCE.json"),
+    "bundled Agent download provenance",
+  );
   const projectResources = resolve(appPath, "Contents/Resources/licenses/ShowNet");
   await assertSameFile(resolve(root, "LICENSE"), resolve(projectResources, "LICENSE"), "bundled ShowNet LICENSE");
   await assertSameFile(
@@ -160,11 +165,10 @@ export async function verifyMacosRelease(options) {
     resolve(projectResources, "THIRD_PARTY_NOTICES.md"),
     "bundled ShowNet THIRD_PARTY_NOTICES.md",
   );
-  const agentSource = JSON.parse(await readFile(resolve(root, "third-party/grok-build/SOURCE.json"), "utf8"));
-  const expectedAgentVersion = `grok ${agentSource.version} (${agentSource.commit.slice(0, 7)})`;
+  const agentSource = JSON.parse(await readFile(resolve(root, "src-tauri/binaries/grok-build-source.json"), "utf8"));
   const actualAgentVersion = runTool(sidecar, ["--version"]).trim();
-  if (actualAgentVersion !== expectedAgentVersion) {
-    throw new Error(`Agent version ${actualAgentVersion} does not match ${expectedAgentVersion}`);
+  if (actualAgentVersion !== agentSource.versionOutput) {
+    throw new Error(`Agent version ${actualAgentVersion} does not match ${agentSource.versionOutput}`);
   }
 
   runTool("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);

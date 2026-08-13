@@ -20,7 +20,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -288,41 +288,6 @@ async function runMitmLayer() {
   return 1;
 }
 
-function resolveProtocPath() {
-  if (process.env.PROTOC && existsSync(process.env.PROTOC)) return process.env.PROTOC;
-  const which = process.platform === "win32" ? "where" : "which";
-  const found = spawnSync(which, ["protoc"], {
-    encoding: "utf8",
-    shell: process.platform === "win32",
-    env: process.env,
-  });
-  if (found.status === 0) {
-    const line = (found.stdout || "").trim().split(/\r?\n/).find(Boolean);
-    if (line && existsSync(line)) return line;
-  }
-  // winget Google.Protobuf default layout (user-local)
-  if (process.platform === "win32") {
-    const packages = join(
-      process.env.LOCALAPPDATA || "",
-      "Microsoft",
-      "WinGet",
-      "Packages",
-    );
-    if (existsSync(packages)) {
-      try {
-        for (const name of readdirSync(packages)) {
-          if (!String(name).includes("Protobuf") && !String(name).includes("protobuf")) continue;
-          const candidate = join(packages, name, "bin", "protoc.exe");
-          if (existsSync(candidate)) return candidate;
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return null;
-}
-
 async function runAgentLayer() {
   const logFile = join(scratch, "agent-live.log");
   if (!hasAiKey) {
@@ -331,41 +296,15 @@ async function runAgentLayer() {
     return 0;
   }
 
-  // Ensure protoc is visible to the sidecar build (PATH may lag after winget install).
-  const protocPath = resolveProtocPath();
-  if (protocPath) {
-    process.env.PROTOC = protocPath;
-    const binDir = dirname(protocPath);
-    process.env.PATH = `${binDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH || ""}`;
-    logLine(`protoc resolved: ${protocPath}`);
-  } else {
-    logLine("protoc not found on PATH/PROTOC (sidecar build may fail)");
-  }
-
   if (!sidecarBinary) {
-    const buildLog = join(scratch, "agent-sidecar-build.log");
-    logLine("sidecar binary missing; attempting npm run build:agent-sidecar");
-    const build = run("npm", ["run", "build:agent-sidecar"], {
-      logFile: buildLog,
-      shell: true,
-      env: process.env,
-    });
-    const rebuilt = discoverSidecarBinary();
-    if (!rebuilt) {
-      const msg = [
-        "AGENT_SIDECAR_MISSING",
-        "build:agent-sidecar did not produce src-tauri/binaries/grok-build-<triple>.exe",
-        `build_exit=${build.status}`,
-        protocPath ? `protoc=${protocPath}` : "protoc=not-found",
-        "Default-layer agent unit tests still apply via cargo test --lib / npm test.",
-      ].join("\n");
-      writeFileSync(logFile, `${msg}\n${build.out?.slice(-6000) || ""}\n`, "utf8");
-      logLine(msg.split("\n")[0]);
-      // Honest skip of live agent when binary cannot be built — not a false green.
-      return 0;
-    }
-    process.env.SHOWNET_GROK_BINARY = rebuilt;
-    logLine(`sidecar built: ${rebuilt}`);
+    const msg = [
+      "AGENT_SIDECAR_MISSING",
+      "Download the official stable binary with npm run download:agent-sidecar before the live Agent layer.",
+      "Default-layer agent unit tests still apply via cargo test --lib / npm test.",
+    ].join("\n");
+    writeFileSync(logFile, `${msg}\n`, "utf8");
+    logLine(msg.split("\n")[0]);
+    return 0;
   } else {
     process.env.SHOWNET_GROK_BINARY = sidecarBinary;
   }

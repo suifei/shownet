@@ -12,7 +12,7 @@
       "../THIRD_PARTY_NOTICES.md": "licenses/ShowNet/THIRD_PARTY_NOTICES.md",
       "../third-party/grok-build/LICENSE": "licenses/grok-build/LICENSE",
       "../third-party/grok-build/THIRD-PARTY-NOTICES": "licenses/grok-build/THIRD-PARTY-NOTICES",
-      "../third-party/grok-build/SOURCE.json": "licenses/grok-build/SOURCE.json"
+      "binaries/grok-build-source.json": "licenses/grok-build/SOURCE.json"
     }
   }
 }

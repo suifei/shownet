@@ -797,7 +797,7 @@ mod tests {
     #[ignore = "requires the built Agent sidecar and local socket permissions"]
     async fn real_sidecar_streams_openai_report_and_cleans_runtime_directory() {
         let binary = discover_binary().expect(
-            "build the current target sidecar with `npm run build:agent-sidecar` before this test",
+            "download the current target sidecar with `npm run download:agent-sidecar -- --target <target> --version <version>` before this test",
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -991,7 +991,7 @@ mod tests {
     #[ignore = "requires the built Agent sidecar and local socket permissions"]
     async fn real_sidecar_discovers_calls_and_consumes_shownet_mcp_tool() {
         let binary = discover_binary().expect(
-            "build the current target sidecar with `npm run build:agent-sidecar` before this test",
+            "download the current target sidecar with `npm run download:agent-sidecar -- --target <target> --version <version>` before this test",
         );
         let model_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let model_address = model_listener.local_addr().unwrap();

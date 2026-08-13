@@ -41,7 +41,7 @@ export async function buildPortablePackage(options = {}) {
     agentNotices: options.agentNotices
       ?? resolve(projectRoot, "third-party", "grok-build", "THIRD-PARTY-NOTICES"),
     agentSource: options.agentSource
-      ?? resolve(projectRoot, "third-party", "grok-build", "SOURCE.json"),
+      ?? resolve(projectRoot, "src-tauri", "binaries", "grok-build-source.json"),
   };
 
   validateTarget(target);
