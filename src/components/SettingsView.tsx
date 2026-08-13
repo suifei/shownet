@@ -44,6 +44,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { QRCodeCanvas } from "qrcode.react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { forgetAllStoredBrowserUrls } from "../browserSessionUrl";
 import { formatBytes } from "../format";
 import { sourceLabels } from "../data";
 import { formatReleaseNotes } from "../format";
@@ -1247,6 +1248,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     setClearingData(true);
     try {
       const stats = await invoke<StorageStats>("clear_all_session_data");
+      forgetAllStoredBrowserUrls();
       setStorageStats(stats);
       setClearDataOpen(false);
       onNotify("所有会话数据已清除，应用设置与凭据已保留");

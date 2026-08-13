@@ -109,7 +109,10 @@ interface TrafficViewProps {
   facets: RequestFacets;
   loading: boolean;
   cancelling: boolean;
+  /** True only when this viewed session is the live capture target. */
   capturing: boolean;
+  captureElsewhere: boolean;
+  captureSessionName?: string;
   liveDisplay: LiveCaptureDisplaySnapshot;
   sessionId: string;
   focusRequestId?: string;
@@ -129,7 +132,7 @@ interface TrafficViewProps {
   onOpenSettingsCapture?: () => void;
 }
 
-export function TrafficView({ requests, totalCount, filteredCount, hookCount, bookmarkedCount, requestWindowOffset, requestWindowTargetOffset, facets, loading, cancelling, capturing, liveDisplay, sessionId, focusRequestId, onFocusRequestConsumed, onQueryChange, onRequestWindowChange, onCancelRequestQuery, onOpenAnalysis, onAnalyzeSelection, onOpenWorkbench, onToggleLiveDisplay, onLiveDisplayAutoProtectionChange, onConnect, onOpenBrowser, onOpenSettingsCapture }: TrafficViewProps) {
+export function TrafficView({ requests, totalCount, filteredCount, hookCount, bookmarkedCount, requestWindowOffset, requestWindowTargetOffset, facets, loading, cancelling, capturing, captureElsewhere, captureSessionName, liveDisplay, sessionId, focusRequestId, onFocusRequestConsumed, onQueryChange, onRequestWindowChange, onCancelRequestQuery, onOpenAnalysis, onAnalyzeSelection, onOpenWorkbench, onToggleLiveDisplay, onLiveDisplayAutoProtectionChange, onConnect, onOpenBrowser, onOpenSettingsCapture }: TrafficViewProps) {
   const [query, setQuery] = useState("");
   const [quickFilter, setQuickFilter] = useState<QuickFilterState>(emptyQuickFilter);
   const [advancedFilter, setAdvancedFilter] = useState<FilterExpression>();
@@ -539,7 +542,10 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
       <div className="traffic-summary">
         <div className="summary-metric">
           <span className={`live-pulse ${capturing ? "is-live" : ""}`} />
-          <div><strong>{capturing ? "正在捕获" : "捕获暂停"}</strong><span>{liveDisplay.syncing ? "正在追平" : liveDisplay.paused ? "界面已暂停" : "统一会话"}</span></div>
+          <div>
+            <strong>{capturing ? "正在捕获" : captureElsewhere ? "浏览其他会话" : "捕获暂停"}</strong>
+            <span>{liveDisplay.syncing ? "正在追平" : liveDisplay.paused ? "界面已暂停" : captureElsewhere ? `写入 ${captureSessionName ?? "其他会话"}` : "当前会话"}</span>
+          </div>
         </div>
         <div className="summary-metric"><strong>{totalCount}</strong><span>{loading ? "正在读取窗口" : "全部请求"}</span></div>
         <div className="summary-metric"><strong>{apiCount}</strong><span>API</span></div>

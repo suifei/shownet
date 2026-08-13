@@ -144,7 +144,7 @@ describe("session lifecycle is a closed loop", () => {
 
   it("refuses to delete the session that is being captured into", async () => {
     const app = await read("App.tsx");
-    assert.match(app, /if \(capturing && session\.id === activeSessionId\)/);
+    assert.match(app, /if \(capturing && session\.id === captureSessionId\)/);
     assert.match(app, /请先停止抓包，再删除当前会话/);
   });
 

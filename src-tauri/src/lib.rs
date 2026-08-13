@@ -93,7 +93,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use storage::Storage;
 #[cfg(desktop)]
@@ -273,6 +273,7 @@ impl Default for CaptureRuntime {
 pub struct AppState {
     analysis: Mutex<AnalysisRuntime>,
     pub(crate) browser: Mutex<Option<browser::ProxyBrowserHandle>>,
+    browser_generation: AtomicU64,
     pub(crate) breakpoints: Arc<BreakpointCoordinator>,
     capture: Mutex<CaptureRuntime>,
     mcp: Mutex<McpRuntime>,
@@ -602,6 +603,10 @@ async fn launch_proxy_browser(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProxyBrowserStatus, String> {
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("启动浏览器需要指定抓包会话".to_string());
+    }
     if !state.ca_installed.load(Ordering::SeqCst) {
         return Err("请先安装并信任 ShowNet Root CA".to_string());
     }
@@ -610,10 +615,11 @@ async fn launch_proxy_browser(
             .capture
             .lock()
             .map_err(|_| "抓包运行状态已损坏".to_string())?;
-        if !capture.running || capture.session_id.as_deref() != Some(session_id.trim()) {
+        if !capture.running || capture.session_id.as_deref() != Some(session_id.as_str()) {
             return Err("请先在当前会话开始抓包".to_string());
         }
     }
+    let launch_generation = state.browser_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let previous = state
         .browser
         .lock()
@@ -628,27 +634,78 @@ async fn launch_proxy_browser(
         browser_language.as_deref(),
     )
     .await?;
+    handle.set_owner_session_id(session_id.clone());
+    let capture_still_matches = state.browser_generation.load(Ordering::SeqCst)
+        == launch_generation
+        && state
+            .capture
+            .lock()
+            .map_err(|_| "抓包运行状态已损坏".to_string())?
+            .session_id
+            .as_deref()
+            == Some(session_id.as_str());
+    if !capture_still_matches {
+        handle.stop().await;
+        return Err("抓包会话已停止，浏览器启动已取消".to_string());
+    }
     // status() may refresh `running` from the child process.
     let status = handle.status();
-    state
-        .browser
-        .lock()
-        .map_err(|_| "浏览器运行状态已损坏".to_string())?
-        .replace(handle);
-    emit(&app, "browser://status", &status)?;
+    let mut pending_handle = Some(handle);
+    let installed = {
+        let mut browser = state
+            .browser
+            .lock()
+            .map_err(|_| "浏览器运行状态已损坏".to_string())?;
+        let capture = state
+            .capture
+            .lock()
+            .map_err(|_| "抓包运行状态已损坏".to_string())?;
+        if state.browser_generation.load(Ordering::SeqCst) == launch_generation
+            && capture.running
+            && capture.session_id.as_deref() == Some(session_id.as_str())
+        {
+            browser.replace(pending_handle.take().expect("pending browser handle"));
+            // Emit while the browser/capture transition is still serialized.
+            // Otherwise capture stop could emit first and this launch could
+            // overwrite the frontend with a stale `running: true` event.
+            emit(&app, "browser://status", &status)?;
+            true
+        } else {
+            false
+        }
+    };
+    if !installed {
+        if let Some(handle) = pending_handle.take() {
+            handle.stop().await;
+        }
+        return Err("抓包会话已停止，浏览器启动已取消".to_string());
+    }
     Ok(status)
 }
 
 #[tauri::command]
 async fn stop_proxy_browser(
+    expected_instance_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let handle = state
-        .browser
-        .lock()
-        .map_err(|_| "浏览器运行状态已损坏".to_string())?
-        .take();
+    let handle = {
+        let mut browser = state
+            .browser
+            .lock()
+            .map_err(|_| "浏览器运行状态已损坏".to_string())?;
+        if let Some(expected) = expected_instance_id.as_deref() {
+            let current_matches = browser
+                .as_mut()
+                .is_some_and(|browser| browser.status().source_instance_id == expected);
+            if !current_matches {
+                return Ok(());
+            }
+        }
+        let handle = browser.take();
+        state.browser_generation.fetch_add(1, Ordering::SeqCst);
+        handle
+    };
     if let Some(handle) = handle {
         handle.stop().await;
     }
@@ -2092,6 +2149,22 @@ fn record_browser_hook(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BrowserHookEvent, String> {
+    let browser_status = state
+        .browser
+        .lock()
+        .map_err(|_| "浏览器运行状态已损坏".to_string())?
+        .as_mut()
+        .map(|browser| browser.status())
+        .filter(|status| status.running)
+        .ok_or_else(|| "内嵌浏览器未在运行，未记录 Hook".to_string())?;
+    let capture_session_id = state
+        .capture
+        .lock()
+        .map_err(|_| "抓包运行状态已损坏".to_string())?
+        .session_id
+        .clone()
+        .ok_or_else(|| "抓包已停止，未记录浏览器 Hook".to_string())?;
+    validate_browser_hook_owner(&event, &capture_session_id, &browser_status)?;
     let (hook, capture_event) = state.storage.store_browser_hook(event)?;
     emit(&app, "capture://event", &capture_event)?;
     emit(&app, "browser://hook", &hook)?;
@@ -2105,6 +2178,22 @@ fn record_browser_hook(
         }
     }
     Ok(hook)
+}
+
+fn validate_browser_hook_owner(
+    event: &BrowserHookInput,
+    capture_session_id: &str,
+    browser_status: &ProxyBrowserStatus,
+) -> Result<(), String> {
+    if browser_status.owner_session_id != capture_session_id
+        || event.session_id.trim() != capture_session_id
+    {
+        return Err("浏览器 Hook 与当前抓包会话不一致，已拒绝写入".to_string());
+    }
+    if event.source_instance_id.as_deref() != Some(browser_status.source_instance_id.as_str()) {
+        return Err("浏览器 Hook 来自已失效的浏览器实例，已拒绝写入".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2822,11 +2911,17 @@ async fn set_capture_running(
             .lock()
             .map_err(|_| "免代理入口运行状态已损坏".to_string())?
             .take();
-        let browser = state
-            .browser
-            .lock()
-            .map_err(|_| "浏览器运行状态已损坏".to_string())?
-            .take();
+        let browser = {
+            let mut browser = state
+                .browser
+                .lock()
+                .map_err(|_| "浏览器运行状态已损坏".to_string())?;
+            let handle = browser.take();
+            // Invalidate in-flight launches before releasing the browser lock,
+            // otherwise one can install itself between take() and the bump.
+            state.browser_generation.fetch_add(1, Ordering::SeqCst);
+            handle
+        };
         let (proxy, stopped_session_id) = {
             let mut capture = state
                 .capture
@@ -3611,6 +3706,7 @@ pub fn run() {
             app.manage(AppState {
                 analysis: Mutex::new(AnalysisRuntime::default()),
                 browser: Mutex::new(None),
+                browser_generation: AtomicU64::new(0),
 
                 breakpoints,
                 capture: Mutex::new(CaptureRuntime::default()),
@@ -3820,6 +3916,52 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn browser_hook_input(session_id: &str, source_instance_id: &str) -> BrowserHookInput {
+        BrowserHookInput {
+            session_id: session_id.to_string(),
+            source_instance_id: Some(source_instance_id.to_string()),
+            request_id: None,
+            timestamp: None,
+            kind: "crypto".to_string(),
+            name: "crypto.subtle.sign".to_string(),
+            url: Some("https://example.test/login".to_string()),
+            method: Some("POST".to_string()),
+            input: Value::Null,
+            output: Value::Null,
+            stack: None,
+            duration_ms: Some(1),
+        }
+    }
+
+    #[test]
+    fn browser_hooks_must_match_capture_owner_and_browser_instance() {
+        let status = ProxyBrowserStatus {
+            running: true,
+            owner_session_id: "session-a".to_string(),
+            source_instance_id: "chrome-cdp:123".to_string(),
+            ..Default::default()
+        };
+
+        assert!(validate_browser_hook_owner(
+            &browser_hook_input("session-a", "chrome-cdp:123"),
+            "session-a",
+            &status,
+        )
+        .is_ok());
+        assert!(validate_browser_hook_owner(
+            &browser_hook_input("session-b", "chrome-cdp:123"),
+            "session-a",
+            &status,
+        )
+        .is_err());
+        assert!(validate_browser_hook_owner(
+            &browser_hook_input("session-a", "chrome-cdp:old"),
+            "session-a",
+            &status,
+        )
+        .is_err());
+    }
 
     #[test]
     fn keeps_default_data_directory_and_rejects_relative_override() {

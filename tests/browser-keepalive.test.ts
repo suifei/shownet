@@ -19,11 +19,11 @@ describe("embedded browser keep-alive (P2)", () => {
 
     // Props contract: active flag for visibility restore.
     assert.match(browser, /active: boolean/);
-    assert.match(browser, /export function BrowserView\(\{ active, capturing, sessionId, onAnalyzeCryptoLab \}/);
+    assert.match(browser, /export function BrowserView\(\{ active, capturing, sessionId, sessionName, onAnalyzeCryptoLab \}/);
 
-    // Stop only on true unmount or capture stop — not when switching tabs.
+    // Stop only on true unmount or the backend-owned capture stop — not when switching views.
     assert.match(browser, /True unmount only \(app exit\): stop Chrome/);
-    assert.match(browser, /Stop capture tears down the isolated proxy Chrome/);
+    assert.match(browser, /The backend owns capture-stop teardown/);
     assert.match(browser, /if \(capturing \|\| !proxyBrowser\?\.running\) return;/);
     // Returning to tab restarts screencast without re-launch.
     assert.match(browser, /Page\.startScreencast/);
@@ -54,10 +54,16 @@ describe("embedded browser keep-alive (P2)", () => {
 
     // Toggle CDP button path when already running: stop, and do not fall
     // through to a relaunch.
-    assert.match(body("launchProxyChrome"), /if \(proxyBrowser\?\.running\) \{\s*await stopProxyChrome\(\);\s*return;\s*\}/);
-    assert.match(body("stopProxyChrome"), /await invoke\("stop_proxy_browser"\)/);
+    assert.match(body("launchProxyChrome"), /if \(proxyBrowser\?\.running\) \{\s*if \(!await confirmBrowserStop\(\)\) return;\s*await stopProxyChrome\(\);\s*return;\s*\}/);
+    assert.match(body("stopProxyChrome"), /await invoke\("stop_proxy_browser", \{ expectedInstanceId: proxyBrowser\?\.sourceInstanceId \?\? null \}\)/);
+    assert.match(browser, /title: "停止内嵌浏览器？"[\s\S]*?Chrome 将关闭；当前登录状态、表单内容、页面历史和长连接会被清除。[\s\S]*?confirmLabel: "停止并清除"/);
+    assert.match(browser, /Chrome 将以新的临时环境重启；当前登录状态、表单内容、页面历史和长连接会被清除。[\s\S]*?confirmLabel: "重启并清除"/);
     // Capture-stop path.
-    assert.match(browser, /void invoke\("stop_proxy_browser"\)\.catch\(\(error\) => setBrowserError/);
+    // Capture stop is already serialized by the backend. A second fire-and-forget
+    // stop from this component could arrive after a fast restart and kill it.
+    const captureStopEffect = browser.match(/The backend owns capture-stop teardown[\s\S]*?\}, \[capturing, proxyBrowser\?\.running\]\);/)?.[0] ?? "";
+    assert.ok(captureStopEffect);
+    assert.doesNotMatch(captureStopEffect, /stop_proxy_browser/);
   });
 
   it("restores remote focus on click for keyboard/IME (P5)", async () => {
@@ -69,8 +75,11 @@ describe("embedded browser keep-alive (P2)", () => {
   });
 
   it("persists last URL and can reattach CDP after keep-alive disconnect", async () => {
-    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
-    assert.match(browser, /LAST_URL_STORAGE_KEY|shownet\.browser\.lastUrl/);
+    const [browser, storage] = await Promise.all([
+      readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../src/browserSessionUrl.ts", import.meta.url), "utf8"),
+    ]);
+    assert.match(storage, /LAST_URL_STORAGE_KEY|shownet\.browser\.lastUrl/);
     assert.match(browser, /writeStoredBrowserUrl/);
     assert.match(browser, /readStoredBrowserUrl/);
     assert.match(browser, /attachCdpSession/);
@@ -78,15 +87,42 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.match(browser, /CDP 已断开/);
   });
 
-  it("isolates the restored URL by session", async () => {
-    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
-    assert.match(browser, /browserUrlStorageKey\(sessionId\)/);
-    assert.match(browser, /encodeURIComponent\(sessionId\)/);
+  it("isolates URLs while session history selection stays side-effect free", async () => {
+    const [app, browser] = await Promise.all([
+      readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8"),
+    ]);
     assert.match(browser, /readStoredBrowserUrl\(sessionId\)/);
     assert.match(browser, /writeStoredBrowserUrl\(sessionId, frame\.url\)/);
-    assert.match(browser, /setExternalPage\(null\)/);
-    assert.match(browser, /previousSessionId !== sessionId/);
-    assert.match(browser, /stop_proxy_browser/);
+    assert.doesNotMatch(browser, /previousSessionId !== sessionId/);
+    assert.match(app, /const captureSessionId = capturing/);
+    assert.match(app, /runtime\.activeSessionId \?\? sessions\.find\(\(session\) => session\.active\)\?\.id \?\? ""/);
+    assert.doesNotMatch(app, /sessions\.find\(\(session\) => session\.active\)\?\.id \?\? activeSession\.id/);
+    assert.match(app, /const browserSession = capturing/);
+    assert.match(app, /sessionId=\{browserSession\.id\}/);
+    assert.match(app, /正在查看/);
+    assert.match(app, /抓包写入/);
+    assert.match(browser, /requireMatchingBrowserOwner/);
+    assert.match(browser, /status\.ownerSessionId !== sessionId/);
+    assert.match(app, /临时登录状态、表单内容、页面历史和长连接将被清除/);
+    assert.match(app, /captureTransitioningRef\.current = true;[\s\S]*?if \(!next && hasNativeRuntime\)[\s\S]*?confirm\(/);
+    assert.match(app, /confirmLabel: "停止并清除"[\s\S]*?captureTransitioningRef\.current = false;[\s\S]*?setCaptureTransitioning\(false\)/);
+  });
+
+  it("ignores stale CDP callbacks from an older socket", async () => {
+    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
+    assert.match(browser, /addEventListener\("message", \(message\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
+    assert.match(browser, /addEventListener\("error", \(\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
+    assert.match(browser, /addEventListener\("close", \(\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
+  });
+
+  it("cannot install a Chrome launch invalidated by a newer launch or stop", async () => {
+    const backend = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+    assert.match(backend, /browser_generation: AtomicU64/);
+    assert.match(backend, /let launch_generation = state\.browser_generation\.fetch_add\(1, Ordering::SeqCst\) \+ 1/);
+    assert.match(backend, /state\.browser_generation\.load\(Ordering::SeqCst\) == launch_generation[\s\S]*?browser\.replace/);
+    assert.match(backend, /async fn stop_proxy_browser[\s\S]*?browser_generation\.fetch_add\(1, Ordering::SeqCst\)/);
+    assert.match(backend, /async fn set_capture_running[\s\S]*?browser_generation\.fetch_add\(1, Ordering::SeqCst\)/);
   });
 
   it("keeps 12306 page APIs native while retaining the CDP bridge", async () => {
