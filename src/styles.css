@@ -612,7 +612,7 @@ kbd {
   position: absolute;
   z-index: 2;
   top: 50%;
-  right: 9px;
+  right: 37px;
   display: grid;
   place-items: center;
   width: 24px;
@@ -628,9 +628,42 @@ kbd {
 }
 
 .session-entry:has(.session-report-shortcut) .session-rename-button { right: 82px; }
+.session-delete-button {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 9px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--danger-ink);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 9px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.session-entry:hover .session-delete-button,
+.session-delete-button:focus-visible,
+.session-item.is-active ~ .session-delete-button,
+.session-delete-button:hover {
+  opacity: 1;
+}
+.session-delete-button:hover {
+  color: var(--danger-ink);
+  background: var(--danger-bg);
+}
+.session-delete-button:disabled { cursor: wait; opacity: 0.45; }
+.session-entry:has(.session-report-shortcut) .session-delete-button { right: 82px; }
+.session-entry:has(.session-report-shortcut) .session-rename-button { right: 110px; }
+
 .session-entry:hover .session-rename-button,
 .session-rename-button:focus-visible,
-.session-item.is-active + .session-rename-button { opacity: 1; }
+.session-item.is-active ~ .session-rename-button { opacity: 1; }
 .session-rename-button:hover { color: var(--text-primary); background: var(--dark-raised); }
 
 .session-rename-editor {
@@ -734,6 +767,7 @@ kbd {
 .sessions-panel.is-compact .session-item__body,
 .sessions-panel.is-compact .error-count,
 .sessions-panel.is-compact .session-report-shortcut,
+.sessions-panel.is-compact .session-delete-button,
 .sessions-panel.is-compact .session-rename-button,
 .sessions-panel.is-compact .session-rename-editor,
 .sessions-panel.is-compact .proxy-mini-status__meta {
