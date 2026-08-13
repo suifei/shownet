@@ -86,6 +86,14 @@ pub struct ProxyBrowserStatus {
     pub browser_language: String,
     /// Weighted value shared by Chrome preferences and CDP's network override.
     pub accept_language: String,
+    /// The ClientHello preset selected when this Chrome process was launched.
+    pub browser_preset_id: String,
+    pub browser_preset_family: String,
+    pub browser_preset_major_version: u16,
+    /// Major version exposed by the browser User-Agent. For a versioned desktop
+    /// Chrome preset this follows the selected preset rather than the installed
+    /// Chrome binary.
+    pub browser_user_agent_major_version: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]

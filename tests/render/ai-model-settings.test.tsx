@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -55,6 +55,15 @@ function stubBackend(discoveredModels = DISCOVERED, savedModel = SAVED_MODEL, di
         const settings = (args as { settings: Record<string, unknown> }).settings;
         return { ...settings, hasApiKey: true };
       }
+      case "get_ai_analysis_settings":
+        return {
+          maxAgentTurns: 8,
+          twoStageAnalysis: true,
+          allowMcpTools: true,
+          streamingOutput: true,
+        };
+      case "save_ai_analysis_settings":
+        return (args as { settings: Record<string, unknown> }).settings;
       default:
         // Rejecting keeps every other panel on its declared defaults; resolving
         // undefined would overwrite them with nothing and crash on first read.
@@ -156,6 +165,30 @@ describe("model selection stays typable after discovery", () => {
 });
 
 describe("context window is a real setting", () => {
+  it("puts the save action in the provider section with the credentials", async () => {
+    renderAiSettings();
+    await waitFor(() => expect(contextField().value).toBe(String(SAVED_CONTEXT)));
+
+    const providerSection = document.querySelector('[data-settings-section="ai.provider"]');
+    const strategySection = document.querySelector('[data-settings-section="ai.strategy"]');
+    expect(providerSection).toBeTruthy();
+    expect(strategySection).toBeTruthy();
+    expect(within(providerSection as HTMLElement).getByRole("button", { name: /保存设置/ })).toBeInTheDocument();
+    expect(within(strategySection as HTMLElement).queryByRole("button", { name: /保存设置/ })).not.toBeInTheDocument();
+  });
+
+  it("saves provider and strategy settings from the provider section", async () => {
+    renderAiSettings();
+    await waitFor(() => expect(contextField().value).toBe(String(SAVED_CONTEXT)));
+
+    await userEvent.click(within(document.querySelector('[data-settings-section="ai.provider"]') as HTMLElement).getByRole("button", { name: /保存设置/ }));
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_ai_provider_settings")).toBe(true);
+      expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_ai_analysis_settings")).toBe(true);
+    });
+  });
+
   it("loads the persisted value instead of a hardcoded label", async () => {
     renderAiSettings();
     await waitFor(() => expect(contextField().value).toBe(String(SAVED_CONTEXT)));

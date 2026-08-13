@@ -65,28 +65,38 @@ describe("the release gate runs every ignored test it can", () => {
     }
     assert.ok(gateFilters.length > 0, "no gate step runs ignored tests at all");
 
-    const names: string[] = [];
+    const ignoredTests: Array<{ name: string; source: string }> = [];
     const directory = join(root, "src-tauri/src");
     for (const entry of await readdir(directory)) {
       if (!entry.endsWith(".rs")) continue;
       const source = await readFile(join(directory, entry), "utf8");
       for (const match of source.matchAll(/#\[ignore[^\]]*\]\s*(?:async\s+)?fn\s+(\w+)/g)) {
-        names.push(match[1]);
+        ignoredTests.push({ name: match[1], source: entry });
       }
     }
-    assert.ok(names.length > 20, `expected the ignored suite, saw ${names.length}`);
+    assert.ok(ignoredTests.length > 20, `expected the ignored suite, saw ${ignoredTests.length}`);
 
-    const unaccounted = names.filter(
-      (name) => !gateFilters.some((f) => name.startsWith(f)) && !(name in EXCLUDED),
+    const unaccounted = ignoredTests.filter(
+      ({ name, source }) =>
+        !gateFilters.some((f) =>
+          name.startsWith(f)
+          // A module-qualified filter covers every ignored test in its source
+          // module. The browser launch gate intentionally runs browser::tests::
+          // as one group so browser identity checks cannot be forgotten.
+          || (source === "browser.rs" && f === "browser::tests::")
+        )
+        && !(name in EXCLUDED),
     );
     assert.deepEqual(
       unaccounted,
       [],
-      `ignored tests that nothing runs and nothing explains: ${unaccounted.join(", ")}`,
+      `ignored tests that nothing runs and nothing explains: ${unaccounted.map(({ name }) => name).join(", ")}`,
     );
 
     // An excluded name that no longer exists is a stale exemption.
-    const stale = Object.keys(EXCLUDED).filter((name) => !names.includes(name));
+    const stale = Object.keys(EXCLUDED).filter(
+      (name) => !ignoredTests.some((test) => test.name === name),
+    );
     assert.deepEqual(stale, [], `EXCLUDED lists tests that are gone: ${stale.join(", ")}`);
 
     // A reason that points at an npm script has to point at one that exists.

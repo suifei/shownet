@@ -34,6 +34,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
+import { userAgentMetadataFor } from "../browserIdentity";
 import {
   BROWSER_LANGUAGE_STORAGE_KEY,
   BROWSER_LANGUAGE_SUGGESTIONS,
@@ -584,14 +585,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         if (status.honestUserAgent) {
           send("Emulation.setUserAgentOverride", {
             userAgent: status.honestUserAgent,
-            // No userAgentMetadata. It used to be restated here on the belief that
-            // Sec-CH-UA would otherwise say HeadlessChrome, and that is not what
-            // headless Chrome sends: measured on 151 it already reports
-            // "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151" —
-            // clean, and agreeing with the UA. The hand-built list said
-            // "Not_A Brand";v="24" instead, so restating it introduced the exact
-            // split identity it was added to prevent. Chrome derives the hints
-            // from the running build; letting it is both simpler and correct.
+            // A versioned Chrome preset intentionally differs from the installed
+            // binary, so default client hints would expose the installed major.
+            // Keep navigator.userAgentData and request hints on the selected major.
+            userAgentMetadata: userAgentMetadataFor(status),
             //
             // The UA string itself still needs overriding here because Chrome
             // exposes no way to read back the --user-agent launch flag, so this

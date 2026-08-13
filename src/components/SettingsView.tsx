@@ -1944,6 +1944,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                   <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(promptBudgetBytes(contextTokens))}</small>
                 </label>
               </div>
+              <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? "保存中" : "保存设置"}</button>
             </SettingsSection>
             <SettingsSection id="ai.strategy" title="分析策略">
               <div className="settings-field-row agent-turn-limit-row">
@@ -1953,7 +1954,6 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               <label className="settings-switch-row"><span><strong>两阶段分析</strong><small>大于 20 条请求时先执行智能过滤</small></span><input type="checkbox" checked={aiAnalysisSettings.twoStageAnalysis} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, twoStageAnalysis: event.target.checked }))} /><i /></label>
               <label className="settings-switch-row"><span><strong>允许 MCP 工具调用</strong><small>模型可按需回查请求详情与外部数据</small></span><input type="checkbox" checked={aiAnalysisSettings.allowMcpTools} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, allowMcpTools: event.target.checked }))} /><i /></label>
               <label className="settings-switch-row"><span><strong>流式输出</strong><small>分析内容实时写入报告</small></span><input type="checkbox" checked={aiAnalysisSettings.streamingOutput} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, streamingOutput: event.target.checked }))} /><i /></label>
-              <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? "保存中" : "保存设置"}</button>
             </SettingsSection>
             <SettingsSection id="ai.support" title="服务与支持">
               <div className="support-channel">

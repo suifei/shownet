@@ -1266,6 +1266,10 @@ export interface ProxyBrowserStatus {
   honestUserAgent: string;
   browserLanguage: string;
   acceptLanguage: string;
+  browserPresetId: string;
+  browserPresetFamily: string;
+  browserPresetMajorVersion: number;
+  browserUserAgentMajorVersion: number;
 }
 
 export type UpstreamProxyMode = "direct" | "http" | "https" | "socks5";
