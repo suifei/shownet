@@ -77,4 +77,22 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.match(browser, /正在重连 CDP/);
     assert.match(browser, /CDP 已断开/);
   });
+
+  it("isolates the restored URL by session", async () => {
+    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
+    assert.match(browser, /browserUrlStorageKey\(sessionId\)/);
+    assert.match(browser, /encodeURIComponent\(sessionId\)/);
+    assert.match(browser, /readStoredBrowserUrl\(sessionId\)/);
+    assert.match(browser, /writeStoredBrowserUrl\(sessionId, frame\.url\)/);
+    assert.match(browser, /setExternalPage\(null\)/);
+    assert.match(browser, /previousSessionId !== sessionId/);
+    assert.match(browser, /stop_proxy_browser/);
+  });
+
+  it("keeps 12306 page APIs native while retaining the CDP bridge", async () => {
+    const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
+    assert.match(browser, /pageHookGuardSource/);
+    assert.match(browser, /guardedHookRuntime/);
+    assert.match(browser, /__SHOWNET_HOOK_BRIDGE__/);
+  });
 });

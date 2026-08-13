@@ -34,6 +34,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
+import { userAgentMetadataFor } from "../browserIdentity";
 import {
   BROWSER_LANGUAGE_STORAGE_KEY,
   BROWSER_LANGUAGE_SUGGESTIONS,
@@ -53,6 +54,7 @@ import {
 } from "../browserBus";
 import { formatClock } from "../format";
 import { trackNavigation } from "../reloadLoop";
+import { pageHookGuardSource } from "../browserCompatibility";
 import type { BrowserHookEvent, OutboundTlsProfileStatus, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
@@ -86,12 +88,16 @@ const LAB_BINDING = "__SHOWNET_LAB_BINDING__";
 /** Must match `browser.rs` SCREEN_WIDTH / SCREEN_HEIGHT and `--screen-info`. */
 const BROWSER_SCREEN_WIDTH = 1920;
 const BROWSER_SCREEN_HEIGHT = 1080;
-/** sessionStorage key for last navigated URL (P2 optional keep-alive restore). */
+/** sessionStorage key prefix for last navigated URL (P2 optional keep-alive restore). */
 const LAST_URL_STORAGE_KEY = "shownet.browser.lastUrl";
 
-function readStoredBrowserUrl(): string | null {
+function browserUrlStorageKey(sessionId: string): string {
+  return `${LAST_URL_STORAGE_KEY}:${encodeURIComponent(sessionId)}`;
+}
+
+function readStoredBrowserUrl(sessionId: string): string | null {
   try {
-    const value = sessionStorage.getItem(LAST_URL_STORAGE_KEY)?.trim() ?? "";
+    const value = sessionStorage.getItem(browserUrlStorageKey(sessionId))?.trim() ?? "";
     if (/^https?:\/\//i.test(value) && !/^chrome/i.test(value)) return value;
   } catch {
     /* private mode / SSR */
@@ -99,10 +105,10 @@ function readStoredBrowserUrl(): string | null {
   return null;
 }
 
-function writeStoredBrowserUrl(url: string) {
+function writeStoredBrowserUrl(sessionId: string, url: string) {
   try {
     if (/^https?:\/\//i.test(url) && !/^chrome/i.test(url)) {
-      sessionStorage.setItem(LAST_URL_STORAGE_KEY, url);
+      sessionStorage.setItem(browserUrlStorageKey(sessionId), url);
     }
   } catch {
     /* ignore */
@@ -138,8 +144,8 @@ type LabStatusPayload = { phase?: string; status?: number; endpoint?: string; me
 type BrowserFileDropState = { phase: "ready" | "delivered"; count: number } | null;
 
 export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }: BrowserViewProps) {
-  const [address, setAddress] = useState(() => readStoredBrowserUrl() ?? "https://example.com");
-  const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl() ?? "https://example.com");
+  const [address, setAddress] = useState(() => readStoredBrowserUrl(sessionId) ?? "https://example.com");
+  const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl(sessionId) ?? "https://example.com");
   const [externalPage, setExternalPage] = useState<string | null>(null);
   const [hookPanel, setHookPanel] = useState(true);
   const [hookFilter, setHookFilter] = useState("all");
@@ -195,10 +201,38 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
   const nativeDropPointRef = useRef<{ x: number; y: number } | null>(null);
   const nativeDropClearTimerRef = useRef(0);
   const challengeProbeTimerRef = useRef(0);
+  const currentSessionIdRef = useRef(sessionId);
   const windowScaleFactorRef = useRef(window.devicePixelRatio || 1);
   const desktop = isTauri();
 
   useDismissibleLayer(browserMenuOpen, browserMenuRef, () => setBrowserMenuOpen(false));
+
+  useEffect(() => {
+    const previousSessionId = currentSessionIdRef.current;
+    currentSessionIdRef.current = sessionId;
+    if (previousSessionId && previousSessionId !== sessionId) {
+      cdpSendRef.current?.("Page.stopScreencast");
+      cdpSocketRef.current?.close();
+      cdpSocketRef.current = null;
+      cdpSendRef.current = null;
+      cdpPendingRef.current.clear();
+      setProxyBrowser(null);
+      setScreencastFrame(null);
+      screencastFrameRef.current = null;
+      setBrowserLoading(false);
+      setBrowserConnecting(false);
+      if (desktop) void invoke("stop_proxy_browser").catch(() => undefined);
+    }
+    const stored = readStoredBrowserUrl(sessionId);
+    const nextUrl = stored ?? "https://example.com";
+    setAddress(nextUrl);
+    setCurrentUrl(nextUrl);
+    setExternalPage(null);
+    setPageTitle("新标签页");
+    setChallengeHost("");
+    setReloadLoopHost("");
+    navigationLogRef.current = [];
+  }, [desktop, sessionId]);
 
   const handleLabStatus = useCallback((payload: LabStatusPayload) => {
     if (payload.phase !== "running" && payload.phase !== "complete" && payload.phase !== "error") return;
@@ -545,6 +579,9 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
     const hookRuntime = hooksEnabledRef.current
       ? await invoke<string>("get_browser_hook_script")
       : "";
+    const guardedHookRuntime = hookRuntime
+      ? `${pageHookGuardSource()}\n${hookRuntime}\n}`
+      : "";
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(status.webSocketDebuggerUrl);
       cdpSocketRef.current = socket;
@@ -555,7 +592,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         // Bundling them meant turning hooks off also removed
         // __SHOWNET_LAB_BRIDGE__, so Crypto Lab could never report back and its
         // status sat at "running" forever.
-        const bridgeSource = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });\n${hookRuntime}`;
+        const bridgeSource = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });\n${guardedHookRuntime}`;
         const send: CdpSend = (method, params = {}, onResult) => {
           const id = ++cdpMessageId.current;
           if (onResult) cdpPendingRef.current.set(id, onResult);
@@ -584,14 +621,10 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         if (status.honestUserAgent) {
           send("Emulation.setUserAgentOverride", {
             userAgent: status.honestUserAgent,
-            // No userAgentMetadata. It used to be restated here on the belief that
-            // Sec-CH-UA would otherwise say HeadlessChrome, and that is not what
-            // headless Chrome sends: measured on 151 it already reports
-            // "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151" —
-            // clean, and agreeing with the UA. The hand-built list said
-            // "Not_A Brand";v="24" instead, so restating it introduced the exact
-            // split identity it was added to prevent. Chrome derives the hints
-            // from the running build; letting it is both simpler and correct.
+            // A versioned Chrome preset intentionally differs from the installed
+            // binary, so default client hints would expose the installed major.
+            // Keep navigator.userAgentData and request hints on the selected major.
+            userAgentMetadata: userAgentMetadataFor(status),
             //
             // The UA string itself still needs overriding here because Chrome
             // exposes no way to read back the --user-agent launch flag, so this
@@ -623,7 +656,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
         }
         send("Page.startScreencast", { format: "jpeg", quality: 78, maxWidth: 1800, maxHeight: 1200, everyNthFrame: 1 });
         if (navigate) {
-          const stored = readStoredBrowserUrl();
+          const stored = readStoredBrowserUrl(sessionId);
           // Explicit destination wins; lab override; else restore last URL; else lab home.
           const navigateUrl =
             destination === "__shownet_lab__"
@@ -633,7 +666,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
                 : (stored ?? status.labUrl);
           setAddress(navigateUrl);
           setCurrentUrl(navigateUrl);
-          writeStoredBrowserUrl(navigateUrl);
+          writeStoredBrowserUrl(sessionId, navigateUrl);
           setBrowserLoading(true);
           send("Page.navigate", { url: navigateUrl });
         }
@@ -723,7 +756,7 @@ export function BrowserView({ active, capturing, sessionId, onAnalyzeCryptoLab }
             setChallengeHost("");
             setAddress(frame.url);
             setCurrentUrl(frame.url);
-            writeStoredBrowserUrl(frame.url);
+            writeStoredBrowserUrl(sessionId, frame.url);
             const tracked = trackNavigation(navigationLogRef.current, frame.url, Date.now());
             navigationLogRef.current = tracked.log;
             setReloadLoopHost(tracked.loopHost);

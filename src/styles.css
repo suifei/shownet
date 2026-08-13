@@ -5370,7 +5370,7 @@ kbd {
   gap: 7px;
   margin: 18px auto 0;
   padding: 14px 18px;
-  width: min(760px, calc(100% - 36px));
+  width: min(1040px, calc(100% - 44px));
   background: var(--accent-bg);
   border: 1px solid var(--border-default);
   border-radius: 10px;
@@ -5404,7 +5404,7 @@ kbd {
 .progress-line.is-done { background: var(--success); }
 
 .analysis-graph-runtime {
-  width: min(760px, calc(100% - 36px));
+  width: min(1040px, calc(100% - 44px));
   margin: 10px auto 0;
   overflow: hidden;
   background: var(--surface-panel);
@@ -5476,7 +5476,7 @@ kbd {
 .analysis-graph-runtime__deviations p { margin: 3px 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
 
 .agent-activity {
-  width: min(760px, calc(100% - 36px));
+  width: min(1040px, calc(100% - 44px));
   margin: 10px auto 0;
   overflow: hidden;
   background: var(--surface-panel);
@@ -5486,16 +5486,13 @@ kbd {
 }
 
 .agent-activity.is-live {
-  position: sticky;
-  top: 10px;
-  z-index: 4;
   border-color: var(--purple-border);
   box-shadow: 0 9px 26px rgba(43, 34, 55, 0.1);
 }
 
 .agent-activity > header {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto 28px;
   align-items: center;
   min-height: 43px;
   gap: 8px;
@@ -5503,6 +5500,21 @@ kbd {
   background: var(--surface-raised);
   border-bottom: 1px solid var(--border-default);
 }
+
+.agent-activity__toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+}
+
+.agent-activity__toggle:hover { color: var(--purple-ink); background: var(--purple-bg); }
+.agent-activity__toggle svg { transition: transform 140ms ease; }
+.agent-activity:has(.agent-activity__toggle[aria-expanded="true"]) .agent-activity__toggle svg { transform: rotate(180deg); }
 
 .agent-activity__mark {
   display: grid;
@@ -5601,7 +5613,7 @@ kbd {
 .agent-skill-runs time { color: var(--text-subtle); font-family: "DM Mono", monospace; font-size: 11px; }
 
 .generated-report {
-  width: min(760px, calc(100% - 44px));
+  width: min(1040px, calc(100% - 44px));
   margin: 0 auto;
   padding: 22px 4px 32px;
   color: var(--text-body);
@@ -7581,7 +7593,6 @@ kbd {
   .analysis-graph-runtime__metrics { grid-column: 2; justify-content: flex-start; }
   .analysis-graph-runtime__nodes li { grid-template-columns: 22px minmax(0, 1fr); padding: 4px 0; }
   .analysis-graph-runtime__nodes li > span:last-child { grid-column: 2; }
-  .agent-activity.is-live { top: 8px; }
   .agent-activity__current { grid-template-columns: 30px minmax(0, 1fr); }
   .agent-activity__current > time { display: none; }
   .agent-activity__recent li { grid-template-columns: 20px minmax(0, 1fr); }

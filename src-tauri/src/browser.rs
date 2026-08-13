@@ -19,6 +19,8 @@ use uuid::Uuid;
 
 use crate::browser_bus::BrowserBus;
 use crate::models::ProxyBrowserStatus;
+use crate::tls_clienthello_catalog::ClientHelloPreset;
+use crate::tls_outbound;
 use std::sync::Arc;
 
 const LAB_INDEX: &str = include_str!("../../public/lab/index.html");
@@ -41,7 +43,7 @@ pub struct ProxyBrowserHandle {
 pub(crate) const DISABLED_FEATURES: &str = "AccountConsistency,AutofillServerCommunication,\
 CertificateTransparencyComponentUpdater,DiceWebSigninInterception,FedCm,\
 FedCmWithoutThirdPartyCookies,InterestFeedContentSuggestions,MediaRouter,\
-NetworkTimeServiceQuerying,NotificationTriggers,OptimizationGuideModelDownloading,\
+NetworkTimeServiceQuerying,OptimizationGuideModelDownloading,\
 OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,\
 PrivacySandboxSettings4,PushMessaging,SafeBrowsingEnhancedProtection,\
 SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingRealTimeLookup,SigninPromo,Translate";
@@ -122,6 +124,24 @@ Chrome/{major}.0.0.0 Safari/537.36"
     )
 }
 
+/// Select the browser UA major independently from the installed binary.
+///
+/// The embedded browser is desktop Chrome, so only a versioned desktop Chrome
+/// preset can be represented faithfully. Firefox, Safari, Edge, Android Chrome,
+/// generic buckets, and the default preset keep the installed Chrome identity
+/// rather than combining a Chrome binary with another browser's UA.
+fn browser_user_agent_major(
+    installed_major: Option<u32>,
+    preset: Option<&ClientHelloPreset>,
+) -> Option<u32> {
+    match preset {
+        Some(preset) if preset.family == "chrome" && preset.major_version > 0 => {
+            Some(preset.major_version as u32)
+        }
+        _ => installed_major,
+    }
+}
+
 /// Reads the major version straight off the binary that is about to be launched,
 /// so the UA below describes the browser that actually runs rather than whatever
 /// version this build was written against.
@@ -190,7 +210,10 @@ impl ProxyBrowserHandle {
         browser_language: Option<&str>,
     ) -> Result<Self, String> {
         let chrome = chrome_executable()?;
-        let honest_launch_user_agent = chrome_major_version(&chrome).map(frozen_user_agent);
+        let installed_chrome_major = chrome_major_version(&chrome);
+        let active_preset = tls_outbound::active_preset().ok();
+        let user_agent_major = browser_user_agent_major(installed_chrome_major, active_preset);
+        let honest_launch_user_agent = user_agent_major.map(frozen_user_agent);
         let browser_language = normalize_browser_language(browser_language)?;
         cleanup_browser_profile(&data_dir.join("browser-profile"));
         let (lab_address, lab_shutdown, lab_task) = start_lab_server().await?;
@@ -241,7 +264,14 @@ impl ProxyBrowserHandle {
                 return Err(error);
             }
         };
-        let honest_user_agent = resolve_honest_user_agent(debug_port).await;
+        // `/json/version` reports the binary's built-in headless UA and cannot
+        // read back `--user-agent`. The launch value is therefore authoritative;
+        // only use the endpoint as a fallback when the binary version could not
+        // be parsed and no preset supplied a version.
+        let honest_user_agent = match honest_launch_user_agent.clone() {
+            Some(user_agent) => user_agent,
+            None => resolve_honest_user_agent(debug_port).await,
+        };
         let status = ProxyBrowserStatus {
             running: true,
             honest_user_agent,
@@ -255,6 +285,16 @@ impl ProxyBrowserHandle {
             web_socket_debugger_url: target.web_socket_debugger_url.clone(),
             source_instance_id,
             lab_url: format!("http://{lab_address}/lab/index.html?autorun=1"),
+            browser_preset_id: active_preset
+                .map(|preset| preset.id.to_string())
+                .unwrap_or_default(),
+            browser_preset_family: active_preset
+                .map(|preset| preset.family.to_string())
+                .unwrap_or_default(),
+            browser_preset_major_version: active_preset
+                .map(|preset| preset.major_version)
+                .unwrap_or_default(),
+            browser_user_agent_major_version: user_agent_major.unwrap_or_default(),
             ..Default::default()
         };
         let bus = Arc::new(BrowserBus::new(target.web_socket_debugger_url));
@@ -397,7 +437,6 @@ fn chrome_command(
         .arg("--disable-domain-reliability")
         .arg("--disable-extensions")
         .arg("--disable-field-trial-config")
-        .arg("--disable-notifications")
         .arg("--disable-search-engine-choice-screen")
         .arg("--disable-sync")
         .arg("--metrics-recording-only")
@@ -463,10 +502,7 @@ fn prepare_browser_profile(
         "credentials_enable_service": false,
         "dns_prefetching": { "enabled": false },
         "net": { "network_prediction_options": 2 },
-        "profile": {
-            "default_content_setting_values": { "notifications": 2 },
-            "password_manager_enabled": false
-        },
+        "profile": { "password_manager_enabled": false },
         "safebrowsing": {
             "enabled": false,
             "enhanced": false
@@ -724,11 +760,14 @@ pub(crate) fn chrome_executable() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_language_for, chrome_command, chrome_executable, chrome_major_version,
-        frozen_user_agent, normalize_browser_language, DISABLED_FEATURES, LAB_SCRIPT,
-        SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
+        accept_language_for, browser_user_agent_major, chrome_command, chrome_executable,
+        chrome_major_version, frozen_user_agent, normalize_browser_language,
+        prepare_browser_profile, DISABLED_FEATURES, LAB_SCRIPT, SCREEN_HEIGHT, SCREEN_WIDTH,
+        WINDOW_HEIGHT, WINDOW_WIDTH,
     };
+    use crate::tls_clienthello_catalog::get_preset;
     use std::path::Path;
+    use tokio::time::{sleep, Duration};
 
     #[test]
     fn embedded_lab_script_falls_back_to_hook_bridge_for_status() {
@@ -800,6 +839,33 @@ mod tests {
     }
 
     #[test]
+    fn selected_chrome_preset_controls_the_browser_user_agent_major() {
+        let installed = Some(151);
+        assert_eq!(
+            browser_user_agent_major(installed, Some(get_preset("chrome149").unwrap())),
+            Some(149)
+        );
+        assert_eq!(
+            browser_user_agent_major(installed, Some(get_preset("chrome151").unwrap())),
+            Some(151)
+        );
+    }
+
+    #[test]
+    fn non_chrome_preset_keeps_the_installed_chrome_user_agent() {
+        let installed = Some(151);
+        assert_eq!(
+            browser_user_agent_major(installed, Some(get_preset("firefox136").unwrap())),
+            installed
+        );
+        assert_eq!(
+            browser_user_agent_major(installed, Some(get_preset("default").unwrap())),
+            installed
+        );
+        assert_eq!(browser_user_agent_major(None, None), None);
+    }
+
+    #[test]
     fn browser_language_is_canonical_and_keeps_request_and_page_identity_aligned() {
         assert_eq!(
             normalize_browser_language(Some(" zh-hans-cn ")).unwrap(),
@@ -833,7 +899,46 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--headless"));
         assert!(!args.iter().any(|arg| arg == "--headless=new"));
         assert!(args.iter().any(|arg| arg == "--lang=th-TH"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--user-agent=Mozilla/5.0 Chrome/151.0.0.0"));
         assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
+
+    #[test]
+    fn notification_permission_is_not_forced_to_denied() {
+        assert!(!DISABLED_FEATURES
+            .split(',')
+            .any(|feature| feature == "NotificationTriggers"));
+
+        let command = chrome_command(
+            Path::new("chrome"),
+            Path::new("browser-profile"),
+            9222,
+            8080,
+            None,
+            None,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--disable-notifications"));
+
+        let profile_dir = std::env::temp_dir().join(format!(
+            "shownet-browser-permissions-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        prepare_browser_profile(&profile_dir, None).expect("write browser preferences");
+        let preferences = std::fs::read_to_string(profile_dir.join("Default/Preferences"))
+            .expect("read browser preferences");
+        let preferences: serde_json::Value =
+            serde_json::from_str(&preferences).expect("valid browser preferences");
+        assert!(preferences
+            .pointer("/profile/default_content_setting_values/notifications")
+            .is_none());
+        let _ = std::fs::remove_dir_all(profile_dir);
     }
 
     /// The window has to fit on the screen it claims. A screen smaller than the
@@ -897,15 +1002,21 @@ mod tests {
             "UA {user_agent} does not describe the installed Chrome {major}"
         );
 
-        let reported = std::process::Command::new(&chrome)
-            .arg("--version")
-            .output()
-            .expect("run --version");
-        let reported = String::from_utf8_lossy(&reported.stdout);
-        assert!(
-            reported.contains(&major.to_string()),
-            "parsed major {major} is not in the browser's own --version output: {reported}"
-        );
+        // Windows already reads the version from the PE file through the Win32
+        // version API. Starting a second Chrome process here can block the
+        // shared browser profile on hosted runners, while adding no coverage.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let reported = std::process::Command::new(&chrome)
+                .arg("--version")
+                .output()
+                .expect("run --version");
+            let reported = String::from_utf8_lossy(&reported.stdout);
+            assert!(
+                reported.contains(&major.to_string()),
+                "parsed major {major} is not in the browser's own --version output: {reported}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -922,12 +1033,19 @@ mod tests {
             .expect("launch an isolated headless Chrome");
         eprintln!("Chrome launched; reading page identity");
         let status = browser.status();
+        // `about:blank` has an opaque origin and Chrome reports notifications
+        // as denied there. Real sites such as bot.sannysoft.com have a normal
+        // secure/local origin, so read the permission on the same kind of page
+        // the embedded browser actually serves.
+        browser
+            .bus()
+            .navigate(&status.lab_url)
+            .await
+            .expect("navigate to the embedded Lab");
+        sleep(Duration::from_millis(250)).await;
         let identity = browser
             .bus()
-            .evaluate(
-                "JSON.stringify({language: navigator.language, languages: navigator.languages, ua: navigator.userAgent})",
-                false,
-            )
+            .evaluate("navigator.permissions.query({name: 'notifications'}).then(({state}) => JSON.stringify({language: navigator.language, languages: navigator.languages, ua: navigator.userAgent, notifications: state}))", true)
             .await
             .expect("read browser identity");
         let identity: serde_json::Value = serde_json::from_str(
@@ -951,6 +1069,7 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("Headless"));
+        assert_eq!(identity["notifications"], "prompt");
 
         eprintln!("page identity verified; stopping Chrome");
         browser.stop().await;
@@ -962,6 +1081,38 @@ mod tests {
                 .unwrap_or(true),
             "temporary Chrome profiles should be removed after browser stop"
         );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a locally installed Chrome; run manually for preset/UA verification"]
+    async fn a_versioned_chrome_preset_reaches_the_real_browser_user_agent() {
+        let data_dir =
+            std::env::temp_dir().join(format!("shownet-browser-preset-{}", std::process::id()));
+        crate::tls_outbound::set_active_preset("chrome149").expect("select chrome149");
+        let mut browser = super::ProxyBrowserHandle::launch(&data_dir, 9, None)
+            .await
+            .expect("launch an isolated headless Chrome");
+        let status = browser.status();
+        assert_eq!(status.browser_preset_id, "chrome149");
+        assert_eq!(status.browser_preset_family, "chrome");
+        assert_eq!(status.browser_preset_major_version, 149);
+        assert_eq!(status.browser_user_agent_major_version, 149);
+        assert!(status.honest_user_agent.contains("Chrome/149.0.0.0"));
+
+        let identity = browser
+            .bus()
+            .evaluate("navigator.userAgent", false)
+            .await
+            .expect("read browser user agent");
+        assert!(identity
+            .value
+            .as_str()
+            .unwrap_or_default()
+            .contains("Chrome/149.0.0.0"));
+
+        browser.stop().await;
+        crate::tls_outbound::set_active_preset("chrome150").expect("restore default preset");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }

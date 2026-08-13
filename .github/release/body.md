@@ -1,4 +1,7 @@
-## 0.4.23 更新
+## 0.4.24 更新
+
+- **修复 Chrome preset 与浏览器 User-Agent 不一致。** 选择 `chrome149`、`chrome151` 等有明确版本的桌面 Chrome preset 后，内嵌 Chrome 的启动 UA、`navigator.userAgent`、UA-CH metadata 和请求 Client Hints 会统一使用所选版本；Firefox、Safari、Edge、Android Chrome 及 generic preset 不会被错误拼成 Chrome 身份。
+- **修复 AI 配置保存入口难以发现。** `保存设置` 已移动到 API 提供商配置区域，与 Base URL、API Key、模型和上下文窗口放在一起；保存行为仍同时持久化提供商和分析策略配置。
 
 - **会话行支持直接删除。** 每个会话自身提供删除入口，操作时不会先选中或打开会话；当前正在抓包的会话仍需先停止抓包，非活动会话继续通过确认弹窗展示请求数量并明确不可撤销。
 - **修复会话工具按钮布局。** 删除、重命名和 AI 报告入口使用独立位置，避免按钮重叠或误触。
