@@ -1229,6 +1229,7 @@ function graphNodeStatusLabel(status: AnalysisGraphRun["nodes"][number]["status"
 }
 
 function AgentActivityPanel({ activities, skillRuns, running, firstVisibleLatencyMs }: { activities: AgentActivityEntry[]; skillRuns: SkillRunAudit[]; running: boolean; firstVisibleLatencyMs?: number }) {
+  const [expanded, setExpanded] = useState(false);
   const current = activities.at(-1)!;
   const recent = activities.slice(0, -1).slice(-3).reverse();
   const stateLabel = running ? "实时执行中" : current.status === "error" ? "执行中断" : "本次已完成";
@@ -1238,6 +1239,16 @@ function AgentActivityPanel({ activities, skillRuns, running, firstVisibleLatenc
         <span className="agent-activity__mark"><Activity size={15} /></span>
         <div><span className="section-kicker">AGENT ACTIVITY</span><strong>内置 Agent 执行轨迹</strong></div>
         <span className={`agent-activity__state is-${running ? "running" : current.status}`}><i />{stateLabel} · {activities.length} 步{firstVisibleLatencyMs !== undefined ? ` · 首段 ${formatMetricDuration(firstVisibleLatencyMs)}` : ""}</span>
+        <button
+          type="button"
+          className="agent-activity__toggle"
+          aria-expanded={expanded}
+          aria-label={expanded ? "收起执行轨迹" : "展开执行轨迹"}
+          title={expanded ? "收起执行轨迹" : "展开执行轨迹"}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          <ChevronDown size={15} />
+        </button>
       </header>
       <div className={`agent-activity__current is-${current.status}`}>
         <span className="agent-activity__status-icon">
@@ -1246,7 +1257,7 @@ function AgentActivityPanel({ activities, skillRuns, running, firstVisibleLatenc
         <div><small>当前步骤</small><strong>{current.title}</strong><p>{current.detail}</p></div>
         <time>{formatActivityTime(current.updatedAt)}</time>
       </div>
-      {recent.length > 0 && (
+      {expanded && recent.length > 0 && (
         <ol className="agent-activity__recent">
           {recent.map((item) => (
             <li key={item.id} className={`is-${item.status}`}>
@@ -1257,7 +1268,7 @@ function AgentActivityPanel({ activities, skillRuns, running, firstVisibleLatenc
           ))}
         </ol>
       )}
-      {skillRuns.length > 0 && (
+      {expanded && skillRuns.length > 0 && (
         <div className="agent-skill-runs">
           <div className="agent-skill-runs__heading"><span>SKILL RUNS</span><strong>{skillRuns.length} 个执行单元</strong></div>
           <ul>

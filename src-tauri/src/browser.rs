@@ -43,7 +43,7 @@ pub struct ProxyBrowserHandle {
 pub(crate) const DISABLED_FEATURES: &str = "AccountConsistency,AutofillServerCommunication,\
 CertificateTransparencyComponentUpdater,DiceWebSigninInterception,FedCm,\
 FedCmWithoutThirdPartyCookies,InterestFeedContentSuggestions,MediaRouter,\
-NetworkTimeServiceQuerying,NotificationTriggers,OptimizationGuideModelDownloading,\
+NetworkTimeServiceQuerying,OptimizationGuideModelDownloading,\
 OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,\
 PrivacySandboxSettings4,PushMessaging,SafeBrowsingEnhancedProtection,\
 SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingRealTimeLookup,SigninPromo,Translate";
@@ -437,7 +437,6 @@ fn chrome_command(
         .arg("--disable-domain-reliability")
         .arg("--disable-extensions")
         .arg("--disable-field-trial-config")
-        .arg("--disable-notifications")
         .arg("--disable-search-engine-choice-screen")
         .arg("--disable-sync")
         .arg("--metrics-recording-only")
@@ -503,10 +502,7 @@ fn prepare_browser_profile(
         "credentials_enable_service": false,
         "dns_prefetching": { "enabled": false },
         "net": { "network_prediction_options": 2 },
-        "profile": {
-            "default_content_setting_values": { "notifications": 2 },
-            "password_manager_enabled": false
-        },
+        "profile": { "password_manager_enabled": false },
         "safebrowsing": {
             "enabled": false,
             "enhanced": false
@@ -765,11 +761,13 @@ pub(crate) fn chrome_executable() -> Result<PathBuf, String> {
 mod tests {
     use super::{
         accept_language_for, browser_user_agent_major, chrome_command, chrome_executable,
-        chrome_major_version, frozen_user_agent, normalize_browser_language, DISABLED_FEATURES,
-        LAB_SCRIPT, SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
+        chrome_major_version, frozen_user_agent, normalize_browser_language,
+        prepare_browser_profile, DISABLED_FEATURES, LAB_SCRIPT, SCREEN_HEIGHT, SCREEN_WIDTH,
+        WINDOW_HEIGHT, WINDOW_WIDTH,
     };
     use crate::tls_clienthello_catalog::get_preset;
     use std::path::Path;
+    use tokio::time::{sleep, Duration};
 
     #[test]
     fn embedded_lab_script_falls_back_to_hook_bridge_for_status() {
@@ -907,6 +905,42 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("about:blank"));
     }
 
+    #[test]
+    fn notification_permission_is_not_forced_to_denied() {
+        assert!(!DISABLED_FEATURES
+            .split(',')
+            .any(|feature| feature == "NotificationTriggers"));
+
+        let command = chrome_command(
+            Path::new("chrome"),
+            Path::new("browser-profile"),
+            9222,
+            8080,
+            None,
+            None,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--disable-notifications"));
+
+        let profile_dir = std::env::temp_dir().join(format!(
+            "shownet-browser-permissions-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        prepare_browser_profile(&profile_dir, None).expect("write browser preferences");
+        let preferences = std::fs::read_to_string(profile_dir.join("Default/Preferences"))
+            .expect("read browser preferences");
+        let preferences: serde_json::Value =
+            serde_json::from_str(&preferences).expect("valid browser preferences");
+        assert!(preferences
+            .pointer("/profile/default_content_setting_values/notifications")
+            .is_none());
+        let _ = std::fs::remove_dir_all(profile_dir);
+    }
+
     /// The window has to fit on the screen it claims. A screen smaller than the
     /// window is the same class of tell as the 800x600 default it replaces.
     #[test]
@@ -968,15 +1002,21 @@ mod tests {
             "UA {user_agent} does not describe the installed Chrome {major}"
         );
 
-        let reported = std::process::Command::new(&chrome)
-            .arg("--version")
-            .output()
-            .expect("run --version");
-        let reported = String::from_utf8_lossy(&reported.stdout);
-        assert!(
-            reported.contains(&major.to_string()),
-            "parsed major {major} is not in the browser's own --version output: {reported}"
-        );
+        // Windows already reads the version from the PE file through the Win32
+        // version API. Starting a second Chrome process here can block the
+        // shared browser profile on hosted runners, while adding no coverage.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let reported = std::process::Command::new(&chrome)
+                .arg("--version")
+                .output()
+                .expect("run --version");
+            let reported = String::from_utf8_lossy(&reported.stdout);
+            assert!(
+                reported.contains(&major.to_string()),
+                "parsed major {major} is not in the browser's own --version output: {reported}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -993,12 +1033,19 @@ mod tests {
             .expect("launch an isolated headless Chrome");
         eprintln!("Chrome launched; reading page identity");
         let status = browser.status();
+        // `about:blank` has an opaque origin and Chrome reports notifications
+        // as denied there. Real sites such as bot.sannysoft.com have a normal
+        // secure/local origin, so read the permission on the same kind of page
+        // the embedded browser actually serves.
+        browser
+            .bus()
+            .navigate(&status.lab_url)
+            .await
+            .expect("navigate to the embedded Lab");
+        sleep(Duration::from_millis(250)).await;
         let identity = browser
             .bus()
-            .evaluate(
-                "JSON.stringify({language: navigator.language, languages: navigator.languages, ua: navigator.userAgent})",
-                false,
-            )
+            .evaluate("navigator.permissions.query({name: 'notifications'}).then(({state}) => JSON.stringify({language: navigator.language, languages: navigator.languages, ua: navigator.userAgent, notifications: state}))", true)
             .await
             .expect("read browser identity");
         let identity: serde_json::Value = serde_json::from_str(
@@ -1022,6 +1069,7 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("Headless"));
+        assert_eq!(identity["notifications"], "prompt");
 
         eprintln!("page identity verified; stopping Chrome");
         browser.stop().await;
