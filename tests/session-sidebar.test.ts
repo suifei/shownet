@@ -17,6 +17,19 @@ describe("session sidebar", () => {
     assert.match(source, /invoke<Session>\("rename_session"/);
   });
 
+  it("puts a session-scoped delete action on each row without selecting the row", async () => {
+    const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+
+    assert.match(source, /className="session-delete-button"/);
+    assert.match(source, /aria-label={`删除 \${session\.name}`}/);
+    assert.match(source, /event\.stopPropagation\(\);\s*void deleteSession\(session\);/);
+    assert.match(source, /invoke\("delete_session", \{ sessionId: session\.id \}\)/);
+    assert.match(
+      await readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+      /\.session-rename-button\s*\{[^}]*right:\s*37px/s,
+    );
+  });
+
   it("stacks the session tools dropdown above the session list without glass bleed", async () => {
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
 

@@ -1717,7 +1717,29 @@ function App() {
                       </span>
                     </span>
                   </button>
-                  <button className="session-rename-button" onClick={() => beginSessionRename(session)} title="重命名会话" aria-label={`重命名 ${session.name}`}><Pencil size={12} /></button>
+                  <button
+                    className="session-delete-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void deleteSession(session);
+                    }}
+                    title="删除会话"
+                    aria-label={`删除 ${session.name}`}
+                    disabled={transferring}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                  <button
+                    className="session-rename-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      beginSessionRename(session);
+                    }}
+                    title="重命名会话"
+                    aria-label={`重命名 ${session.name}`}
+                  >
+                    <Pencil size={12} />
+                  </button>
                 </>
               )}
               {!editing && session.analysisReportCount > 0 && (
