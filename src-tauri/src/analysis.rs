@@ -138,6 +138,7 @@ pub async fn start_analysis(
                 session_id: report.session_id.clone(),
                 cancellation: cancel_sender,
                 graph_mcp_token: None,
+                graph_mcp_tools: HashSet::new(),
                 graph_audit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             },
         );
@@ -239,6 +240,7 @@ async fn run_analysis(
             .get_mut(&report.id)
             .ok_or_else(|| "AI 分析运行记录不存在".to_string())?;
         execution.graph_mcp_token = Some(graph_mcp_token.clone());
+        execution.graph_mcp_tools = skill_plan.tool_names.iter().cloned().collect();
     }
     start_skill_run_audits(state, report, input, &skill_plan, requests.len())?;
 
@@ -383,6 +385,7 @@ async fn run_analysis(
         None
     };
     let native_runtime_prompt = messages_to_runtime_prompt(&messages)?;
+    let agent_runtime_settings = state.storage.get_agent_runtime_settings()?;
     let native_log_id = state.storage.begin_ai_request_log(
         &report.id,
         "grokbuild-graph-agent",
@@ -398,7 +401,7 @@ async fn run_analysis(
         selected.len() as i64,
         None,
         Some(format!(
-            "GrokBuild 已获得完整 {} 轮分析能力，Graph 仅建议路径并记录实际轨迹",
+            "Grok 已获得完整 {} 轮分析能力，Graph 仅建议路径并记录实际轨迹",
             analysis_settings.max_agent_turns.max(1)
         )),
     )?;
@@ -413,6 +416,7 @@ async fn run_analysis(
         upstream,
         &skill_plan,
         analysis_settings.max_agent_turns,
+        &agent_runtime_settings,
         &native_runtime_prompt,
         |delta| {
             if !analysis_settings.streaming_output {
@@ -453,12 +457,11 @@ async fn run_analysis(
         },
         |activity| {
             let (phase, message) = match activity {
-                grok_runtime::GrokActivity::Reasoning => (
-                    "reasoning",
-                    "GrokBuild 正在自主规划、反思并沿证据动态切换 Skill",
-                ),
+                grok_runtime::GrokActivity::Reasoning => {
+                    ("reasoning", "Grok 正在自主规划、反思并沿证据动态切换 Skill")
+                }
                 grok_runtime::GrokActivity::Generating => {
-                    ("generating", "GrokBuild 正在汇总报告与 Graph 产物")
+                    ("generating", "Grok 正在汇总报告与 Graph 产物")
                 }
             };
             emit_stream(
@@ -550,7 +553,7 @@ async fn run_analysis(
             state.storage.finish_ai_request_log(
                 &native_log_id,
                 "skipped",
-                Some("当前构建未提供 GrokBuild sidecar"),
+                Some("系统 Grok 不可用或与 ShowNet 不兼容"),
             )?;
             emit_stream(
                 app,
@@ -559,7 +562,7 @@ async fn run_analysis(
                 "",
                 selected.len() as i64,
                 None,
-                Some("GrokBuild sidecar 不可用，Graph 切换兼容执行器".to_string()),
+                Some("系统 Grok 不可用，Graph 已切换兼容执行器".to_string()),
             )?;
         }
         Err(error) => {

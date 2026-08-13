@@ -7422,6 +7422,48 @@ kbd {
 .storage-metrics.is-loading strong { color: var(--text-subtle); font-size: 13px; }
 .storage-retention-row,
 .agent-turn-limit-row { align-items: end; }
+.agent-runtime-status {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+}
+.agent-runtime-status.is-ready { border-color: var(--success-border); }
+.agent-runtime-status__icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--text-muted); background: var(--dark-elevated); border-radius: 8px; }
+.agent-runtime-status.is-ready .agent-runtime-status__icon { color: var(--success-ink); background: var(--success-bg); }
+.agent-runtime-status__main { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.agent-runtime-status__main strong { color: var(--text-secondary); font-size: 13px; }
+.agent-runtime-status__main small { color: var(--text-subtle); font-size: 11px; line-height: 1.4; }
+.agent-runtime-status__main code { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-runtime-status__actions { display: flex; align-items: center; gap: 6px; }
+.agent-runtime-status__actions .secondary-button { min-height: 30px; }
+.agent-runtime-install { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; padding: 10px; background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: 8px; }
+.agent-runtime-install > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.agent-runtime-install strong { color: var(--warning-ink); font-size: 13px; }
+.agent-runtime-install small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.agent-runtime-install__proxy { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); font-size: 12px; }
+.agent-runtime-install__proxy input { width: 15px; height: 15px; }
+.agent-runtime-install__hint { grid-column: 1; }
+.agent-runtime-install__hint button {
+  padding: 0;
+  border: 0;
+  color: var(--codex-accent);
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.agent-runtime-install .save-settings-button { grid-column: 2; grid-row: 1 / span 2; margin: 0; white-space: nowrap; }
+.agent-runtime-update-check { align-self: flex-start; min-height: 30px; }
+.agent-runtime-boundary { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; color: var(--success-ink); background: var(--success-bg); border: 1px solid var(--success-border); border-radius: 8px; }
+.agent-runtime-boundary > svg { flex: 0 0 auto; margin-top: 1px; }
+.agent-runtime-boundary > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.agent-runtime-boundary strong { font-size: 12px; }
+.agent-runtime-boundary small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .storage-retention-row > div,
 .agent-turn-limit-row > div { display: flex; flex-direction: column; justify-content: center; min-height: 34px; gap: 3px; }
 .storage-retention-row > div strong,
@@ -7770,6 +7812,11 @@ kbd {
   .storage-metrics > div { min-height: 48px; border-right: 0; border-bottom: 1px solid var(--line); }
   .storage-retention-row,
   .agent-turn-limit-row { align-items: stretch; }
+  .agent-runtime-status { grid-template-columns: 36px minmax(0, 1fr); }
+  .agent-runtime-status__actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .agent-runtime-install { grid-template-columns: 1fr; }
+  .agent-runtime-install__hint,
+  .agent-runtime-install .save-settings-button { grid-column: 1; grid-row: auto; }
   .mcp-guide-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mcp-guide-layout { grid-template-columns: 1fr; gap: 8px; }
   .mcp-guide-steps { display: grid; grid-template-columns: 1fr; gap: 0; }

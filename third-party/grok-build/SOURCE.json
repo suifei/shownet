@@ -1,8 +1,0 @@
-{
-  "name": "xai-org/grok-build",
-  "version": "1.0.0",
-  "repository": "https://github.com/xai-org/grok-build",
-  "commit": "afbc0fb710320c7add294c2106d447ecc3e3af2e",
-  "license": "Apache-2.0",
-  "rustToolchain": "1.94.0"
-}

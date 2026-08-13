@@ -31,17 +31,9 @@ export async function buildPortablePackage(options = {}) {
       ?? resolve(releaseDirectory, "shownet.exe"),
     launcher: options.launcher
       ?? resolve(releaseDirectory, "shownet-portable-launcher.exe"),
-    sidecar: options.sidecar
-      ?? resolve(projectRoot, "src-tauri", "binaries", `grok-build-${target}.exe`),
     icon: options.icon ?? resolve(projectRoot, "src-tauri", "icons", "icon.ico"),
     projectLicense: options.projectLicense ?? resolve(projectRoot, "LICENSE"),
     notices: options.notices ?? resolve(projectRoot, "THIRD_PARTY_NOTICES.md"),
-    agentLicense: options.agentLicense
-      ?? resolve(projectRoot, "third-party", "grok-build", "LICENSE"),
-    agentNotices: options.agentNotices
-      ?? resolve(projectRoot, "third-party", "grok-build", "THIRD-PARTY-NOTICES"),
-    agentSource: options.agentSource
-      ?? resolve(projectRoot, "third-party", "grok-build", "SOURCE.json"),
   };
 
   validateTarget(target);
@@ -49,10 +41,9 @@ export async function buildPortablePackage(options = {}) {
   await Promise.all([
     assertPeFile(sources.application, "ShowNet application", { subsystem: 2 }),
     assertPeFile(sources.launcher, "portable launcher", { subsystem: 2 }),
-    assertPeFile(sources.sidecar, "built-in Agent"),
     assertIcoFile(sources.icon),
     ...Object.entries(sources)
-      .filter(([name]) => !["application", "launcher", "sidecar", "icon"].includes(name))
+      .filter(([name]) => !["application", "launcher", "icon"].includes(name))
       .map(([name, path]) => assertRegularFile(path, name)),
   ]);
   await assertProductionFrontend(
@@ -64,25 +55,19 @@ export async function buildPortablePackage(options = {}) {
   await rm(outputDirectory, { recursive: true, force: true });
   const applicationDirectory = resolve(outputDirectory, "App", "ShowNet");
   const appInfoDirectory = resolve(outputDirectory, "App", "AppInfo");
-  const agentLicenseDirectory = resolve(applicationDirectory, "licenses", "grok-build");
   const dataDirectory = resolve(outputDirectory, "Data", "ShowNet");
   await Promise.all([
     mkdir(applicationDirectory, { recursive: true }),
     mkdir(appInfoDirectory, { recursive: true }),
-    mkdir(agentLicenseDirectory, { recursive: true }),
     mkdir(dataDirectory, { recursive: true }),
   ]);
 
   await Promise.all([
     copyFile(sources.launcher, resolve(outputDirectory, "ShowNetPortable.exe")),
     copyFile(sources.application, resolve(applicationDirectory, "ShowNet.exe")),
-    copyFile(sources.sidecar, resolve(applicationDirectory, "grok-build.exe")),
     copyFile(sources.icon, resolve(appInfoDirectory, "appicon.ico")),
     copyFile(sources.projectLicense, resolve(applicationDirectory, "LICENSE")),
     copyFile(sources.notices, resolve(applicationDirectory, "THIRD_PARTY_NOTICES.md")),
-    copyFile(sources.agentLicense, resolve(agentLicenseDirectory, "LICENSE")),
-    copyFile(sources.agentNotices, resolve(agentLicenseDirectory, "THIRD-PARTY-NOTICES")),
-    copyFile(sources.agentSource, resolve(agentLicenseDirectory, "SOURCE.json")),
   ]);
 
   const manifest = {
@@ -92,7 +77,6 @@ export async function buildPortablePackage(options = {}) {
     architecture: "x86_64",
     launcher: "ShowNetPortable.exe",
     application: "App/ShowNet/ShowNet.exe",
-    sidecar: "App/ShowNet/grok-build.exe",
     dataDirectory: "Data/ShowNet",
     dataPolicy: "portable",
     frontendAssets: frontendAssetReferences,
@@ -139,13 +123,9 @@ export async function verifyPortablePackage(
   const required = [
     "ShowNetPortable.exe",
     "App/ShowNet/ShowNet.exe",
-    "App/ShowNet/grok-build.exe",
     "App/ShowNet/LICENSE",
     "App/AppInfo/appicon.ico",
     "App/AppInfo/appinfo.ini",
-    "App/ShowNet/licenses/grok-build/LICENSE",
-    "App/ShowNet/licenses/grok-build/THIRD-PARTY-NOTICES",
-    "App/ShowNet/licenses/grok-build/SOURCE.json",
     "Data/ShowNet/.portable",
     "portable-manifest.json",
     "portable-checksums.sha256",
@@ -157,7 +137,6 @@ export async function verifyPortablePackage(
   await Promise.all([
     assertPeFile(resolve(outputDirectory, "ShowNetPortable.exe"), "portable launcher", { subsystem: 2 }),
     assertPeFile(resolve(outputDirectory, "App/ShowNet/ShowNet.exe"), "ShowNet application", { subsystem: 2 }),
-    assertPeFile(resolve(outputDirectory, "App/ShowNet/grok-build.exe"), "built-in Agent"),
     assertIcoFile(resolve(outputDirectory, "App/AppInfo/appicon.ico")),
   ]);
   await assertProductionFrontend(

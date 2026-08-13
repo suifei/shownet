@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -27,24 +27,16 @@ describe("Windows PortableApps package", () => {
     try {
       const application = join(fixture, "shownet.exe");
       const launcher = join(fixture, "launcher.exe");
-      const sidecar = join(fixture, "grok-build.exe");
       const icon = join(fixture, "icon.ico");
       const projectLicense = join(fixture, "PROJECT-LICENSE");
       const notices = join(fixture, "THIRD_PARTY_NOTICES.md");
-      const agentLicense = join(fixture, "LICENSE");
-      const agentNotices = join(fixture, "AGENT-NOTICES");
-      const agentSource = join(fixture, "SOURCE.json");
       const outputDirectory = join(fixture, "ShowNetPortable");
       await Promise.all([
         writeFile(application, productionAmd64PeFixture(1)),
         writeFile(launcher, amd64PeFixture(2)),
-        writeFile(sidecar, amd64PeFixture(3)),
         writeFile(icon, Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01])),
         writeFile(projectLicense, "project license\n"),
         writeFile(notices, "project notices\n"),
-        writeFile(agentLicense, "agent license\n"),
-        writeFile(agentNotices, "agent notices\n"),
-        writeFile(agentSource, '{"name":"xai-org/grok-build"}\n'),
       ]);
 
       await buildPortablePackage({
@@ -53,13 +45,9 @@ describe("Windows PortableApps package", () => {
         outputDirectory,
         application,
         launcher,
-        sidecar,
         icon,
         projectLicense,
         notices,
-        agentLicense,
-        agentNotices,
-        agentSource,
         packageJson: { version: "1.2.3" },
         frontendAssetReferences,
       });
@@ -70,6 +58,7 @@ describe("Windows PortableApps package", () => {
 
       const manifest = JSON.parse(await readFile(join(outputDirectory, "portable-manifest.json"), "utf8"));
       assert.equal(manifest.application, "App/ShowNet/ShowNet.exe");
+      assert.equal(manifest.sidecar, undefined);
       assert.equal(manifest.dataDirectory, "Data/ShowNet");
       assert.equal(manifest.dataPolicy, "portable");
       assert.deepEqual(manifest.frontendAssets, frontendAssetReferences);
@@ -78,6 +67,7 @@ describe("Windows PortableApps package", () => {
       assert.match(appInfo, /Type=PortableApps\.comFormat/);
       assert.match(appInfo, /OpenSource=true/);
       assert.equal(await readFile(join(outputDirectory, "App/ShowNet/LICENSE"), "utf8"), "project license\n");
+      await assert.rejects(access(join(outputDirectory, "App/ShowNet/grok-build.exe")));
       const dataMarker = await readFile(join(outputDirectory, "Data/ShowNet/.portable"), "utf8");
       assert.match(dataMarker, /database, certificates, browser profile, and settings/);
 
@@ -103,12 +93,8 @@ describe("Windows PortableApps package", () => {
           outputDirectory: join(fixture, "output"),
           application: invalid,
           launcher: invalid,
-          sidecar: invalid,
           icon: invalid,
           notices: invalid,
-          agentLicense: invalid,
-          agentNotices: invalid,
-          agentSource: invalid,
           packageJson: { version: "1.0.0" },
           frontendAssetReferences,
         }),
@@ -124,13 +110,11 @@ describe("Windows PortableApps package", () => {
     try {
       const consoleApplication = join(fixture, "shownet.exe");
       const guiLauncher = join(fixture, "launcher.exe");
-      const sidecar = join(fixture, "grok-build.exe");
       const icon = join(fixture, "icon.ico");
       const metadata = join(fixture, "metadata.txt");
       await Promise.all([
         writeFile(consoleApplication, amd64PeFixture(1, 3)),
         writeFile(guiLauncher, amd64PeFixture(2)),
-        writeFile(sidecar, amd64PeFixture(3, 3)),
         writeFile(icon, Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01])),
         writeFile(metadata, "metadata\n"),
       ]);
@@ -141,12 +125,8 @@ describe("Windows PortableApps package", () => {
           outputDirectory: join(fixture, "output"),
           application: consoleApplication,
           launcher: guiLauncher,
-          sidecar,
           icon,
           notices: metadata,
-          agentLicense: metadata,
-          agentNotices: metadata,
-          agentSource: metadata,
           packageJson: { version: "1.0.0" },
           frontendAssetReferences,
         }),
@@ -162,13 +142,11 @@ describe("Windows PortableApps package", () => {
     try {
       const application = join(fixture, "shownet.exe");
       const launcher = join(fixture, "launcher.exe");
-      const sidecar = join(fixture, "grok-build.exe");
       const icon = join(fixture, "icon.ico");
       const metadata = join(fixture, "metadata.txt");
       await Promise.all([
         writeFile(application, amd64PeFixture(1)),
         writeFile(launcher, amd64PeFixture(2)),
-        writeFile(sidecar, amd64PeFixture(3, 3)),
         writeFile(icon, Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01])),
         writeFile(metadata, "metadata\n"),
       ]);
@@ -179,13 +157,9 @@ describe("Windows PortableApps package", () => {
           outputDirectory: join(fixture, "output"),
           application,
           launcher,
-          sidecar,
           icon,
           projectLicense: metadata,
           notices: metadata,
-          agentLicense: metadata,
-          agentNotices: metadata,
-          agentSource: metadata,
           packageJson: { version: "1.0.0" },
           frontendAssetReferences,
         }),

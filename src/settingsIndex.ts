@@ -63,6 +63,13 @@ export const SETTINGS_INDEX: SettingsSectionEntry[] = [
     keywords: ["upstream", "socks5", "http_proxy", "ja3", "ja4", "clienthello", "fingerprint", "502", "timeout", "出口", "上游", "指纹", "超时"],
   },
   {
+    id: "ai.runtime",
+    tab: "ai",
+    title: "Agent 运行时",
+    summary: "探测或安装 Grok，并配置 ShowNet 进程内的端点、Skill、MCP 与可选出口代理",
+    keywords: ["agent", "grok", "runtime", "install", "path", "proxy", "安装", "运行时", "代理"],
+  },
+  {
     id: "ai.provider",
     tab: "ai",
     title: "分析提供商",
@@ -163,7 +170,7 @@ export const SETTINGS_OPEN_SECTIONS_KEY = "shownet.settings.open-sections.v1";
  * Sections a tab opens with when the user has no saved preference. Everything
  * a beginner needs is open; the long power-user sections stay folded.
  */
-export const DEFAULT_OPEN_SECTIONS = ["capture.https", "capture.routing", "ai.provider", "data.database", "mcp.clients"];
+export const DEFAULT_OPEN_SECTIONS = ["capture.https", "capture.routing", "ai.runtime", "ai.provider", "data.database", "mcp.clients"];
 
 export function parseOpenSections(raw: string | null | undefined): string[] {
   if (!raw) return DEFAULT_OPEN_SECTIONS;

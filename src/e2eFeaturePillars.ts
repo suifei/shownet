@@ -127,8 +127,8 @@ export const E2E_FEATURE_PILLARS: FeaturePillarCoverage[] = [
       "tests/mcp-client-guide.test.ts",
       "tests/analysis-scope.test.ts",
     ],
-    shippedMarker: /real_sidecar|shownet_|mcp|SkillPlan|start_analysis|list_mcp_tools/,
-    note: "Live agent: real_sidecar_* when sidecar binary present",
+    shippedMarker: /real_system_grok|shownet_|mcp|SkillPlan|start_analysis|list_mcp_tools/,
+    note: "Live agent: real_system_grok_* when a compatible system Grok is present",
   },
   {
     id: "request-lab-replay-collections",

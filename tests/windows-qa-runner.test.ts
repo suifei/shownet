@@ -19,7 +19,7 @@ describe("Windows QA runner (entry point)", () => {
     assert.match(runner, /LAYER_DEFAULT_OK|runDefaultLayer/);
     assert.match(runner, /live_upstream_proxy_from_env/);
     assert.match(runner, /live_shownet_mitm_smoke/);
-    assert.match(runner, /real_sidecar_streams_openai_report/);
+    assert.match(runner, /real_system_grok_streams_openai_report/);
     assert.match(runner, /PROXY/);
     assert.match(runner, /Never prints secret|values redacted|redacted/);
     assert.match(runner, /--help/);

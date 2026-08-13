@@ -123,20 +123,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-      - name: Install pinned Agent Rust toolchain
-        run: rustup toolchain install 1.94.0 --profile minimal --target aarch64-apple-darwin
-      # Real protoc on PATH — grok-build's vendored bin/protoc needs unavailable "dotslash"
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "28.3"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Prepare pinned Agent source for Rust cache
-        run: node scripts/build-grok-sidecar.mjs --prepare-only --target aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            src-tauri
-            src-tauri/.sidecar-src/grok-build -> ../../.sidecar-target
+          workspaces: src-tauri
       - run: npm ci
       - run: npm run check:release
       - name: Detect signing mode
@@ -157,23 +146,6 @@ jobs:
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "Signing secrets incomplete — building ad-hoc (unsigned) macOS DMG"
           fi
-      - name: Download ripgrep for Agent sidecar offline bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/rg"
-          curl -fsSL --retry 5 -o "$RUNNER_TEMP/rg/rg.tgz" \
-            "https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-aarch64-apple-darwin.tar.gz"
-          tar -xzf "$RUNNER_TEMP/rg/rg.tgz" -C "$RUNNER_TEMP/rg"
-          RG_BIN="$(find "$RUNNER_TEMP/rg" -type f -name rg | head -n 1)"
-          test -x "$RG_BIN"
-          echo "GROK_TOOLS_BUNDLE_RG_PATH=$RG_BIN" >> "$GITHUB_ENV"
-          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
-          protoc --version
-      - name: Build and verify built-in Agent sidecar
-        run: |
-          npm run build:agent-sidecar -- --target aarch64-apple-darwin
-          npm run check:release -- --require-agent-target aarch64-apple-darwin
       - name: Build signed + notarized DMG
         if: steps.mode.outputs.signed == 'true'
         env:
@@ -293,20 +265,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: Install pinned Agent Rust toolchain
-        run: rustup toolchain install 1.94.0 --profile minimal --target x86_64-pc-windows-msvc
-      # Real Win32 protoc — vendored bin/protoc in grok-build is not a valid Win32 app
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "28.3"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Prepare pinned Agent source for Rust cache
-        run: node scripts/build-grok-sidecar.mjs --prepare-only --target x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            src-tauri
-            src-tauri/.sidecar-src/grok-build -> ../../.sidecar-target
+          workspaces: src-tauri
       - run: npm ci
       - name: Detect signing mode
         id: mode
@@ -330,28 +291,6 @@ jobs:
             "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Write-Host "SignPath is not configured — building an unsigned portable ZIP"
           }
-      - name: Download ripgrep for Agent sidecar offline bundle
-        shell: pwsh
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP "rg"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          $zip = Join-Path $dir "rg.zip"
-          Invoke-WebRequest -Uri "https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-x86_64-pc-windows-msvc.zip" -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath $dir -Force
-          $rg = Get-ChildItem -Path $dir -Recurse -Filter rg.exe | Select-Object -First 1
-          if (-not $rg) { throw "rg.exe not found in ripgrep archive" }
-          "GROK_TOOLS_BUNDLE_RG_PATH=$($rg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $protoc = (Get-Command protoc).Source
-          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          & protoc --version
-      - name: Build and verify built-in Agent sidecar
-        shell: pwsh
-        run: |
-          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc
-          # Left unsigned here on purpose. Signing changes the bytes, and the
-          # sidecar's recorded checksum has to describe the shipped file, so the
-          # stamp is redone after SignPath returns.
-          npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
       # Same reason as the quality job: BoringSSL's x86_64 assembly is NASM
       # syntax, and the build below now compiles it.
       - name: Install NASM for BoringSSL
@@ -379,7 +318,6 @@ jobs:
           $staging = "signing/unsigned"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           $sources = @{
-            "grok-build.exe"                 = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
             "ShowNet.exe"                    = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
             "shownet-portable-launcher.exe"  = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
           }
@@ -416,7 +354,6 @@ jobs:
           if (-not $archive) { throw "SignPath returned no signed archive" }
           Expand-Archive -Path $archive.FullName -DestinationPath signing/extracted -Force
           $targets = @{
-            "grok-build.exe"                = "src-tauri/binaries/grok-build-x86_64-pc-windows-msvc.exe"
             "ShowNet.exe"                   = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet.exe"
             "shownet-portable-launcher.exe" = "src-tauri/target/x86_64-pc-windows-msvc/release/shownet-portable-launcher.exe"
           }
@@ -428,10 +365,7 @@ jobs:
             if ($signature.Status -ne "Valid") { throw "$name came back $($signature.Status)" }
             Copy-Item $signed.FullName $targets[$name] -Force
           }
-          # The sidecar's bytes changed, so its recorded checksum must be redone
-          # before anything reads it again.
-          npm run build:agent-sidecar -- --target x86_64-pc-windows-msvc --stamp-only
-          npm run check:release -- --require-agent-target x86_64-pc-windows-msvc
+          npm run check:release
       - name: Build PortableApps package
         shell: pwsh
         env:
@@ -440,11 +374,7 @@ jobs:
           npm run package:windows:portable -- --target x86_64-pc-windows-msvc
           $portableRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/ShowNetPortable"
           $executables = Get-ChildItem $portableRoot -Recurse -File -Filter *.exe
-          if ($executables.Count -ne 3) { throw "Portable package must contain exactly three executables" }
-          # Final check on what actually ships: every executable inside the
-          # package must still carry a valid signature after packaging moved and
-          # renamed it. A signed build that silently ships one unsigned binary
-          # is worse than an unsigned build, because nobody looks again.
+          if ($executables.Count -ne 2) { throw "Portable package must contain exactly two executables" }
           if ($env:SHOWNET_SIGNED -eq "true") {
             foreach ($executable in $executables) {
               $signature = Get-AuthenticodeSignature $executable.FullName

@@ -91,7 +91,7 @@ describe("egress ignores the ambient environment", () => {
     // The wreq path owns separate proxied and direct clients so bypass rules
     // retain ShowNet's exact-match semantics. Both are feature-gated, but this
     // scans source text and the invariant holds regardless of build config.
-    assert.equal(checked, 7, "expected 7 production egress clients; a new one must be guarded too");
+    assert.equal(checked, 8, "expected 8 production egress clients; a new one must be guarded too");
   });
 });
 

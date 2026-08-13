@@ -11,19 +11,19 @@ use crate::mirror::validate_mirror_action;
 #[cfg(test)]
 use crate::models::ClientAccessMode;
 use crate::models::{
-    AiAnalysisSettings, AiProviderSettings, AiProviderSettingsInput, AnalysisActivity,
-    AnalysisChatMessage, AnalysisReport, BodyCaptureMetadata, BrowserHookEvent, BrowserHookInput,
-    CaptureEvent, CaptureEventInput, CaptureListenerSettings, CaptureRule, CaptureRuleInput,
-    CaptureRuleRevision, CaptureRuleRun, CapturedRequestInput, CollectionImportCommitInput,
-    CollectionImportEnvironment, CollectionImportEnvironmentVariable, CollectionImportItem,
-    CollectionImportMetadata, CollectionImportResult, CollectionSyncChange,
-    CollectionSyncCommitInput, CollectionSyncPreview, CollectionSyncResult,
-    CollectionSyncSelection, CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput,
-    EffectiveAiProviderSettings, EffectiveMcpClientSettings, EffectiveMcpServerSettings,
-    EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord, EnvironmentVariable,
-    EnvironmentVariableInput, FacetCount, FilterExpression, HookRecord, McpClientSettings,
-    McpClientSettingsInput, McpServerSettings, McpServerSettingsInput, ReplayBatch,
-    ReplayBatchInput, ReplayBatchItem, RequestAnnotation, RequestAnnotationInput,
+    AgentRuntimeSettings, AgentRuntimeSettingsInput, AiAnalysisSettings, AiProviderSettings,
+    AiProviderSettingsInput, AnalysisActivity, AnalysisChatMessage, AnalysisReport,
+    BodyCaptureMetadata, BrowserHookEvent, BrowserHookInput, CaptureEvent, CaptureEventInput,
+    CaptureListenerSettings, CaptureRule, CaptureRuleInput, CaptureRuleRevision, CaptureRuleRun,
+    CapturedRequestInput, CollectionImportCommitInput, CollectionImportEnvironment,
+    CollectionImportEnvironmentVariable, CollectionImportItem, CollectionImportMetadata,
+    CollectionImportResult, CollectionSyncChange, CollectionSyncCommitInput, CollectionSyncPreview,
+    CollectionSyncResult, CollectionSyncSelection, CryptoCodeSnippet, DataStorageSettings,
+    DataStorageSettingsInput, EffectiveAiProviderSettings, EffectiveMcpClientSettings,
+    EffectiveMcpServerSettings, EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord,
+    EnvironmentVariable, EnvironmentVariableInput, FacetCount, FilterExpression, HookRecord,
+    McpClientSettings, McpClientSettingsInput, McpServerSettings, McpServerSettingsInput,
+    ReplayBatch, ReplayBatchInput, ReplayBatchItem, RequestAnnotation, RequestAnnotationInput,
     RequestAnnotationSummary, RequestCollection, RequestCollectionFolder,
     RequestCollectionFolderInput, RequestCollectionInput, RequestCollectionWorkspace, RequestDraft,
     RequestDraftBatchUpdateInput, RequestDraftInput, RequestDraftLocationInput, RequestFacets,
@@ -138,6 +138,7 @@ const UPSTREAM_PROXY_KEY: &str = "upstream_proxy";
 const CERTIFICATE_AUTHORITY_KEY: &str = "certificate_authority";
 const AI_PROVIDER_KEY: &str = "ai_provider";
 const AI_ANALYSIS_KEY: &str = "ai_analysis";
+const AGENT_RUNTIME_KEY: &str = "agent_runtime";
 const MCP_SERVER_KEY: &str = "mcp_server";
 const MCP_CLIENTS_KEY: &str = "mcp_clients";
 const SYSTEM_PROXY_KEY: &str = "system_proxy";
@@ -710,6 +711,52 @@ impl Storage {
             .map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
             .transpose()
             .map(|settings| settings.unwrap_or_default())
+    }
+
+    pub fn get_agent_runtime_settings(&self) -> Result<AgentRuntimeSettings, String> {
+        let value: Option<String> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT value_json FROM app_settings WHERE key = ?1",
+                    [AGENT_RUNTIME_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+        })?;
+        value
+            .map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+            .transpose()
+            .map(|settings| settings.unwrap_or_default())
+    }
+
+    pub fn save_agent_runtime_settings(
+        &self,
+        input: AgentRuntimeSettingsInput,
+    ) -> Result<AgentRuntimeSettings, String> {
+        let provider = input.provider.trim().to_ascii_lowercase();
+        if provider != "grok" {
+            return Err("当前版本仅支持 Grok Agent 运行时".to_string());
+        }
+        let executable_path = input
+            .executable_path
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let settings = AgentRuntimeSettings {
+            provider,
+            executable_path,
+            use_upstream_proxy: input.use_upstream_proxy,
+        };
+        let value = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_settings(key, value_json, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                updated_at = excluded.updated_at",
+                params![AGENT_RUNTIME_KEY, value, now_ms()],
+            )?;
+            Ok(())
+        })?;
+        Ok(settings)
     }
 
     pub fn save_ai_analysis_settings(
@@ -4945,6 +4992,10 @@ impl Storage {
     }
 
     pub(crate) fn request_session_id_for_replay(&self, request_id: &str) -> Result<String, String> {
+        self.request_session_id(request_id)
+    }
+
+    pub(crate) fn request_session_id_for_scope(&self, request_id: &str) -> Result<String, String> {
         self.request_session_id(request_id)
     }
 
@@ -10337,6 +10388,45 @@ mod tests {
                 .context_tokens,
             262_144
         );
+    }
+
+    #[test]
+    fn agent_runtime_defaults_to_system_grok_without_proxy() {
+        let storage = storage();
+        let settings = storage.get_agent_runtime_settings().unwrap();
+
+        assert_eq!(settings.provider, "grok");
+        assert_eq!(settings.executable_path, None);
+        assert!(!settings.use_upstream_proxy);
+    }
+
+    #[test]
+    fn persists_agent_runtime_selection_and_rejects_unknown_providers() {
+        let storage = storage();
+        let saved = storage
+            .save_agent_runtime_settings(AgentRuntimeSettingsInput {
+                provider: " GROK ".to_string(),
+                executable_path: Some(" /opt/grok/bin/grok ".to_string()),
+                use_upstream_proxy: true,
+            })
+            .unwrap();
+
+        assert_eq!(saved.provider, "grok");
+        assert_eq!(saved.executable_path.as_deref(), Some("/opt/grok/bin/grok"));
+        assert!(saved.use_upstream_proxy);
+
+        let restored = storage.get_agent_runtime_settings().unwrap();
+        assert_eq!(restored.provider, saved.provider);
+        assert_eq!(restored.executable_path, saved.executable_path);
+        assert_eq!(restored.use_upstream_proxy, saved.use_upstream_proxy);
+
+        assert!(storage
+            .save_agent_runtime_settings(AgentRuntimeSettingsInput {
+                provider: "codex".to_string(),
+                executable_path: None,
+                use_upstream_proxy: false,
+            })
+            .is_err());
     }
 
     #[test]
