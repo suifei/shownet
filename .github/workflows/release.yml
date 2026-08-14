@@ -194,22 +194,31 @@ jobs:
           # Strip residual Apple signing env from the runner so ad-hoc identity "-" works.
           unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
             APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH || true
-          npm run tauri -- build --target aarch64-apple-darwin --bundles dmg \
+          npm run tauri -- build --verbose --target aarch64-apple-darwin --bundles app \
             --config src-tauri/tauri.grok.conf.json \
             --config src-tauri/tauri.local.macos.conf.json \
             -- --features impersonate-boring
-          mkdir -p src-tauri/target/aarch64-apple-darwin/release/bundle
+          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ShowNet.app"
+          test -d "$app_path"
+          dmg_dir="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+          version="$(node -p "require('./package.json').version")"
+          dmg_path="$dmg_dir/ShowNet_${version}_aarch64.dmg"
+          staging_dir="$(mktemp -d)"
+          trap 'rm -rf "$staging_dir"' EXIT
+          cp -R "$app_path" "$staging_dir/ShowNet.app"
+          ln -s /Applications "$staging_dir/Applications"
+          mkdir -p "$dmg_dir"
+          hdiutil create -quiet -ov -format UDZO -volname "ShowNet" \
+            -srcfolder "$staging_dir" "$dmg_path"
+          hdiutil verify -quiet "$dmg_path"
           # Report what codesign found, not what this branch assumes. The signed
           # path writes this file from a real verification; this one used to
           # printf a constant, so a file named "verification" carried a claim
           # nobody had checked. Non-fatal: an unreadable signature is recorded as
           # "unknown" rather than failing a release over metadata.
-          # Read the DMG, not bundle/macos/ShowNet.app: tauri deletes that
-          # intermediate once the dmg is built ("Cleaning .../ShowNet.app" in the
-          # log), so the first version of this inspected a path that no longer
-          # existed and recorded "unknown". Mounting the artifact is also the
-          # more honest check — it is what a user receives.
-          dmg_path="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          # Read the mounted DMG instead of trusting the source app path. This
+          # checks the exact artifact a user receives, including the manual
+          # hdiutil packaging step above.
           mount_point="$(mktemp -d)"
           signature="unknown"
           codesign_out=""
