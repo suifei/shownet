@@ -142,6 +142,10 @@ describe("request list incremental updates", () => {
       queryPreviewRequestList([ok, server, missing], { kind: "predicate", field: "state", operator: "equals", value: "failed" }, []).items.map((entry) => entry.id),
       ["missing"],
     );
+    assert.deepEqual(
+      queryPreviewRequestList([ok, server, missing], { kind: "predicate", field: "all", operator: "contains", value: "api.example.test" }, []).items.map((entry) => entry.id),
+      ["ok", "server", "missing"],
+    );
   });
 
   it("targets overlapping windows and jumps directly across a 100k result set", () => {

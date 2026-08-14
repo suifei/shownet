@@ -117,10 +117,30 @@ function comparePreviewValues(left: string | number | boolean | undefined, right
 }
 
 function previewRequestField(item: RequestListItem, field: RequestField): string | number | boolean | undefined {
+  if (field === "all") return [
+    item.method,
+    item.scheme,
+    item.host,
+    item.path,
+    item.query,
+    item.status,
+    item.type,
+    item.source,
+    item.sourceInstanceId,
+    item.protocol,
+    item.sizeBytes,
+    item.durationMs,
+    item.risk,
+    item.hasHook ? "hook" : undefined,
+    item.cryptoSnippetCount,
+    item.tlsIntercepted ? "mitm" : undefined,
+    item.tlsVersion,
+  ].filter((value) => value != null).join(" ");
   if (field === "url") return `${item.scheme}://${item.host}${item.path}${item.query ? `?${item.query}` : ""}`;
   if (field === "hook") return item.hasHook ? "hook" : undefined;
   if (field === "requestHeader" || field === "responseHeader" || field === "requestBody" || field === "responseBody") return undefined;
-  return item[field];
+  const value = item[field as keyof RequestListItem];
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : undefined;
 }
 
 function previewSortField(item: RequestListItem, field: RequestField): string | number | boolean | undefined {

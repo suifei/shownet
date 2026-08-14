@@ -66,6 +66,14 @@ describe("CommandPalette", () => {
     expect(within(palette).getAllByRole("option")[0]).toHaveAttribute("aria-selected", "true");
   });
 
+  it("does not move the keyboard cursor when the pointer passes over a row", async () => {
+    const palette = await openPalette();
+    const rows = within(palette).getAllByRole("option");
+    await userEvent.hover(rows[2]);
+    expect(rows[0]).toHaveAttribute("aria-selected", "true");
+    expect(rows[2]).toHaveAttribute("aria-selected", "false");
+  });
+
   it("wraps the cursor at the ends", async () => {
     const palette = await openPalette();
     await userEvent.keyboard("{ArrowUp}");

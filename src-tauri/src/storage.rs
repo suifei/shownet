@@ -3478,6 +3478,11 @@ impl Storage {
 
     pub fn save_request_draft(&self, input: RequestDraftInput) -> Result<RequestDraft, String> {
         validate_request_draft(&input)?;
+        let mut input = input;
+        input.session_id = input.session_id.and_then(|value| {
+            let normalized = value.trim().to_string();
+            (!normalized.is_empty()).then_some(normalized)
+        });
         let tags = normalize_draft_tags(input.tags.clone())?;
         self.validate_request_draft_location(
             input.collection_id.as_deref(),
@@ -7197,6 +7202,7 @@ fn request_filter_expression(field: &str) -> Result<&'static str, String> {
         "requestBody" => Ok("COALESCE(r.request_body, '')"),
         "responseBody" => Ok("COALESCE(r.response_body, '')"),
         "hook" => Ok("COALESCE(r.hook_json, '')"),
+        "all" => Ok("COALESCE(r.method, '') || ' ' || COALESCE(r.scheme, '') || ' ' || COALESCE(r.host, '') || ' ' || COALESCE(r.path, '') || ' ' || COALESCE(r.query, '') || ' ' || COALESCE(CAST(r.status AS TEXT), '') || ' ' || COALESCE(r.resource_type, '') || ' ' || COALESCE(r.source, '') || ' ' || COALESCE(r.source_instance_id, '') || ' ' || COALESCE(r.protocol, '') || ' ' || COALESCE(CAST(r.size_bytes AS TEXT), '') || ' ' || COALESCE(CAST(r.duration_ms AS TEXT), '') || ' ' || COALESCE(r.risk_level, '') || ' ' || COALESCE(r.request_headers_json, '') || ' ' || COALESCE(r.response_headers_json, '') || ' ' || COALESCE(r.request_body, '') || ' ' || COALESCE(r.response_body, '') || ' ' || COALESCE(r.hook_json, '')"),
         _ => Err(format!("不支持的请求筛选字段: {field}")),
     }
 }
@@ -12038,6 +12044,32 @@ paths:
             })
             .unwrap();
         assert_eq!((column_count, migration_count), (1, 1));
+    }
+
+    #[test]
+    fn blank_request_draft_session_id_is_stored_as_null() {
+        let storage = storage();
+        let draft = storage
+            .save_request_draft(RequestDraftInput {
+                id: None,
+                session_id: Some("   ".into()),
+                source_request_id: None,
+                name: "blank session draft".into(),
+                method: "GET".into(),
+                url: "https://example.test/".into(),
+                headers: vec![],
+                body: String::new(),
+                body_type: "none".into(),
+                auth: serde_json::json!({"kind":"none"}),
+                settings: serde_json::json!({}),
+                environment_id: None,
+                collection_id: None,
+                folder_id: None,
+                tags: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(draft.session_id, None);
     }
 
     #[test]

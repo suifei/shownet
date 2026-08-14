@@ -45,14 +45,9 @@ export function buildQuickFilter(state: QuickFilterState, advanced?: FilterExpre
 
   const text = state.text.trim();
   if (text) {
-    const numeric = Number(text);
-    const textPredicates: FilterExpression[] = [
-      predicate("url", "contains", text),
-      predicate("host", "contains", text),
-      predicate("path", "contains", text),
-    ];
-    if (Number.isFinite(numeric)) textPredicates.push(predicate("status", "equals", numeric));
-    addOrGroup(groups, textPredicates);
+    // "全部" is intentionally a single backend predicate: the native query
+    // can search request/response headers and bodies that are absent from list rows.
+    addOrGroup(groups, [predicate("all", "contains", text)]);
   }
   if (advanced) groups.push(advanced);
   if (groups.length === 0) return undefined;

@@ -105,6 +105,13 @@ describe("filter AST", () => {
     assert.deepEqual(parseFilterExpression(serializeFilterExpression(normalized)), normalized);
     assert.equal(normalized?.kind === "group" && normalized.children[1].kind === "predicate", true);
   });
+
+  it("uses the all-field predicate for free-text search", () => {
+    assert.deepEqual(
+      buildQuickFilter({ ...emptyQuickFilter, text: "authorization" }),
+      { kind: "predicate", field: "all", operator: "contains", value: "authorization" },
+    );
+  });
 });
 
 describe("request lab navigation", () => {
@@ -124,6 +131,8 @@ describe("request lab navigation", () => {
     assert.match(app, /activeView === "lab" \? "is-workbench-hidden"/);
     assert.match(traffic, /createFromSelection: selectedRequests\.length === 1/);
     assert.match(traffic, /onOpenWorkbench\("lab", selectedRequests, \{ createFromSelection: true \}\)/);
+    assert.match(app, /<TrafficView\s+key=\{activeSession\.id\}/);
+    assert.match(workbench, /sessionId:\s*sessionId\?\.trim\(\) \|\| undefined/);
     assert.doesNotMatch(workbench, /modal-backdrop|workbench-backdrop/);
     assert.match(workbench, /autoCreateFromSelection/);
     assert.match(workbench, /正在创建可编辑请求/);
