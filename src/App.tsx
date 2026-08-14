@@ -86,7 +86,7 @@ import {
   shouldAutoOpenSetup,
   type SetupStepId,
 } from "./setupChecklist";
-import type { AnalysisMode, AnalysisStreamEvent, BreakpointQueueSnapshot, ConnectionDiagnostics, FilterExpression, ProxyTerminalLaunchResult, RequestFacets, RequestListEvent, RequestListItem, RequestListPage, RequestListWindow, RequestQueryCancellationAck, RequestQueryIdleMeasurement, RequestSort, ReverseProxySettingsInput, ReverseProxyStatus, RuntimeStatus, Session, SoakDiagnosticsStatus, SourceType, ViewId } from "./types";
+import type { AnalysisMode, AnalysisStreamEvent, BreakpointQueueSnapshot, ConnectionDiagnostics, FilterExpression, ProxyTerminalLaunchResult, RequestFacets, RequestListEvent, RequestListItem, RequestListPage, RequestListWindow, RequestQueryCancellationAck, RequestQueryIdleMeasurement, RequestSort, ReverseProxySettingsInput, ReverseProxyStatus, RuntimeStatus, Session, SoakDiagnosticsStatus, SourceType, UpdateCheckResult, ViewId } from "./types";
 import { useDismissibleLayer } from "./useDismissibleLayer";
 import { sourceIcons } from "./sourceIcons";
 
@@ -1058,6 +1058,20 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
+  useEffect(() => {
+    if (!hasNativeRuntime) return;
+    const timer = window.setTimeout(() => {
+      void invoke<UpdateCheckResult>("check_for_updates")
+        .then((result) => {
+          if (result.available) setToast(`发现 ShowNet ${result.latestVersion}，请到设置中确认下载`);
+        })
+        .catch(() => {
+          // Startup checks are best-effort; the explicit Settings action exposes errors.
+        });
+    }, 3_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // The setup panel needs to know whether analysis is usable, and that lives
   // behind the same IPC the AI settings tab reads. Re-checked whenever the user
   // returns from Settings so a freshly saved key ticks the step immediately.
@@ -1861,6 +1875,7 @@ function App() {
         <main className="workspace__content">
           {activeView === "traffic" && (
             <TrafficView
+              key={activeSession.id}
               requests={requests}
               totalCount={requestListPage?.totalCount ?? requests.length}
               filteredCount={requestListPage?.filteredCount ?? requests.length}
@@ -2594,7 +2609,6 @@ function CommandPalette({
                       aria-selected={index === activeIndex}
                       disabled={action.disabled}
                       title={action.disabled ? action.disabledReason : action.subtitle}
-                      onPointerMove={() => { if (!action.disabled) setActiveIndex(index); }}
                       onClick={() => { if (!action.disabled) action.run(); }}
                     >
                       <span className="command-row__body">

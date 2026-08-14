@@ -914,7 +914,7 @@ function FilterBuilderNode({ value, depth, onChange, onRemove }: { value: Filter
   </div>;
 }
 
-const filterFields: Array<[RequestField, string]> = [["url", "完整 URL"], ["host", "域名"], ["path", "路径"], ["method", "方法"], ["status", "状态码"], ["type", "类型"], ["source", "来源"], ["protocol", "协议"], ["durationMs", "耗时"], ["sizeBytes", "大小"], ["risk", "风险"], ["requestHeader", "请求 Header"], ["responseHeader", "响应 Header"], ["requestBody", "请求正文"], ["responseBody", "响应正文"], ["hook", "Hook"]];
+const filterFields: Array<[RequestField, string]> = [["all", "全部"], ["url", "完整 URL"], ["host", "域名"], ["path", "路径"], ["method", "方法"], ["status", "状态码"], ["type", "类型"], ["source", "来源"], ["protocol", "协议"], ["durationMs", "耗时"], ["sizeBytes", "大小"], ["risk", "风险"], ["requestHeader", "请求 Header"], ["responseHeader", "响应 Header"], ["requestBody", "请求正文"], ["responseBody", "响应正文"], ["hook", "Hook"]];
 type PredicateOperator = Extract<FilterExpression, { kind: "predicate" }>["operator"];
 const filterOperators: Array<[PredicateOperator, string]> = [["contains", "包含"], ["not_contains", "不包含"], ["equals", "等于"], ["not_equals", "不等于"], ["starts_with", "开头是"], ["ends_with", "结尾是"], ["wildcard", "通配符"], ["regex", "正则"], ["gt", "大于"], ["gte", "大于等于"], ["lt", "小于"], ["lte", "小于等于"], ["exists", "存在"]];
 const numericFilterFields = new Set<RequestField>(["order", "startedAt", "status", "sizeBytes", "durationMs", "cryptoSnippetCount"]);

@@ -170,6 +170,7 @@ export interface RequestListItem {
 }
 
 export type RequestField =
+  | "all"
   | "order"
   | "startedAt"
   | "state"
