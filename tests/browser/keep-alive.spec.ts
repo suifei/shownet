@@ -18,7 +18,8 @@ test("the browser view is kept mounted while another view is shown", async ({ pa
 
   await openView(page, "流量");
   // Hidden, but still in the DOM: a remount would drop the page entirely.
-  await expect(page.locator(".workspace-view-keep-alive")).toHaveCount(1);
+  const browserKeepAlive = page.locator(".workspace-view-keep-alive").filter({ has: surface });
+  await expect(browserKeepAlive).toHaveCount(1);
   await expect(surface).toBeHidden();
 
   await openView(page, "浏览器");
