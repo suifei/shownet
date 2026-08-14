@@ -1873,7 +1873,13 @@ function App() {
         </header>
 
         <main className="workspace__content">
-          {activeView === "traffic" && (
+          {/* Keep TrafficView mounted so leaving for Request Lab preserves the
+              user's filters, sort, selection and inspector context. */}
+          <div
+            className={`workspace-view-keep-alive ${activeView === "traffic" ? "is-active" : "is-hidden"}`}
+            hidden={activeView !== "traffic"}
+            aria-hidden={activeView !== "traffic"}
+          >
             <TrafficView
               key={activeSession.id}
               requests={requests}
@@ -1920,7 +1926,7 @@ function App() {
                 setActiveView("settings");
               }}
             />
-          )}
+          </div>
           {activeView === "lab" && (
             <RequestWorkbench
               key={workbenchLaunch?.id ?? `lab-${activeSession.id}`}

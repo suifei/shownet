@@ -3,6 +3,15 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 describe("embedded browser keep-alive (P2)", () => {
+  it("keeps TrafficView mounted so filters survive Request Lab navigation", async () => {
+    const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+
+    assert.doesNotMatch(app, /activeView === "traffic"\s*&&\s*\(\s*<TrafficView/);
+    assert.match(app, /Keep TrafficView mounted/);
+    assert.match(app, /hidden=\{activeView !== "traffic"\}/);
+    assert.match(app, /className=\{`workspace-view-keep-alive \$\{activeView === "traffic"/);
+  });
+
   it("keeps BrowserView mounted across nav switches and does not stop Chrome on hide", async () => {
     const [app, browser, styles] = await Promise.all([
       readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
