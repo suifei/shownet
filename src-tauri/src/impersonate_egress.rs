@@ -16,6 +16,8 @@
 
 use crate::models::EffectiveUpstreamProxy;
 use std::borrow::Cow;
+use std::net::{IpAddr, SocketAddr};
+use tokio::net::lookup_host;
 use wreq::{Body, Client, IntoEmulation, Response, Uri};
 use wreq_util::Profile;
 
@@ -42,6 +44,14 @@ pub struct ImpersonateClient {
     direct: Client,
     proxied: Option<Client>,
     bypass: Vec<String>,
+    route_connection_host: Option<String>,
+}
+
+#[derive(Clone)]
+struct DirectRouteOverride {
+    identity_host: String,
+    connection_host: String,
+    addresses: Vec<SocketAddr>,
 }
 
 fn chrome_151_emulation() -> Result<wreq::Emulation, String> {
@@ -58,14 +68,30 @@ fn chrome_151_emulation() -> Result<wreq::Emulation, String> {
 /// proxy so the impersonate path reaches the network the same way the rest of
 /// the proxy does.
 pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<ImpersonateClient, String> {
+    build_client_inner(upstream, None, None)
+}
+
+fn build_client_inner(
+    upstream: &EffectiveUpstreamProxy,
+    route: Option<DirectRouteOverride>,
+    cert_store: Option<wreq::tls::trust::CertStore>,
+) -> Result<ImpersonateClient, String> {
     // no_proxy() first: wreq, like reqwest, reads http_proxy/https_proxy from
     // the environment by default, and ShowNet points the system proxy at
     // itself — an inherited env proxy would loop the app's own egress back
     // through its capture proxy. The explicit upstream below is the only proxy
     // this client may use. (Invariant enforced by upstream-egress-ui.test.ts.)
-    let direct = Client::builder()
+    let mut direct_builder = Client::builder()
         .no_proxy()
-        .emulation(chrome_151_emulation()?)
+        .emulation(chrome_151_emulation()?);
+    if let Some(route) = route.as_ref() {
+        direct_builder = direct_builder
+            .resolve_to_addrs(route.identity_host.clone(), route.addresses.iter().copied());
+    }
+    if let Some(store) = cert_store.as_ref() {
+        direct_builder = direct_builder.tls_cert_store(store.clone());
+    }
+    let direct = direct_builder
         .build()
         .map_err(|error| format!("构建 wreq 直连客户端失败: {error}"))?;
     let proxied = if upstream.mode == "direct" {
@@ -80,11 +106,15 @@ pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<ImpersonateClie
                 upstream.password.as_deref().unwrap_or_default(),
             );
         }
+        let mut builder = Client::builder()
+            .no_proxy()
+            .emulation(chrome_151_emulation()?)
+            .proxy(proxy);
+        if let Some(store) = cert_store {
+            builder = builder.tls_cert_store(store);
+        }
         Some(
-            Client::builder()
-                .no_proxy()
-                .emulation(chrome_151_emulation()?)
-                .proxy(proxy)
+            builder
                 .build()
                 .map_err(|error| format!("构建 wreq 代理客户端失败: {error}"))?,
         )
@@ -93,7 +123,97 @@ pub fn build_client(upstream: &EffectiveUpstreamProxy) -> Result<ImpersonateClie
         direct,
         proxied,
         bypass: upstream.bypass.clone(),
+        route_connection_host: route.map(|route| route.connection_host),
     })
+}
+
+/// Builds an isolated client for one HTTPS route whose transport target may
+/// differ from its TLS and HTTP identity. Keeping the client route-scoped is
+/// required because wreq's connection pool key does not include DNS overrides.
+pub async fn build_client_for_route(
+    upstream: &EffectiveUpstreamProxy,
+    connection_host: &str,
+    connection_port: u16,
+    tls_identity_host: &str,
+    tls_identity_port: u16,
+) -> Result<ImpersonateClient, String> {
+    build_client_for_route_inner(
+        upstream,
+        connection_host,
+        connection_port,
+        tls_identity_host,
+        tls_identity_port,
+        None,
+    )
+    .await
+}
+
+async fn build_client_for_route_inner(
+    upstream: &EffectiveUpstreamProxy,
+    connection_host: &str,
+    connection_port: u16,
+    tls_identity_host: &str,
+    tls_identity_port: u16,
+    cert_store: Option<wreq::tls::trust::CertStore>,
+) -> Result<ImpersonateClient, String> {
+    let same_host = connection_host
+        .trim_matches(['[', ']'])
+        .eq_ignore_ascii_case(tls_identity_host.trim_matches(['[', ']']));
+    if same_host && connection_port == tls_identity_port {
+        return build_client_inner(upstream, None, cert_store);
+    }
+
+    if connection_port != tls_identity_port {
+        return Err(format!(
+            "wreq 兼容镜像暂不支持连接端口 {connection_port} 与身份端口 {tls_identity_port} 不同；请使用相同端口，避免改变 SNI/证书身份或 HTTP/2 :authority"
+        ));
+    }
+    if tls_identity_host
+        .trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .is_ok()
+    {
+        return Err(
+            "wreq 兼容镜像暂不支持把 IP 身份映射到其他连接地址；请使用域名身份或 target 身份模式"
+                .to_string(),
+        );
+    }
+
+    let route_is_direct =
+        upstream.mode == "direct" || crate::proxy::should_bypass(connection_host, &upstream.bypass);
+    if !route_is_direct {
+        return Err(format!(
+            "wreq 兼容镜像 {}:{} -> {}:{} 无法经 {} 二级出口代理保持原 SNI 与 HTTP authority；请为镜像目标配置 bypass 或使用 target 身份模式",
+            tls_identity_host,
+            tls_identity_port,
+            connection_host,
+            connection_port,
+            upstream.mode
+        ));
+    }
+
+    let lookup_host_value = connection_host.trim_matches(['[', ']']);
+    let addresses = if let Ok(address) = lookup_host_value.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, connection_port)]
+    } else {
+        let resolved = lookup_host((lookup_host_value, connection_port))
+            .await
+            .map_err(|error| format!("DNS 解析镜像目标 {connection_host} 失败: {error}"))?
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return Err(format!("DNS 未返回镜像目标 {connection_host} 的地址"));
+        }
+        resolved
+    };
+    build_client_inner(
+        upstream,
+        Some(DirectRouteOverride {
+            identity_host: tls_identity_host.trim_matches(['[', ']']).to_string(),
+            connection_host: connection_host.to_string(),
+            addresses,
+        }),
+        cert_store,
+    )
 }
 
 fn explicit_proxy_uri(upstream: &EffectiveUpstreamProxy) -> Result<Uri, String> {
@@ -145,7 +265,11 @@ pub async fn send(
         .parse()
         .map_err(|error| format!("请求地址无效 {url}: {error}"))?;
     let target = if client.proxied.as_ref().is_some_and(|_| {
-        !crate::proxy::should_bypass(uri.host().unwrap_or_default(), &client.bypass)
+        let routing_host = client
+            .route_connection_host
+            .as_deref()
+            .unwrap_or_else(|| uri.host().unwrap_or_default());
+        !crate::proxy::should_bypass(routing_host, &client.bypass)
     }) {
         client.proxied.as_ref().expect("checked above")
     } else {
@@ -170,11 +294,20 @@ pub async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ca::CertificateAuthority;
+    use bytes::Bytes;
     use futures_util::StreamExt;
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper::{Request, Version};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
+    use tokio_rustls::TlsAcceptor;
 
     fn upstream(mode: &str, username: &str, password: Option<&str>) -> EffectiveUpstreamProxy {
         EffectiveUpstreamProxy {
@@ -219,6 +352,128 @@ mod tests {
         assert!(!is_client_owned("content-length"));
         assert!(is_client_owned("transfer-encoding"));
         assert!(is_client_owned("connection"));
+    }
+
+    #[tokio::test]
+    async fn routed_https_hits_mirror_but_keeps_sni_certificate_and_h2_authority() {
+        let identity_host = "api.original.invalid";
+        let (authority, _) = CertificateAuthority::load_or_create(None).expect("test CA");
+        let server_config = authority
+            .server_config(identity_host)
+            .expect("identity certificate");
+        let cert_store = wreq::tls::trust::CertStore::builder()
+            .add_der_cert(authority.certificate_der().as_ref())
+            .build()
+            .expect("wreq test trust store");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (observed_tx, observed_rx) = oneshot::channel::<(String, String, Version)>();
+        let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("mirror accept");
+            let tls = TlsAcceptor::from(server_config)
+                .accept(stream)
+                .await
+                .expect("mirror TLS");
+            let sni = tls
+                .get_ref()
+                .1
+                .server_name()
+                .unwrap_or_default()
+                .to_string();
+            let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                let observed_tx = observed_tx.clone();
+                let sni = sni.clone();
+                async move {
+                    let authority = request
+                        .uri()
+                        .authority()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    if let Some(sender) = observed_tx.lock().expect("observation lock").take() {
+                        let _ = sender.send((sni, authority, request.version()));
+                    }
+                    Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from_static(
+                        b"mirror-ok",
+                    ))))
+                }
+            });
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await
+                .expect("mirror h2 server");
+        });
+
+        // A configured upstream proxy must still be bypassed using the mirror
+        // connection host, not the intentionally unresolvable identity host.
+        let client = build_client_for_route_inner(
+            &EffectiveUpstreamProxy {
+                mode: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 9,
+                username: String::new(),
+                password: None,
+                bypass: Vec::new(),
+            },
+            "127.0.0.1",
+            address.port(),
+            identity_host,
+            address.port(),
+            Some(cert_store),
+        )
+        .await
+        .expect("routed client");
+        let response = send(
+            &client,
+            "GET",
+            &format!("https://{identity_host}:{}/mirror", address.port()),
+            &[],
+            None,
+        )
+        .await
+        .expect("routed request");
+        assert_eq!(response.status(), 200);
+
+        let observed = timeout(Duration::from_secs(5), observed_rx)
+            .await
+            .expect("observation timeout")
+            .expect("observation");
+        assert_eq!(observed.0, identity_host);
+        assert_eq!(observed.1, format!("{identity_host}:{}", address.port()));
+        assert_eq!(observed.2, Version::HTTP_2);
+        drop(response);
+        drop(client);
+        timeout(Duration::from_secs(5), server)
+            .await
+            .expect("mirror server timeout")
+            .expect("mirror server");
+    }
+
+    #[tokio::test]
+    async fn routed_https_rejects_identity_port_drift_and_remote_proxy_routing() {
+        let direct_error = build_client_for_route(
+            &upstream("direct", "", None),
+            "127.0.0.1",
+            8443,
+            "api.original.invalid",
+            443,
+        )
+        .await
+        .err()
+        .expect("port mismatch must fail");
+        assert!(direct_error.contains("连接端口 8443 与身份端口 443 不同"));
+
+        let proxy_error = build_client_for_route(
+            &upstream("http", "", None),
+            "mirror.remote.invalid",
+            443,
+            "api.original.invalid",
+            443,
+        )
+        .await
+        .err()
+        .expect("remote proxy route must fail");
+        assert!(proxy_error.contains("无法经 http 二级出口代理"));
     }
 
     #[tokio::test]

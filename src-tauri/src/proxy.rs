@@ -369,6 +369,7 @@ struct DedicatedRequestRoute {
     connection_host: String,
     port: u16,
     tls_identity_host: String,
+    tls_identity_port: u16,
     /// Prefer h2 when TLS ALPN allows (false forces h1 path e.g. websocket upgrade).
     ///
     /// This must be reflected in the ALPN offered at the TLS layer as well.
@@ -1737,11 +1738,11 @@ async fn handle_connect(
             .unwrap_or(offered_version);
         let inbound_http_protocol =
             negotiated_http_protocol(client_tls.get_ref().1.alpn_protocol()).to_string();
-        let tls_identity_host = mirror_route
+        let (tls_identity_host, tls_identity_port) = mirror_route
             .as_ref()
             .map(RuntimeMirrorRoute::identity_target)
-            .map(|(host, _)| host.to_string())
-            .unwrap_or_else(|| host.clone());
+            .map(|(host, port)| (host.to_string(), port))
+            .unwrap_or_else(|| (host.clone(), port));
         // Strict static CDNs often 400 under rustls H2 MITM; force HTTP/1.1 ALPN when still decrypting.
         let force_http11 = tls_outbound::origin_force_http11_for_host(&tls_identity_host);
         let dedicated_sender_factory =
@@ -1755,18 +1756,25 @@ async fn handle_connect(
         let (sender, outbound_tls, negotiated_alpn) = {
             let _ = (prefer_origin_h2, force_http11, outbound_profile);
             drop(upstream_stream);
-            let client = match crate::impersonate_egress::build_client(&upstream) {
+            let client = match crate::impersonate_egress::build_client_for_route(
+                &upstream,
+                &upstream_host,
+                upstream_port,
+                &tls_identity_host,
+                tls_identity_port,
+            )
+            .await
+            {
                 Ok(client) => client,
                 Err(error) => {
                     error_sink(format!("构建 wreq 出站失败: {error}"));
                     return;
                 }
             };
-            let base = if port == 443 {
-                format!("https://{tls_identity_host}")
-            } else {
-                format!("https://{tls_identity_host}:{port}")
-            };
+            let base = format!(
+                "https://{}",
+                host_header_authority("https", &tls_identity_host, tls_identity_port)
+            );
             let egress_ja4 = crate::impersonate_egress::EGRESS_JA4;
             fingerprint.outbound.engine = Some("impersonate".into());
             // The linked profile has a separately measured golden JA4, but wreq
@@ -2332,12 +2340,22 @@ fn dedicated_request_sender_factory(
             // rustls connector only when prefer_http2 is false.
             #[cfg(feature = "impersonate-boring")]
             if route.scheme == "https" && route.prefer_http2 {
-                let client = crate::impersonate_egress::build_client(&upstream)?;
-                let base = if route.port == 443 {
-                    format!("https://{}", route.tls_identity_host)
-                } else {
-                    format!("https://{}:{}", route.tls_identity_host, route.port)
-                };
+                let client = crate::impersonate_egress::build_client_for_route(
+                    &upstream,
+                    &route.connection_host,
+                    route.port,
+                    &route.tls_identity_host,
+                    route.tls_identity_port,
+                )
+                .await?;
+                let base = format!(
+                    "https://{}",
+                    host_header_authority(
+                        "https",
+                        &route.tls_identity_host,
+                        route.tls_identity_port,
+                    )
+                );
                 return Ok(HttpsRequestSender::Impersonate { client, base });
             }
             let stream = connect_destination(&upstream, &route.connection_host, route.port).await?;
@@ -2635,10 +2653,9 @@ async fn forward_mitm_https(
         let (connection_host, connection_port) = active_mirror_route
             .map(RuntimeMirrorRoute::connection_target)
             .unwrap_or((&host, port));
-        let tls_identity_host = active_mirror_route
+        let (tls_identity_host, tls_identity_port) = active_mirror_route
             .map(RuntimeMirrorRoute::identity_target)
-            .map(|(host, _)| host)
-            .unwrap_or(&host);
+            .unwrap_or((&host, port));
         // WebSocket / extended CONNECT stay on dedicated HTTP/1.1; normal traffic
         // may use shared h2. `websocket` and not just `extended_websocket`: a
         // plain Connection: Upgrade handshake to the same authority went out on
@@ -2652,6 +2669,7 @@ async fn forward_mitm_https(
             connection_host: connection_host.to_string(),
             port: connection_port,
             tls_identity_host: tls_identity_host.to_string(),
+            tls_identity_port,
             // The forced-h1 list has to survive here too. The shared connection
             // consults it at handshake time, but a dedicated one replacing a
             // retired shared connection would go back to preferring h2 and
@@ -4853,10 +4871,9 @@ async fn forward_http(
         .unwrap_or((&host, port));
     reject_proxy_loop(connection_host, connection_port)?;
     let stream = connect_destination(&upstream, connection_host, connection_port).await?;
-    let tls_identity_host = active_mirror_route
+    let (tls_identity_host, tls_identity_port) = active_mirror_route
         .map(RuntimeMirrorRoute::identity_target)
-        .map(|(host, _)| host)
-        .unwrap_or(&host);
+        .unwrap_or((&host, port));
     let mut sender = if scheme == "https" {
         let force_http11 = tls_outbound::origin_force_http11_for_host(tls_identity_host);
         #[cfg(feature = "impersonate-boring")]
@@ -4873,12 +4890,18 @@ async fn forward_http(
                 // Explicit / replay HTTPS must match MITM Chrome JA4.
                 drop(stream);
                 let _ = force_http11;
-                let client = crate::impersonate_egress::build_client(&upstream)?;
-                let base = if port == 443 {
-                    format!("https://{tls_identity_host}")
-                } else {
-                    format!("https://{tls_identity_host}:{port}")
-                };
+                let client = crate::impersonate_egress::build_client_for_route(
+                    &upstream,
+                    connection_host,
+                    connection_port,
+                    tls_identity_host,
+                    tls_identity_port,
+                )
+                .await?;
+                let base = format!(
+                    "https://{}",
+                    host_header_authority("https", tls_identity_host, tls_identity_port)
+                );
                 HttpsRequestSender::Impersonate { client, base }
             }
         }
