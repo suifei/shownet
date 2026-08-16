@@ -108,6 +108,18 @@ fn accept_language_for(language: &str) -> String {
     }
 }
 
+// Chrome's profile preference stores an ordered language list, not an HTTP
+// Accept-Language value. Chrome adds q-values when it builds the request header;
+// persisting them here produces malformed values such as `zh;q=0.9;q=0.9`.
+fn profile_accept_languages_for(language: &str) -> String {
+    let base = language.split('-').next().unwrap_or(language);
+    if base.eq_ignore_ascii_case(language) {
+        language.to_string()
+    } else {
+        format!("{language},{base}")
+    }
+}
+
 /// Chrome's reduced User-Agent: every token but the major version is frozen per
 /// platform, which is what makes building the string before launch safe.
 fn frozen_user_agent(major: u32) -> String {
@@ -415,15 +427,14 @@ fn chrome_command(
         // is the single cheapest automation tell a page can read. Nothing
         // about the capture depends on announcing it.
         .arg("--disable-blink-features=AutomationControlled")
-        .arg("--incognito")
         .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
         // Headless reports an 800x600 screen whatever --window-size says, and
         // a desktop browser whose screen is smaller than common phones is a
         // loud tell — bisecting the launch flags against a fingerprint probe,
         // this was the only signal any of them produced once the User-Agent
-        // was fixed. Every other flag here (the debugging port, incognito, the
-        // disable-* block, the redirected Google endpoints) measured identical
-        // to a stock browser.
+        // was fixed. Every other flag here (the debugging port, the isolated
+        // profile, the disable-* block, the redirected Google endpoints)
+        // measured identical to a stock browser.
         .arg(format!("--screen-info={{{SCREEN_WIDTH}x{SCREEN_HEIGHT}}}"))
         .arg("--gcm-checkin-url=http://127.0.0.1:9/disabled")
         .arg("--gcm-mcs-endpoint=127.0.0.1:9")
@@ -518,7 +529,7 @@ fn prepare_browser_profile(
     });
     if let Some(language) = browser_language {
         preferences["intl"] = serde_json::json!({
-            "accept_languages": accept_language_for(language)
+            "accept_languages": profile_accept_languages_for(language)
         });
     }
     let local_state = serde_json::json!({
@@ -766,8 +777,8 @@ mod tests {
     use super::{
         accept_language_for, browser_user_agent_major, chrome_command, chrome_executable,
         chrome_major_version, frozen_user_agent, normalize_browser_language,
-        prepare_browser_profile, DISABLED_FEATURES, LAB_SCRIPT, SCREEN_HEIGHT, SCREEN_WIDTH,
-        WINDOW_HEIGHT, WINDOW_WIDTH,
+        prepare_browser_profile, profile_accept_languages_for, DISABLED_FEATURES, LAB_SCRIPT,
+        SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
     };
     use crate::tls_clienthello_catalog::get_preset;
     use std::path::Path;
@@ -881,6 +892,7 @@ mod tests {
         );
         assert_eq!(normalize_browser_language(None).unwrap(), None);
         assert_eq!(accept_language_for("th-TH"), "th-TH,th;q=0.9");
+        assert_eq!(profile_accept_languages_for("th-TH"), "th-TH,th");
         assert!(normalize_browser_language(Some("zh_CN")).is_err());
         assert!(normalize_browser_language(Some("-en-US")).is_err());
     }
@@ -902,7 +914,14 @@ mod tests {
 
         assert!(args.iter().any(|arg| arg == "--headless"));
         assert!(!args.iter().any(|arg| arg == "--headless=new"));
+        assert!(
+            !args.iter().any(|arg| arg == "--incognito"),
+            "the temporary isolated profile should keep standard SSO/storage semantics"
+        );
         assert!(args.iter().any(|arg| arg == "--lang=th-TH"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--proxy-server=http://127.0.0.1:8080"));
         assert!(args
             .iter()
             .any(|arg| arg == "--user-agent=Mozilla/5.0 Chrome/151.0.0.0"));

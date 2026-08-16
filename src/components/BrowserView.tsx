@@ -56,7 +56,7 @@ import {
 } from "../browserBus";
 import { formatClock } from "../format";
 import { trackNavigation } from "../reloadLoop";
-import { pageHookGuardSource } from "../browserCompatibility";
+import { DEFAULT_PAGE_HOOKS_ENABLED } from "../browserCompatibility";
 import type { BrowserHookEvent, OutboundTlsProfileStatus, ProxyBrowserStatus } from "../types";
 
 interface BrowserViewProps {
@@ -85,6 +85,17 @@ function navigatorPlatform(): string {
   if (/Mac/i.test(ua)) return "MacIntel";
   if (/Win/i.test(ua)) return "Win32";
   return "Linux x86_64";
+}
+
+function isBrowserLabUrl(candidate: string | undefined, labUrl: string): boolean {
+  if (!candidate || !labUrl) return false;
+  try {
+    const current = new URL(candidate);
+    const lab = new URL(labUrl);
+    return current.origin === lab.origin && current.pathname === lab.pathname;
+  } catch {
+    return false;
+  }
 }
 
 const CDP_BINDING = "__SHOWNET_CDP_BINDING__";
@@ -116,8 +127,9 @@ interface ScreencastFrame {
   height: number;
 }
 
-type CdpResultHandler = (result: Record<string, unknown>) => void;
+type CdpResultHandler = (result: Record<string, unknown>, error?: { message?: string }) => void;
 type CdpSend = (method: string, params?: Record<string, unknown>, onResult?: CdpResultHandler) => number;
+type PageBridgeMode = "none" | "hooks" | "lab";
 type LabStatusPayload = { phase?: string; status?: number; endpoint?: string; message?: string };
 type BrowserFileDropState = { phase: "ready" | "delivered"; count: number } | null;
 
@@ -126,7 +138,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const [address, setAddress] = useState(() => readStoredBrowserUrl(sessionId) ?? DEFAULT_BROWSER_URL);
   const [currentUrl, setCurrentUrl] = useState(() => readStoredBrowserUrl(sessionId) ?? DEFAULT_BROWSER_URL);
   const [externalPage, setExternalPage] = useState<string | null>(null);
-  const [hookPanel, setHookPanel] = useState(true);
+  const [hookPanel, setHookPanel] = useState(false);
   const [hookFilter, setHookFilter] = useState("all");
   const [hookQuery, setHookQuery] = useState("");
   const [hookEvents, setHookEvents] = useState<BrowserHookEvent[]>(previewHookEvents);
@@ -154,9 +166,9 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const [selectedHookId, setSelectedHookId] = useState("");
   const [busNote, setBusNote] = useState("");
   const [reloadLoopHost, setReloadLoopHost] = useState("");
-  const [hooksEnabled, setHooksEnabled] = useState(true);
+  const [hooksEnabled, setHooksEnabled] = useState(DEFAULT_PAGE_HOOKS_ENABLED);
   // Read inside the CDP attach, which is not re-created when the toggle flips.
-  const hooksEnabledRef = useRef(true);
+  const hooksEnabledRef = useRef(DEFAULT_PAGE_HOOKS_ENABLED);
   const navigationLogRef = useRef<Array<{ url: string; at: number }>>([]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const browserSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -167,9 +179,16 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const cdpSocketRef = useRef<WebSocket | null>(null);
   const cdpSendRef = useRef<CdpSend | null>(null);
   const cdpPendingRef = useRef(new Map<number, CdpResultHandler>());
+  const cdpConnectionGenerationRef = useRef(0);
+  const pageBridgeScriptIdRef = useRef<string | null>(null);
+  const pageBindingsInstalledRef = useRef(false);
+  const pageBridgeGenerationRef = useRef(0);
+  const pageBridgeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const navigationGenerationRef = useRef(0);
   const cdpMessageId = useRef(0);
   const lastFrameAt = useRef(0);
   const analyzeAfterLab = useRef(false);
+  const hookToggleInFlightRef = useRef(false);
   const composingRef = useRef(false);
   const skipCompositionInputRef = useRef(false);
   const suppressedCompositionKeys = useRef(new Set<string>());
@@ -199,12 +218,106 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     tone: "danger",
   });
 
+  const confirmHookModeChange = (next: boolean) => confirm({
+    title: `${next ? "开启" : "关闭"}深度 JS Hook？`,
+    detail: next
+      ? "ShowNet 会在当前 Chrome 会话中启用深度分析，并改写部分页面 API。当前登录状态和 Cookie 会保留。"
+      : "当前页面会刷新以恢复原生页面 API。Cookie、Storage、登录状态和页面历史会保留，但未提交的表单与页面内存状态会丢失。",
+    confirmLabel: next ? "开启分析" : "关闭并刷新",
+    tone: next ? "default" : "danger",
+  });
+
   const confirmBrowserStop = () => confirm({
     title: "停止内嵌浏览器？",
     detail: "Chrome 将关闭；当前登录状态、表单内容、页面历史和长连接会被清除。",
     confirmLabel: "停止并清除",
     tone: "danger",
   });
+
+  const sendCdpCommand = (
+    send: CdpSend,
+    method: string,
+    params: Record<string, unknown> = {},
+  ) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error(`${method} 等待 Chrome 响应超时`)),
+      3_000,
+    );
+    send(method, params, (result, error) => {
+      window.clearTimeout(timeout);
+      if (error) reject(new Error(error.message || `${method} 被 Chrome 拒绝`));
+      else resolve(result);
+    });
+  });
+
+  const configurePageBridge = (
+    send: CdpSend,
+    mode: PageBridgeMode,
+    labUrl: string,
+    options?: { installCurrent?: boolean; hookRuntime?: string },
+  ) => {
+    const apply = async () => {
+    const generation = ++pageBridgeGenerationRef.current;
+    const previousScriptId = pageBridgeScriptIdRef.current;
+    if (previousScriptId) {
+      await sendCdpCommand(send, "Page.removeScriptToEvaluateOnNewDocument", { identifier: previousScriptId });
+      pageBridgeScriptIdRef.current = null;
+    }
+    if (mode === "none") {
+      // The socket may have been replaced while the target kept its binding;
+      // always remove both names on the native-page path instead of trusting a
+      // frontend ref that only describes the previous CDP connection.
+      await Promise.all([
+        sendCdpCommand(send, "Runtime.removeBinding", { name: CDP_BINDING }),
+        sendCdpCommand(send, "Runtime.removeBinding", { name: LAB_BINDING }),
+      ]);
+      pageBindingsInstalledRef.current = false;
+      return;
+    }
+
+    if (!pageBindingsInstalledRef.current) {
+      await Promise.all([
+        sendCdpCommand(send, "Runtime.addBinding", { name: CDP_BINDING }),
+        sendCdpCommand(send, "Runtime.addBinding", { name: LAB_BINDING }),
+      ]);
+      pageBindingsInstalledRef.current = true;
+    }
+    let labOrigin = "";
+    let labPath = "";
+    try {
+      const parsedLabUrl = new URL(labUrl);
+      labOrigin = parsedLabUrl.origin;
+      labPath = parsedLabUrl.pathname;
+    } catch {
+      // `lab` mode is only selected for a validated local Lab URL. Keep the
+      // source empty if a malformed status ever reaches this boundary.
+    }
+    const bridge = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });`;
+    const source = mode === "hooks"
+      ? `${bridge}\n${options?.hookRuntime ?? ""}`
+      : `if (location.origin === ${JSON.stringify(labOrigin)} && location.pathname === ${JSON.stringify(labPath)}) {\n${bridge}\n}`;
+    const result = await sendCdpCommand(send, "Page.addScriptToEvaluateOnNewDocument", { source });
+    const identifier = typeof result.identifier === "string" ? result.identifier : "";
+    if (!identifier) throw new Error("Chrome 未返回页面脚本标识");
+    // A mode switch may have superseded this command before Chrome returned
+    // its identifier. Remove the stale script instead of leaving it active.
+    if (pageBridgeGenerationRef.current !== generation) {
+      await sendCdpCommand(send, "Page.removeScriptToEvaluateOnNewDocument", { identifier });
+      return;
+    }
+    pageBridgeScriptIdRef.current = identifier;
+    if (options?.installCurrent) {
+      await sendCdpCommand(send, "Runtime.evaluate", {
+        expression: source,
+        awaitPromise: false,
+        returnByValue: false,
+      });
+    }
+    };
+    const pending = pageBridgeQueueRef.current.catch(() => undefined).then(apply);
+    pageBridgeQueueRef.current = pending;
+    return pending;
+  };
 
   useEffect(() => {
     const stored = readStoredBrowserUrl(sessionId);
@@ -215,6 +328,9 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     setPageTitle("新标签页");
     setChallengeHost("");
     setReloadLoopHost("");
+    navigationGenerationRef.current += 1;
+    hooksEnabledRef.current = DEFAULT_PAGE_HOOKS_ENABLED;
+    setHooksEnabled(DEFAULT_PAGE_HOOKS_ENABLED);
     navigationLogRef.current = [];
   }, [sessionId]);
 
@@ -254,11 +370,16 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const desktopRef = useRef(desktop);
   desktopRef.current = desktop;
   useEffect(() => () => {
+    cdpConnectionGenerationRef.current += 1;
+    window.clearTimeout(challengeProbeTimerRef.current);
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
     cdpSocketRef.current = null;
     cdpSendRef.current = null;
     cdpPendingRef.current.clear();
+    pageBridgeGenerationRef.current += 1;
+    pageBridgeScriptIdRef.current = null;
+    pageBindingsInstalledRef.current = false;
     if (desktopRef.current) void invoke("stop_proxy_browser").catch(() => undefined);
   }, []);
 
@@ -266,11 +387,16 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   // sending a second async stop can arrive after a fast restart and kill the new browser.
   useEffect(() => {
     if (capturing || !proxyBrowser?.running) return;
+    cdpConnectionGenerationRef.current += 1;
+    window.clearTimeout(challengeProbeTimerRef.current);
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
     cdpSocketRef.current = null;
     cdpSendRef.current = null;
     cdpPendingRef.current.clear();
+    pageBridgeGenerationRef.current += 1;
+    pageBridgeScriptIdRef.current = null;
+    pageBindingsInstalledRef.current = false;
     setProxyBrowser(null);
     screencastFrameRef.current = null;
     setScreencastFrame(null);
@@ -400,13 +526,30 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     // new destination a clean slate rather than carrying the old verdict over.
     dismissReloadLoop();
     if (!desktop) return;
+    const navigationGeneration = ++navigationGenerationRef.current;
     setBrowserLoading(true);
     void (async () => {
-      // Prefer unified browser bus when the proxy browser is already running.
+      // Keep bridge configuration and navigation on the same CDP socket. The
+      // Browser bus uses a separate connection, so it cannot provide ordering
+      // against Page.addScriptToEvaluateOnNewDocument.
       if (proxyBrowser?.running) {
+        const send = cdpSendRef.current;
+        if (send) {
+          try {
+            await configureBridgeForNavigation(send, target, proxyBrowser.labUrl);
+            if (navigationGenerationRef.current !== navigationGeneration) return;
+            send("Page.navigate", { url: target });
+            setBusNote("导航经 UI CDP（页面通道已配置）");
+            return;
+          } catch (error) {
+            setBrowserError(`配置浏览器页面通道失败：${error instanceof Error ? error.message : String(error)}`);
+            setBusNote("页面通道配置失败");
+            return;
+          }
+        }
         const viaBus = await tryBrowserNavigate(target);
         if (viaBus) {
-          setBusNote("导航经 Browser 总线");
+          setBusNote("导航经 Browser 总线（无页面桥接）");
           return;
         }
       }
@@ -424,12 +567,42 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     })();
   };
 
+  const configureBridgeForNavigation = async (
+    send: CdpSend,
+    target: string,
+    labUrl: string,
+  ) => {
+    const mode: PageBridgeMode = hooksEnabledRef.current
+      ? "hooks"
+      : isBrowserLabUrl(target, labUrl)
+        ? "lab"
+        : "none";
+    const hookRuntime = mode === "hooks"
+      ? await invoke<string>("get_browser_hook_script")
+      : "";
+    await configurePageBridge(send, mode, labUrl, { hookRuntime });
+  };
+
   const navigateHistory = (offset: -1 | 1) => {
-    cdpSendRef.current?.("Page.getNavigationHistory", {}, (result) => {
+    const send = cdpSendRef.current;
+    if (!send) return;
+    send("Page.getNavigationHistory", {}, (result) => {
       const currentIndex = Number(result.currentIndex ?? -1);
       const entries = Array.isArray(result.entries) ? result.entries : [];
-      const entry = entries[currentIndex + offset] as { id?: number } | undefined;
-      if (entry?.id != null) cdpSendRef.current?.("Page.navigateToHistoryEntry", { entryId: entry.id });
+      const entry = entries[currentIndex + offset] as { id?: number; url?: string } | undefined;
+      if (entry?.id == null) return;
+      const target = typeof entry.url === "string" ? entry.url : currentUrl;
+      const navigationGeneration = ++navigationGenerationRef.current;
+      void (async () => {
+        try {
+          await configureBridgeForNavigation(send, target, proxyBrowser?.labUrl ?? "");
+          if (navigationGenerationRef.current !== navigationGeneration) return;
+          send("Page.navigateToHistoryEntry", { entryId: entry.id });
+        } catch (error) {
+          setBrowserError(`配置浏览器页面通道失败：${error instanceof Error ? error.message : String(error)}`);
+          setBusNote("页面通道配置失败");
+        }
+      })();
     });
   };
 
@@ -526,9 +699,16 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
       setBrowserLoading(true);
       void (async () => {
         if (proxyBrowser.running) {
+          const send = cdpSendRef.current;
+          if (send) {
+            await configureBridgeForNavigation(send, labUrl, labUrl);
+            send("Page.navigate", { url: labUrl });
+            setBusNote("Crypto Lab 经 UI CDP（页面通道已配置）");
+            return;
+          }
           const viaBus = await tryBrowserNavigate(labUrl);
           if (viaBus) {
-            setBusNote("Crypto Lab 经 Browser 总线");
+            setBusNote("Crypto Lab 经 Browser 总线（无页面桥接）");
             return;
           }
         }
@@ -556,30 +736,50 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     options?: { navigate?: boolean },
   ) {
     const navigate = options?.navigate !== false;
-    // Skipped entirely when injection is off: the runtime rewrites fetch, XHR,
-    // document.cookie and SubtleCrypto on every page, which is what makes the
-    // analysis possible and also the most legible automation tell a site can
-    // read. Turning it off costs the JS Hook feed and nothing else — traffic is
-    // still captured at the proxy.
-    const hookRuntime = hooksEnabledRef.current
+    const connectionGeneration = ++cdpConnectionGenerationRef.current;
+    const previousSocket = cdpSocketRef.current;
+    if (previousSocket) previousSocket.close();
+    cdpSocketRef.current = null;
+    cdpSendRef.current = null;
+    cdpPendingRef.current.clear();
+    const stored = readStoredBrowserUrl(sessionId);
+    // Reattaches do not receive a destination from the caller. The stored URL
+    // is enough to identify ShowNet's own Lab without putting a bridge into an
+    // arbitrary third-party document.
+    const navigateUrl =
+      destination === "__shownet_lab__"
+        ? status.labUrl
+        : destination
+          ? destination
+          : (stored ?? DEFAULT_BROWSER_URL);
+    const hooksForAttach = hooksEnabledRef.current;
+    // The runtime rewrites fetch, XHR, document.cookie and SubtleCrypto. Keep it
+    // out of the default capture path so authentication and device-risk pages
+    // retain native browser semantics; users can enable it for deep JS analysis.
+    const hookRuntime = hooksForAttach
       ? await invoke<string>("get_browser_hook_script")
-      : "";
-    const guardedHookRuntime = hookRuntime
-      ? `${pageHookGuardSource()}\n${hookRuntime}\n}`
       : "";
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(status.webSocketDebuggerUrl);
+      if (cdpConnectionGenerationRef.current !== connectionGeneration) {
+        socket.close();
+        reject(new Error("CDP 连接已被新的连接取代"));
+        return;
+      }
       cdpSocketRef.current = socket;
       let opened = false;
+      const isCurrentSocket = () =>
+        cdpConnectionGenerationRef.current === connectionGeneration && cdpSocketRef.current === socket;
       socket.addEventListener("open", () => {
+        if (!isCurrentSocket()) {
+          socket.close();
+          reject(new Error("CDP 连接已被新的连接取代"));
+          return;
+        }
         opened = true;
-        // The bridges are always installed; only the hook runtime is optional.
-        // Bundling them meant turning hooks off also removed
-        // __SHOWNET_LAB_BRIDGE__, so Crypto Lab could never report back and its
-        // status sat at "running" forever.
-        const bridgeSource = `Object.defineProperty(globalThis, "__SHOWNET_HOOK_BRIDGE__", { configurable: true, value: (payload) => globalThis.${CDP_BINDING}(payload) });\nObject.defineProperty(globalThis, "__SHOWNET_LAB_BRIDGE__", { configurable: true, value: (payload) => globalThis.${LAB_BINDING}(payload) });\n${guardedHookRuntime}`;
         const send: CdpSend = (method, params = {}, onResult) => {
           const id = ++cdpMessageId.current;
+          if (!isCurrentSocket() || socket.readyState !== WebSocket.OPEN) return id;
           if (onResult) cdpPendingRef.current.set(id, onResult);
           try {
             socket.send(JSON.stringify({ id, method, params }));
@@ -622,45 +822,66 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
             platform: navigatorPlatform(),
           });
         }
-        send("Runtime.addBinding", { name: CDP_BINDING });
-        send("Runtime.addBinding", { name: LAB_BINDING });
-        send("Page.addScriptToEvaluateOnNewDocument", { source: bridgeSource });
-        send("Emulation.setFocusEmulationEnabled", { enabled: true });
-        const surface = browserSurfaceRef.current;
-        if (surface) {
-          const width = Math.max(320, Math.floor(surface.clientWidth));
-          const height = Math.max(240, Math.floor(surface.clientHeight));
-          send("Emulation.setDeviceMetricsOverride", {
-            width,
-            height,
-            deviceScaleFactor: 1,
-            mobile: false,
-            screenWidth: BROWSER_SCREEN_WIDTH,
-            screenHeight: BROWSER_SCREEN_HEIGHT,
+        const finishAttach = async (effectiveUrl: string) => {
+          if (!isCurrentSocket()) return;
+          const effectiveLab = isBrowserLabUrl(effectiveUrl, status.labUrl);
+          await configurePageBridge(
+            send,
+            hooksForAttach ? "hooks" : effectiveLab ? "lab" : "none",
+            status.labUrl,
+            { installCurrent: !navigate, hookRuntime },
+          );
+          if (!navigate) {
+            setAddress(effectiveUrl);
+            setCurrentUrl(effectiveUrl);
+            writeStoredBrowserUrl(sessionId, effectiveUrl);
+          }
+          send("Emulation.setFocusEmulationEnabled", { enabled: true });
+          const surface = browserSurfaceRef.current;
+          if (surface) {
+            const width = Math.max(320, Math.floor(surface.clientWidth));
+            const height = Math.max(240, Math.floor(surface.clientHeight));
+            send("Emulation.setDeviceMetricsOverride", {
+              width,
+              height,
+              deviceScaleFactor: 1,
+              mobile: false,
+              screenWidth: BROWSER_SCREEN_WIDTH,
+              screenHeight: BROWSER_SCREEN_HEIGHT,
+            });
+          }
+          send("Page.startScreencast", { format: "jpeg", quality: 78, maxWidth: 1800, maxHeight: 1200, everyNthFrame: 1 });
+          if (navigate) {
+            setAddress(navigateUrl);
+            setCurrentUrl(navigateUrl);
+            writeStoredBrowserUrl(sessionId, navigateUrl);
+            setBrowserLoading(true);
+            send("Page.navigate", { url: navigateUrl });
+          }
+          setProxyBrowser(status);
+          setBrowserConnecting(false);
+          resolve();
+        };
+        if (navigate) {
+          void finishAttach(navigateUrl).catch(reject);
+        } else {
+          let settled = false;
+          const fallback = window.setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            void finishAttach(navigateUrl).catch(reject);
+          }, 1200);
+          send("Runtime.evaluate", { expression: "location.href", returnByValue: true }, (result) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(fallback);
+            const value = (result.result as { value?: unknown } | undefined)?.value;
+            void finishAttach(typeof value === "string" && value ? value : navigateUrl).catch(reject);
           });
         }
-        send("Page.startScreencast", { format: "jpeg", quality: 78, maxWidth: 1800, maxHeight: 1200, everyNthFrame: 1 });
-        if (navigate) {
-          const stored = readStoredBrowserUrl(sessionId);
-          // Explicit destination wins; lab override; else restore last URL; else lab home.
-          const navigateUrl =
-            destination === "__shownet_lab__"
-              ? status.labUrl
-              : destination
-                ? destination
-                : (stored ?? DEFAULT_BROWSER_URL);
-          setAddress(navigateUrl);
-          setCurrentUrl(navigateUrl);
-          writeStoredBrowserUrl(sessionId, navigateUrl);
-          setBrowserLoading(true);
-          send("Page.navigate", { url: navigateUrl });
-        }
-        setProxyBrowser(status);
-        setBrowserConnecting(false);
-        resolve();
       });
       socket.addEventListener("message", (message) => {
-        if (cdpSocketRef.current !== socket) return;
+        if (!isCurrentSocket()) return;
         let packet: { id?: number; method?: string; result?: Record<string, unknown>; params?: Record<string, unknown>; error?: { message?: string } };
         try { packet = JSON.parse(String(message.data)); } catch { return; }
         if (packet.id != null) {
@@ -675,7 +896,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
           const pending = cdpPendingRef.current.get(packet.id);
           if (pending) {
             cdpPendingRef.current.delete(packet.id);
-            pending(packet.result ?? {});
+            pending(packet.result ?? {}, packet.error);
           }
           return;
         }
@@ -711,6 +932,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
           });
           window.clearTimeout(challengeProbeTimerRef.current);
           const inspectChallenge = (attempt: number) => {
+            if (!isCurrentSocket()) return;
             send?.("Runtime.evaluate", {
               expression: `JSON.stringify({
                 url: location.href,
@@ -746,6 +968,10 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
             const tracked = trackNavigation(navigationLogRef.current, frame.url, Date.now());
             navigationLogRef.current = tracked.log;
             setReloadLoopHost(tracked.loopHost);
+            if (!hooksEnabledRef.current) {
+              const send = cdpSendRef.current;
+              if (send) void configureBridgeForNavigation(send, frame.url, status.labUrl);
+            }
           }
           return;
         }
@@ -777,17 +1003,20 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
         }
       });
       socket.addEventListener("error", () => {
-        if (cdpSocketRef.current !== socket) return;
+        if (!isCurrentSocket()) return;
         setBrowserError("无法连接 Chrome CDP");
         setBusNote("CDP 连接错误");
         setBrowserConnecting(false);
         if (!opened) reject(new Error("无法连接 Chrome CDP"));
       });
       socket.addEventListener("close", () => {
-        if (cdpSocketRef.current !== socket) return;
+        if (!isCurrentSocket()) return;
+        window.clearTimeout(challengeProbeTimerRef.current);
+        cdpConnectionGenerationRef.current += 1;
         cdpSendRef.current = null;
         cdpSocketRef.current = null;
         cdpPendingRef.current.clear();
+        pageBindingsInstalledRef.current = false;
         // Keep proxyBrowser running state so keep-alive can reattach; clear frames only.
         screencastFrameRef.current = null;
         setScreencastFrame(null);
@@ -812,11 +1041,15 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   /** Tears the embedded browser down. Safe to call when it is not running. */
   async function stopProxyChrome() {
     window.clearTimeout(challengeProbeTimerRef.current);
+    cdpConnectionGenerationRef.current += 1;
     cdpSendRef.current?.("Page.stopScreencast");
     cdpSocketRef.current?.close();
     cdpSocketRef.current = null;
     cdpSendRef.current = null;
     cdpPendingRef.current.clear();
+    pageBridgeGenerationRef.current += 1;
+    pageBridgeScriptIdRef.current = null;
+    pageBindingsInstalledRef.current = false;
     await invoke("stop_proxy_browser", { expectedInstanceId: proxyBrowser?.sourceInstanceId ?? null });
     setProxyBrowser(null);
     screencastFrameRef.current = null;
@@ -1248,7 +1481,6 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const retryCloudflareChallenge = async () => {
     const host = challengeHost;
     if (!host || browserConnecting) return;
-    const destination = currentUrl;
     const previousHooksEnabled = hooksEnabledRef.current;
     // Keep MITM decryption. Outbound is always wreq Chrome when the stack is
     // linked (no rustls product path). Challenge retry only drops page Hooks
@@ -1262,13 +1494,19 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
         );
         return;
       }
-      if (proxyBrowser?.running && !await confirmBrowserReset(`关闭 Hook 并重试 ${host}？`)) return;
+      const send = cdpSendRef.current;
+      if (!send) {
+        setBrowserError("浏览器通道已断开，无法在保留登录状态的前提下关闭 Hook；请等待通道重连后重试");
+        setBusNote("Hook 未切换：等待浏览器通道重连");
+        return;
+      }
+      if (proxyBrowser?.running && !await confirmHookModeChange(false)) return;
       hooksEnabledRef.current = false;
       setHooksEnabled(false);
       setBusNote(`正在为 ${host} 关闭 Hook 后重试（MITM + Chrome 出站 JA4 保持）`);
-      await stopProxyChrome();
-      await startProxyChrome(destination);
-      setBusNote(`${host}：Hook 已关 · MITM + engine=impersonate，请再完成真人验证`);
+      await configurePageBridge(send, "none", proxyBrowser?.labUrl ?? "");
+      send("Page.reload", { ignoreCache: false });
+      setBusNote(`${host}：Hook 已关 · 保留当前 Chrome 会话并刷新，请再完成真人验证`);
     } catch (error) {
       hooksEnabledRef.current = previousHooksEnabled;
       setHooksEnabled(previousHooksEnabled);
@@ -1317,16 +1555,42 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
 
   const toggleHooks = async () => {
     const next = !hooksEnabled;
-    if (proxyBrowser?.running && !await confirmBrowserReset(`${next ? "开启" : "关闭"} JS Hook？`)) return;
+    if (hookToggleInFlightRef.current) return;
+    if (proxyBrowser?.running && !await confirmHookModeChange(next)) return;
     hooksEnabledRef.current = next;
     setHooksEnabled(next);
+    if (next) setHookPanel(true);
     if (!proxyBrowser?.running) return;
-    const destination = currentUrl;
+    const send = cdpSendRef.current;
+    if (!send) {
+      setBrowserError("浏览器通道尚未连接，请稍后重试");
+      hooksEnabledRef.current = !next;
+      setHooksEnabled(!next);
+      return;
+    }
+    hookToggleInFlightRef.current = true;
+    setBrowserConnecting(true);
     try {
-      await stopProxyChrome();
-      await startProxyChrome(destination);
+      const hookRuntime = next ? await invoke<string>("get_browser_hook_script") : "";
+      await configurePageBridge(send, next ? "hooks" : "none", proxyBrowser.labUrl, {
+        installCurrent: next,
+        hookRuntime,
+      });
+      if (!next) {
+        // The old wrapper functions live in the current document realm. A
+        // reload removes them while the same Chrome target keeps its profile.
+        send("Page.reload", { ignoreCache: false });
+        setBusNote("页面刷新中，恢复原生页面 API");
+      } else {
+        setBusNote("当前页面已启用深度 Hook；后续文档完整采集");
+      }
     } catch (error) {
-      setBrowserError(`重启内嵌浏览器失败：${String(error)}`);
+      setBrowserError(`切换深度 Hook 失败：${String(error)}`);
+      hooksEnabledRef.current = !next;
+      setHooksEnabled(!next);
+    } finally {
+      hookToggleInFlightRef.current = false;
+      setBrowserConnecting(false);
     }
   };
 
@@ -1337,7 +1601,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
           <div className="browser-tab is-active"><span className="target-favicon">{pageTitle.trim().charAt(0).toUpperCase() || "S"}</span><span>{pageTitle}</span></div>
           <div className="browser-tabs__spacer" />
           <span className="browser-owner" title={`浏览器流量与 Hook 写入 ${sessionName}`}><CircleDot size={13} />写入 {sessionName}</span>
-          <span className={`cdp-state ${receiverReady ? "is-connected" : ""}`}><CircleDot size={13} />Hook 接收器 {receiverReady ? "已就绪" : "连接中"}</span>
+          <span className={`cdp-state ${receiverReady ? "is-connected" : ""}`}><CircleDot size={13} />浏览器通道 {receiverReady ? "已就绪" : "连接中"}</span>
           <div className="browser-menu-anchor" ref={browserMenuRef}>
             <button className={`icon-button ${browserMenuOpen ? "is-active" : ""}`} onClick={() => setBrowserMenuOpen((open) => !open)} title="浏览器菜单" aria-expanded={browserMenuOpen}><MoreHorizontal size={17} /></button>
             {browserMenuOpen && <div className="browser-menu-popover" role="menu">
@@ -1398,11 +1662,12 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
             className={`hook-toggle ${hooksEnabled ? "is-active" : ""}`}
             disabled={browserConnecting}
             onClick={() => void toggleHooks()}
-            title={hooksEnabled ? "关闭 JS Hook 注入（风控站点可先关掉验证；流量仍在代理侧抓取）" : "开启 JS Hook 注入"}
+            aria-pressed={hooksEnabled}
+            title={hooksEnabled ? "关闭深度 JS 分析；MITM 流量抓取不受影响" : "开启深度 JS 分析（会修改页面 API，仅在分析加密调用时使用）"}
           >
-            <Code2 size={16} /><span>{hooksEnabled ? "Hook 开" : "Hook 关"}</span>
+            <Code2 size={16} /><span>{hooksEnabled ? "深度分析开" : "深度分析关"}</span>
           </button>
-          <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title="脚本 Hook 面板"><Braces size={16} /><span>{hookEvents.length}</span></button>
+          <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title={hooksEnabled ? "脚本 Hook 面板" : "脚本 Hook 面板（当前未启用实时 Hook）"}><Braces size={16} /><span>{hooksEnabled ? hookEvents.length : 0}</span></button>
           <button className="icon-button" onClick={() => void openInSystemBrowser()} disabled={!currentUrl.trim()} title="在系统浏览器中打开" aria-label="在系统浏览器中打开"><ExternalLink size={16} /></button>
         </div>
         <div className="browser-viewport">
@@ -1462,7 +1727,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
                   <div>
                     <strong>检测到 Cloudflare 真人验证</strong>
                     <small>
-                      {challengeHost}：保持 HTTPS 解密抓包，确认出站 JA4 与浏览器一致，并关闭页面 Hook
+                      {challengeHost}：保持 HTTPS 解密抓包，确认正式包使用已验证的 Chrome 出站配置，并关闭页面 Hook
                       （Hook 会改写 SubtleCrypto/fetch，干扰 Turnstile）。不会临时绕过 TLS 拦截。
                     </small>
                   </div>
@@ -1476,8 +1741,8 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
                   <div>
                     <strong>{reloadLoopHost} 正在反复刷新</strong>
                     <small>
-                      该站点的风控挑战没有通过。优先在高级控制台核对逐字节 Chrome 出站状态
-                      （入站/出站 JA4 应对齐），并关闭页面 Hook；不要用 TLS 绕行换验证通过，否则会丢解密正文。
+                      该站点的风控挑战没有通过。优先在高级控制台核对逐字节 Chrome 出站状态，
+                      并关闭页面 Hook；不要用 TLS 绕行换验证通过，否则会丢解密正文。单次连接未实测时不会声称 JA4 已匹配。
                     </small>
                   </div>
                   <button type="button" onClick={dismissReloadLoop}>知道了</button>
@@ -1495,18 +1760,21 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
           ) : (
             <MockTargetPage />
           )}
-          {capturing && proxyBrowser?.running && <div className="capture-corner"><span /><strong>REC</strong><small>{hookEvents.length} hooks</small></div>}
+          {capturing && proxyBrowser?.running && <div className="capture-corner"><span /><strong>REC</strong><small>{hooksEnabled ? `${hookEvents.length} hooks` : "原生页面"}</small></div>}
         </div>
         <div className="browser-statusbar">
-          <span>{hookEvents.length > 0 ? <Check size={13} /> : <CircleDot size={13} />}{hookEvents.length > 0 ? "页面 Hook 已连接" : "等待页面 Hook"}</span>
-          <span><Braces size={13} />{hookEvents.length} 条事件</span>
+          {hooksEnabled ? (
+            <>
+              <span>{hookEvents.length > 0 ? <Check size={13} /> : <CircleDot size={13} />}{hookEvents.length > 0 ? "页面 Hook 已连接" : "等待页面 Hook"}</span>
+              <span><Braces size={13} />{hookEvents.length} 条事件</span>
+            </>
+          ) : (
+            <span title="页面 API 保持原生；网络流量仍经 MITM 解密抓取"><ShieldCheck size={13} />原生页面 · MITM 抓包</span>
+          )}
           <span><FlaskConical size={13} />{labState === "complete" ? "已转交内置 Agent" : labState === "error" ? "场景验证失败" : labState === "running" ? "加密场景运行中" : "Crypto Lab"}</span>
           <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
           <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
           <span title="浏览器页面与请求使用同一语言"><Globe2 size={13} />{proxyBrowser?.browserLanguage || browserLanguage}</span>
-          {!hooksEnabled && proxyBrowser?.running && (
-            <span title="页面 Hook 已关：仍经 MITM 解密抓包，仅不注入 JS 运行时"><ShieldCheck size={13} />Hook 关 · MITM 开</span>
-          )}
           {(reloadLoopHost || /baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl)) && (
             <span className="browser-statusbar__hint" title={reloadLoopHost ? "确认逐字节 Chrome 出站并关闭 Hook；图裂时才用静态 CDN 绕行" : "图裂时：设置 → HTTPS 解密 → 静态 CDN 绕行"}>
               {reloadLoopHost ? `${reloadLoopHost} 反复刷新：查 JA4/关 Hook` : "图裂时启用静态 CDN 绕行"}
@@ -1617,19 +1885,30 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
             <div><span className="section-kicker">LIVE EVENTS</span><h2>JS Hook</h2></div>
             <button className="icon-button" onClick={() => setHookPanel(false)} title="关闭"><X size={16} /></button>
           </header>
-          <div className="hook-panel__filters">
-            <div className="search-field search-field--compact"><Search size={14} /><input value={hookQuery} onChange={(event) => setHookQuery(event.target.value)} placeholder="筛选调用" /></div>
-            <label className="select-field select-field--compact"><select value={hookFilter} onChange={(event) => setHookFilter(event.target.value)}><option value="all">全部</option><option value="crypto">加密</option><option value="network">网络</option><option value="encoding">编码</option><option value="storage">存储</option><option value="interaction">交互</option></select><ChevronDown size={13} /></label>
-          </div>
-          <div className="hook-event-list">
-            {filteredHooks.map((event) => (
-              <button key={event.id} className={`hook-event ${selectedHookId === event.id ? "is-selected" : ""}`} onClick={() => setSelectedHookId((current) => current === event.id ? "" : event.id)} aria-expanded={selectedHookId === event.id}>
-                <span className={`hook-event__mark tone-${hookTone(event.kind)}`}>{event.kind === "crypto" ? <KeyRound size={14} /> : event.kind === "storage" ? <Cookie size={14} /> : event.kind === "interaction" ? <MousePointer2 size={14} /> : <Code2 size={14} />}</span>
-                <span className="hook-event__content"><strong>{event.name}</strong><small>{hookDetail(event)}</small><em>{formatClock(event.timestamp, true)} · {event.correlation === "unmatched" ? "未关联请求" : "已关联"}</em>{selectedHookId === event.id && <span className="hook-event__details"><span><b>输入</b><code>{hookValuePreview(event.input)}</code></span><span><b>输出</b><code>{hookValuePreview(event.output)}</code></span>{event.durationMs != null && <span><b>耗时</b><code>{event.durationMs.toFixed(2)} ms</code></span>}</span>}</span>
-              </button>
-            ))}
-          </div>
-          <footer className="hook-panel__footer"><span><span className={`live-dot ${pausedDisplay ? "" : "is-on"}`} />{pausedDisplay ? "显示已暂停" : "实时记录"}</span><button onClick={() => setPausedDisplay((paused) => !paused)}>{pausedDisplay ? <Eye size={14} /> : <EyeOff size={14} />}{pausedDisplay ? "继续显示" : "暂停显示"}</button></footer>
+          {hooksEnabled ? (
+            <>
+              <div className="hook-panel__filters">
+                <div className="search-field search-field--compact"><Search size={14} /><input value={hookQuery} onChange={(event) => setHookQuery(event.target.value)} placeholder="筛选调用" /></div>
+                <label className="select-field select-field--compact"><select value={hookFilter} onChange={(event) => setHookFilter(event.target.value)}><option value="all">全部</option><option value="crypto">加密</option><option value="network">网络</option><option value="encoding">编码</option><option value="storage">存储</option><option value="interaction">交互</option></select><ChevronDown size={13} /></label>
+              </div>
+              <div className="hook-event-list">
+                {filteredHooks.map((event) => (
+                  <button key={event.id} className={`hook-event ${selectedHookId === event.id ? "is-selected" : ""}`} onClick={() => setSelectedHookId((current) => current === event.id ? "" : event.id)} aria-expanded={selectedHookId === event.id}>
+                    <span className={`hook-event__mark tone-${hookTone(event.kind)}`}>{event.kind === "crypto" ? <KeyRound size={14} /> : event.kind === "storage" ? <Cookie size={14} /> : event.kind === "interaction" ? <MousePointer2 size={14} /> : <Code2 size={14} />}</span>
+                    <span className="hook-event__content"><strong>{event.name}</strong><small>{hookDetail(event)}</small><em>{formatClock(event.timestamp, true)} · {event.correlation === "unmatched" ? "未关联请求" : "已关联"}</em>{selectedHookId === event.id && <span className="hook-event__details"><span><b>输入</b><code>{hookValuePreview(event.input)}</code></span><span><b>输出</b><code>{hookValuePreview(event.output)}</code></span>{event.durationMs != null && <span><b>耗时</b><code>{event.durationMs.toFixed(2)} ms</code></span>}</span>}</span>
+                  </button>
+                ))}
+              </div>
+              <footer className="hook-panel__footer"><span><span className={`live-dot ${pausedDisplay ? "" : "is-on"}`} />{pausedDisplay ? "显示已暂停" : "实时记录"}</span><button onClick={() => setPausedDisplay((paused) => !paused)}>{pausedDisplay ? <Eye size={14} /> : <EyeOff size={14} />}{pausedDisplay ? "继续显示" : "暂停显示"}</button></footer>
+            </>
+          ) : (
+            <div className="hook-panel__disabled" role="status">
+              <Code2 size={20} />
+              <strong>深度分析未开启</strong>
+              <small>当前页面保持原生 API，网络流量仍由 MITM 抓取。</small>
+              <button type="button" onClick={() => void toggleHooks()} disabled={browserConnecting}><Code2 size={14} />开启深度分析</button>
+            </div>
+          )}
         </aside>
       )}
       {confirmDialog}

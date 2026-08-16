@@ -120,9 +120,9 @@ describe("embedded browser keep-alive (P2)", () => {
 
   it("ignores stale CDP callbacks from an older socket", async () => {
     const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
-    assert.match(browser, /addEventListener\("message", \(message\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
-    assert.match(browser, /addEventListener\("error", \(\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
-    assert.match(browser, /addEventListener\("close", \(\) => \{\s*if \(cdpSocketRef\.current !== socket\) return;/);
+    assert.match(browser, /addEventListener\("message", \(message\) => \{[\s\S]*?if \(!isCurrentSocket\(\)\) return;/);
+    assert.match(browser, /addEventListener\("error", \(\) => \{[\s\S]*?if \(!isCurrentSocket\(\)\) return;/);
+    assert.match(browser, /addEventListener\("close", \(\) => \{[\s\S]*?if \(!isCurrentSocket\(\)\) return;/);
   });
 
   it("cannot install a Chrome launch invalidated by a newer launch or stop", async () => {
@@ -134,10 +134,34 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.match(backend, /async fn set_capture_running[\s\S]*?browser_generation\.fetch_add\(1, Ordering::SeqCst\)/);
   });
 
-  it("keeps 12306 page APIs native while retaining the CDP bridge", async () => {
+  it("keeps third-party pages native while isolating the CDP bridge", async () => {
     const browser = await readFile(new URL("../src/components/BrowserView.tsx", import.meta.url), "utf8");
-    assert.match(browser, /pageHookGuardSource/);
-    assert.match(browser, /guardedHookRuntime/);
-    assert.match(browser, /__SHOWNET_HOOK_BRIDGE__/);
+    assert.match(browser, /useState\(DEFAULT_PAGE_HOOKS_ENABLED\)/);
+    assert.match(browser, /useRef\(DEFAULT_PAGE_HOOKS_ENABLED\)/);
+    assert.doesNotMatch(browser, /pageHookGuardSource|12306/);
+    assert.match(browser, /options\?\.hookRuntime \?\? ""/);
+    assert.match(browser, /type PageBridgeMode = "none" \| "hooks" \| "lab"/);
+    assert.match(browser, /hooksForAttach \? "hooks" : effectiveLab \? "lab" : "none"/);
+    assert.match(browser, /Page\.addScriptToEvaluateOnNewDocument/);
+    assert.match(browser, /Page\.removeScriptToEvaluateOnNewDocument/);
+    assert.match(browser, /await sendCdpCommand\(send, "Page\.addScriptToEvaluateOnNewDocument"/);
+    assert.match(browser, /await configurePageBridge\(send/);
+    assert.match(browser, /pageBridgeQueueRef\.current\.catch\(\(\) => undefined\)\.then\(apply\)/);
+    assert.match(browser, /Runtime\.removeBinding/);
+    assert.match(browser, /Page\.reload.*ignoreCache: false/);
+    assert.match(browser, /cdpConnectionGenerationRef/);
+    assert.match(browser, /isCurrentSocket/);
+    assert.match(browser, /configureBridgeForNavigation/);
+    assert.match(browser, /navigationGenerationRef\.current !== navigationGeneration/);
+    assert.match(browser, /entry\?\.id == null/);
+    assert.match(browser, /entry\.url/);
+    assert.doesNotMatch(browser, /installHookRuntime/);
+    assert.match(browser, /深度分析未开启/);
+    assert.match(browser, /aria-pressed=\{hooksEnabled\}/);
+    const toggle = browser.slice(browser.indexOf("const toggleHooks"));
+    assert.doesNotMatch(toggle, /await stopProxyChrome\(\);\s*await startProxyChrome\(destination\);/);
+    const retry = browser.slice(browser.indexOf("const retryCloudflareChallenge"), browser.indexOf("const copyCurrentAddress"));
+    assert.doesNotMatch(retry, /stopProxyChrome|startProxyChrome/);
+    assert.match(retry, /无法在保留登录状态的前提下关闭 Hook/);
   });
 });
