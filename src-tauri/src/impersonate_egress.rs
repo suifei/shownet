@@ -163,9 +163,13 @@ async fn build_client_for_route_inner(
         return build_client_inner(upstream, None, cert_store);
     }
 
-    if connection_port != tls_identity_port {
+    // With no explicit port in an HTTPS URI, wreq rc.29 preserves a resolver
+    // override's non-zero port. The integration test below locks that behavior
+    // for original identity :443 -> an arbitrary mirror port. An explicit
+    // non-default identity port overwrites the resolver port and cannot drift.
+    if connection_port != tls_identity_port && tls_identity_port != 443 {
         return Err(format!(
-            "wreq 兼容镜像暂不支持连接端口 {connection_port} 与身份端口 {tls_identity_port} 不同；请使用相同端口，避免改变 SNI/证书身份或 HTTP/2 :authority"
+            "wreq 兼容镜像暂不支持非默认身份端口 {tls_identity_port} 与连接端口 {connection_port} 不同；请使用相同端口，避免改变 SNI/证书身份或 HTTP/2 :authority"
         ));
     }
     if tls_identity_host
@@ -418,7 +422,7 @@ mod tests {
             "127.0.0.1",
             address.port(),
             identity_host,
-            address.port(),
+            443,
             Some(cert_store),
         )
         .await
@@ -426,7 +430,7 @@ mod tests {
         let response = send(
             &client,
             "GET",
-            &format!("https://{identity_host}:{}/mirror", address.port()),
+            &format!("https://{identity_host}/mirror"),
             &[],
             None,
         )
@@ -439,7 +443,7 @@ mod tests {
             .expect("observation timeout")
             .expect("observation");
         assert_eq!(observed.0, identity_host);
-        assert_eq!(observed.1, format!("{identity_host}:{}", address.port()));
+        assert_eq!(observed.1, identity_host);
         assert_eq!(observed.2, Version::HTTP_2);
         drop(response);
         drop(client);
@@ -454,14 +458,26 @@ mod tests {
         let direct_error = build_client_for_route(
             &upstream("direct", "", None),
             "127.0.0.1",
-            8443,
+            9443,
             "api.original.invalid",
-            443,
+            8443,
         )
         .await
         .err()
         .expect("port mismatch must fail");
-        assert!(direct_error.contains("连接端口 8443 与身份端口 443 不同"));
+        assert!(direct_error.contains("身份端口 8443 与连接端口 9443 不同"));
+
+        let ip_identity_error = build_client_for_route(
+            &upstream("direct", "", None),
+            "127.0.0.2",
+            443,
+            "127.0.0.1",
+            443,
+        )
+        .await
+        .err()
+        .expect("IP identity remapping must fail");
+        assert!(ip_identity_error.contains("不支持把 IP 身份映射到其他连接地址"));
 
         let proxy_error = build_client_for_route(
             &upstream("http", "", None),
