@@ -102,6 +102,30 @@ jobs:
       # featureless build here silently replaces a feature build there, and the
       # two are indistinguishable by eye. That cost real debugging time.
       - run: npm run tauri -- build --debug --no-bundle -- --features impersonate-boring
+      - name: Record quality binary checksum (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd src-tauri/target/debug
+          shasum -a 256 shownet > shownet.sha256
+      - name: Record quality binary checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "src-tauri/target/debug/shownet.exe"
+          $digest = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  shownet.exe`n" | Set-Content -Path "$binary.sha256" -Encoding ascii -NoNewline
+      - name: Upload commit-matched quality binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: shownet-quality-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            src-tauri/target/debug/shownet
+            src-tauri/target/debug/shownet.sha256
+            src-tauri/target/debug/shownet.exe
+            src-tauri/target/debug/shownet.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   # ─── Release builds (tag v* or manual dispatch) ───────────────────────────
   release-macos:

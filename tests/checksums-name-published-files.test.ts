@@ -58,7 +58,11 @@ describe("the published checksum file", () => {
     const writers = source
       .split("\n")
       .filter((line) => line.includes("Set-Content") && line.includes(".sha256"));
-    assert.equal(writers.length, 1, `expected one sidecar writer, found ${writers.length}`);
+    assert.equal(
+      writers.length,
+      2,
+      `expected release and quality sidecar writers, found ${writers.length}`,
+    );
 
     for (const line of writers) {
       assert.ok(
