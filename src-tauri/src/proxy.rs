@@ -1768,14 +1768,15 @@ async fn handle_connect(
                 format!("https://{tls_identity_host}:{port}")
             };
             let egress_ja4 = crate::impersonate_egress::EGRESS_JA4;
-            fingerprint.outbound.negotiated_alpn = Some("h2".to_string());
-            fingerprint.outbound.application_protocol = Some("h2".to_string());
             fingerprint.outbound.engine = Some("impersonate".into());
-            fingerprint.outbound.ja4 = Some(egress_ja4.to_string());
-            let parity = fingerprint.inbound.ja4 == egress_ja4;
-            fingerprint.outbound.ja3_parity = Some(parity);
+            // The linked profile has a separately measured golden JA4, but wreq
+            // does not expose this individual connection's ClientHello or ALPN.
+            // Keep per-request measurement fields empty instead of presenting a
+            // profile expectation as observed wire evidence.
+            fingerprint.outbound.ja4 = None;
+            fingerprint.outbound.ja3_parity = Some(false);
             fingerprint.outbound.note = format!(
-                "{} wreq Chrome egress (JA4 {egress_ja4}, h2 pseudo m,a,s,p); inbound JA4 {} — parity={parity}",
+                "{} wreq Chrome profile (expected JA4 {egress_ja4}, h2 pseudo m,a,s,p); inbound JA4 {} — this connection was not measured",
                 fingerprint.outbound.note,
                 fingerprint.inbound.ja4
             );

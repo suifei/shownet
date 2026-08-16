@@ -119,18 +119,15 @@ fn explicit_proxy_uri(upstream: &EffectiveUpstreamProxy) -> Result<Uri, String> 
         .map_err(|error| format!("代理配置无效: {error}"))
 }
 
-/// Headers a client owns and must not be copied from the captured request —
-/// wreq sets its own, and forwarding these would fight it or corrupt framing.
+/// Hop-by-hop headers the origin client owns and must not copy. Content-Length
+/// is intentionally preserved: browser requests already carry the correct value,
+/// and the proxy recalculates it whenever a rule rewrites the body. Dropping a
+/// browser's explicit `Content-Length: 0` made strict origins reject empty POSTs
+/// with 411 before authentication and risk checks could run.
 fn is_client_owned(name: &str) -> bool {
     matches!(
         name,
-        "host"
-            | "content-length"
-            | "connection"
-            | "proxy-connection"
-            | "keep-alive"
-            | "transfer-encoding"
-            | "upgrade"
+        "host" | "connection" | "proxy-connection" | "keep-alive" | "transfer-encoding" | "upgrade"
     )
 }
 
@@ -215,6 +212,52 @@ mod tests {
     #[test]
     fn explicit_proxy_uri_rejects_unknown_modes() {
         assert!(explicit_proxy_uri(&upstream("ftp", "", None)).is_err());
+    }
+
+    #[test]
+    fn browser_content_length_survives_origin_request_reconstruction() {
+        assert!(!is_client_owned("content-length"));
+        assert!(is_client_owned("transfer-encoding"));
+        assert!(is_client_owned("connection"));
+    }
+
+    #[tokio::test]
+    async fn empty_post_reaches_http_origin_with_explicit_zero_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let head = String::from_utf8(read_http_head(&mut stream).await).expect("http header");
+            assert!(head.starts_with("POST /empty HTTP/1.1\r\n"));
+            assert!(head
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("content-length: 0")));
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response");
+        });
+
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "direct".to_string(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        })
+        .expect("client");
+        let response = send(
+            &client,
+            "POST",
+            &format!("http://{address}/empty"),
+            &[("Content-Length".to_string(), b"0".to_vec())],
+            Some(wreq::Body::from(Vec::<u8>::new())),
+        )
+        .await
+        .expect("empty post");
+        assert_eq!(response.status(), 204);
+        server.await.expect("server");
     }
 
     #[test]

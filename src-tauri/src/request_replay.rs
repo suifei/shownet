@@ -5,11 +5,14 @@ use crate::models::{
 use crate::{emit, AppState};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use brotli::Decompressor;
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures_util::{stream, StreamExt};
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest_cookie_store::CookieStoreMutex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1010,6 +1013,7 @@ pub fn sanitize_headers(
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
+        "accept-encoding",
         "te",
         "trailer",
         "transfer-encoding",
@@ -1062,6 +1066,11 @@ async fn read_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let content_encoding = response
+        .headers()
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     let mut wire_bytes = 0usize;
@@ -1075,31 +1084,99 @@ async fn read_response(
             truncated = true;
         }
     }
-    let textual = content_type.starts_with("text/")
-        || content_type.contains("json")
-        || content_type.contains("xml")
-        || content_type.contains("javascript")
-        || content_type.is_empty();
+    let (body_bytes, decoded, decode_error, decode_truncated) = match content_encoding
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"))
+    {
+        None => (bytes, true, None, false),
+        Some(encoding) => match decode_response_body(&bytes, encoding) {
+            Ok(decoded) => (decoded.bytes, true, None, decoded.truncated),
+            Err(error) => (bytes, false, Some(error), false),
+        },
+    };
+    truncated |= decode_truncated;
+    let textual = decoded
+        && (content_type.starts_with("text/")
+            || content_type.contains("json")
+            || content_type.contains("xml")
+            || content_type.contains("javascript")
+            || content_type.is_empty());
     let (body, format) = if textual {
-        (String::from_utf8_lossy(&bytes).into_owned(), "text")
+        (String::from_utf8_lossy(&body_bytes).into_owned(), "text")
     } else {
-        (STANDARD.encode(&bytes), "base64")
+        (format!("base64:{}", STANDARD.encode(&body_bytes)), "base64")
     };
     Ok((
         body,
         BodyCaptureMetadata {
             captured: true,
-            content_encoding: None,
-            decoded: true,
+            content_encoding,
+            decoded,
             truncated,
-            complete: !truncated,
+            complete: !truncated && decode_error.is_none(),
             wire_bytes: wire_bytes as i64,
-            decoded_bytes: bytes.len() as i64,
+            decoded_bytes: (if decoded { body_bytes.len() } else { 0 }) as i64,
             format: format.to_string(),
-            error: None,
+            error: decode_error,
             omitted_reason: None,
         },
     ))
+}
+
+#[derive(Debug)]
+struct DecodedResponseBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn decode_response_body(
+    bytes: &[u8],
+    content_encoding: &str,
+) -> Result<DecodedResponseBody, String> {
+    let encodings = content_encoding
+        .split(',')
+        .map(|encoding| encoding.trim().to_ascii_lowercase())
+        .filter(|encoding| !encoding.is_empty() && encoding != "identity")
+        .collect::<Vec<_>>();
+    let mut current = DecodedResponseBody {
+        bytes: bytes.to_vec(),
+        truncated: false,
+    };
+    for encoding in encodings.iter().rev() {
+        current = match encoding.as_str() {
+            "gzip" | "x-gzip" => read_response_decoder(GzDecoder::new(current.bytes.as_slice()))?,
+            "br" => read_response_decoder(Decompressor::new(current.bytes.as_slice(), 16 * 1024))?,
+            "deflate" => decode_response_deflate(&current.bytes)?,
+            "zstd" => {
+                let decoder = zstd::stream::read::Decoder::new(current.bytes.as_slice())
+                    .map_err(|error| format!("zstd 解压初始化失败: {error}"))?;
+                read_response_decoder(decoder)?
+            }
+            unsupported => return Err(format!("不支持的 Content-Encoding: {unsupported}")),
+        };
+        if current.truncated {
+            break;
+        }
+    }
+    Ok(current)
+}
+
+fn decode_response_deflate(bytes: &[u8]) -> Result<DecodedResponseBody, String> {
+    read_response_decoder(ZlibDecoder::new(bytes))
+        .or_else(|_| read_response_decoder(DeflateDecoder::new(bytes)))
+}
+
+fn read_response_decoder(mut reader: impl Read) -> Result<DecodedResponseBody, String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("响应正文解压失败: {error}"))?;
+    let truncated = bytes.len() > MAX_RESPONSE_BYTES;
+    bytes.truncate(MAX_RESPONSE_BYTES);
+    Ok(DecodedResponseBody { bytes, truncated })
 }
 
 fn request_url(
@@ -1214,6 +1291,10 @@ mod tests {
                 value: "Bearer secret".into(),
             },
             HeaderEntry {
+                name: "Accept-Encoding".into(),
+                value: "gzip, br".into(),
+            },
+            HeaderEntry {
                 name: REPLAY_CONTEXT_HEADER.into(),
                 value: "internal".into(),
             },
@@ -1235,6 +1316,27 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn decodes_gzip_replay_responses_before_text_rendering() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let original = br#"{"ok":true,"message":"decoded"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let decoded = decode_response_body(&compressed, "gzip").unwrap();
+        assert_eq!(decoded.bytes, original);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn rejects_unknown_replay_response_encodings_instead_of_rendering_garbage() {
+        let error = decode_response_body(b"compressed", "snappy").unwrap_err();
+        assert!(error.contains("不支持的 Content-Encoding"));
     }
 
     #[test]

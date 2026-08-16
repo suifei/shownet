@@ -3,10 +3,11 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
 /**
- * The hook runtime is injected into every document the embedded browser loads,
- * so it sits inside the page's own control flow. An observer that throws kills
- * the very call it was watching, and a page whose writes keep failing reloads
- * forever — which is what issue #4 reported.
+ * The hook runtime is installed only when deep analysis is enabled, before
+ * scripts in the target document execute. It still sits inside the page's own
+ * control flow: an observer that throws kills the very call it was watching,
+ * and a page whose writes keep failing reloads forever — which is what issue
+ * #4 reported.
  */
 const RUNTIME_SOURCE = readFileSync(
   resolve(process.cwd(), "public/lab/shownet-hook-runtime.js"),
@@ -16,8 +17,8 @@ const RUNTIME_SOURCE = readFileSync(
 /**
  * The runtime guards itself against double installation per realm, so it goes
  * in once and every test shares the installed hooks — which is also how a real
- * page sees it. The bridge is what varies per test; the hooks read it at emit
- * time, not at install time.
+ * page sees it after the user enables analysis. The bridge is what varies per
+ * test; the hooks read it at emit time, not at install time.
  */
 function installRuntime() {
   // eslint-disable-next-line no-new-func -- evaluating the shipped file is the point

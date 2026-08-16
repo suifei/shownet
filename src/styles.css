@@ -6654,6 +6654,10 @@ kbd {
 }
 
 .hook-panel__filters { display: grid; grid-template-columns: minmax(0, 1fr) 74px; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); }
+.hook-panel__disabled { display: grid; justify-items: center; align-content: center; min-height: 190px; gap: 8px; padding: 24px; color: var(--text-muted); text-align: center; }
+.hook-panel__disabled strong { color: var(--text-body); font-size: 13px; }
+.hook-panel__disabled small { max-width: 220px; line-height: 1.5; }
+.hook-panel__disabled button { display: inline-flex; align-items: center; gap: 6px; margin-top: 5px; padding: 7px 10px; color: var(--text-body); background: var(--accent-bg); border: 1px solid var(--border-strong); }
 .hook-event-list { flex: 1; min-height: 0; overflow: auto; }
 .hook-event { display: grid; grid-template-columns: 32px minmax(0, 1fr); width: 100%; min-height: 64px; gap: 8px; padding: 10px; color: var(--text-secondary); text-align: left; background: var(--surface-panel); border-bottom: 1px solid var(--border-subtle); }
 .hook-event:hover { background: var(--accent-bg); }

@@ -27,9 +27,9 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 | 查看 TLS、PX、JA4 与防护证据 | [高级控制台](#5-高级控制台可选增强) 与 [ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md) |
 | 参与开发或运行测试 | [开发](#开发) |
 
-## 当前版本迭代（v0.4.27）
+## 当前版本迭代（v0.4.28）
 
-当前发布版：[ShowNet v0.4.27](https://github.com/suifei/shownet/releases/tag/v0.4.27)。这次迭代的重点
+当前发布版：[ShowNet v0.4.28](https://github.com/suifei/shownet/releases/tag/v0.4.28)。这次迭代的重点
 不是增加一个孤立按钮，而是把 **Agent 安装、运行边界、网络出口和用户已有环境** 的关系理顺：
 
 | 迭代方向 | 已完成的变化 | 对用户的实际影响 |
@@ -40,7 +40,7 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 | Agent 隔离 | 端点、凭据、Skill、MCP、白名单和可选代理只注入 ShowNet 启动的子进程 | ShowNet 内的配置不会改写 Grok 离开 ShowNet 后的全局环境 |
 | 已安装 Agent | 支持自动探测、手动选择、重新验证和切换到官方 stable | 用户可以继续使用自己安装的 Grok；切换时原手动文件不会被删除或修改 |
 | 会话体验 | 浏览其他 Session 时保留实际抓包 Session、按 Session 保存 URL，并区分“正在查看”和“正在抓取” | 查看历史会话不会破坏当前浏览器状态；不需要为每个会话强制创建一个标签页 |
-| Issue 修复 | 修复空白请求外键错误、跨 Session 请求详情残留、命令面板焦点漂移，并增加“全部”内容筛选 | Request Lab 可以直接创建空白请求；切换会话后详情与当前列表一致；搜索可覆盖 Header、正文和 Hook |
+| Issue 修复 | 修复空白请求外键错误、跨 Session 请求详情残留、命令面板焦点漂移、重放压缩响应乱码和离开流量页后筛选丢失，并增加“全部”内容筛选 | Request Lab 可以直接创建空白请求；切换会话后详情、筛选、排序与浏览器上下文一致；重放结果按编码正确解码；搜索可覆盖 Header、正文和 Hook |
 | 更新体验 | 启动后后台检查 ShowNet 新版本，下载仍由用户在设置中确认 | 能及时知道有新版本，同时不会静默替换正在使用的安装或修改用户配置 |
 | 发布与依赖 | macOS / Windows 发布包、校验清单和跨平台质量检查已完成；发布前清理了 Grok 源码与构建产物 | 不需要在本地编译 Grok；发布流程不依赖本地 sidecar 源码或二进制 |
 
@@ -85,7 +85,7 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 ### 3. 自动逆向：从流量到算法 / 接口结论
 
 - **AST 提取**：从 JS 响应中抽取 Web Crypto、CryptoJS、国密 SM 系列、动态签名相关代码片段（有界、保留关键值）  
-- **Hook 关联**：内嵌浏览器在页面脚本前注入 Hook，网络 / 加解密调用与代理请求按序关联  
+- **Hook 关联**：内嵌浏览器默认只做传输层抓包；用户打开深度分析开关后才注入 Hook，将网络 / 加解密调用与代理请求按序关联
 - **保护与签名线索**：会话级聚合风控 / WAF / 验证码等标记；Akamai 等动态签名可生成 **无密钥泄露的 harness**  
 - **两阶段分析**：先智能过滤相关请求，再做聚焦协议 / 加密分析  
 - **加密 Lab**：浏览器侧加密探测可直接送入 Agent 校验链路  
@@ -103,7 +103,10 @@ ShowNet 面向需要还原接口、签名与加密链路的开发者与安全研
 #### 内嵌浏览器启动、Cloudflare 验证与语言设置（0.4.16+）
 
 - **启动不再弹出本地 Chrome 窗口。** 内嵌浏览器改用跨 Chrome 版本兼容的无头启动参数；若 Chrome 在 CDP 连接前退出，ShowNet 会立即显示明确错误，不再一直停在“正在连接”。
-- **入站/出站 JA4 必须一致。** 正式包（`impersonate-boring`）MITM 出站**固定** wreq 逐字节 Chrome，**不再提供 rustls 出站回退或开关**；出站 JA4 与 Chrome 151 抓包浏览器对齐（`t13d1516h2_8daaf6152771_806a8c22fdea`，含 ML-DSA 0x0904/0905/0906）。检测到 Cloudflare 挑战可「关闭 Hook 并重试」：只关会改写 SubtleCrypto/fetch 的页面 Hook，**不会**临时绕过 TLS 拦截。
+- **默认就是正常浏览器访问模式。** 内嵌浏览器默认不向第三方页面注入 Hook 运行时，也不注册 ShowNet 页面桥接对象；HTTPS / HTTP 流量仍通过 MITM 正常抓取。这样登录、Cookie、Storage、Service Worker、设备校验和支付流程使用 Chrome 原生 JavaScript API。
+- **深度分析是显式开关。** 只有用户主动打开“JS Hook”后，ShowNet 才会在当前页面和后续新文档中安装 Hook；后续文档会在页面脚本前安装，以便记录首屏调用。切换通过同一 Chrome 会话的控制通道完成，关闭时刷新页面恢复原生 API。Cookie、Local Storage、Session Storage、登录状态和页面历史通常会保留，但未提交内容、页面内存状态以及正在进行的验证可能丢失。该模式会改写部分页面 API，适合分析加密调用，不作为正常访问的默认模式。ShowNet 不承诺、也不通过改写来绕过站点的反自动化或风控检测。
+- **Crypto Lab 的状态通道按本地 Lab 页面使用。** Lab 页面才会安装自己的状态桥接脚本；普通第三方页面的默认抓包路径不安装页面 Hook 或 ShowNet 页面桥接。跨页面导航时，ShowNet 会在导航前按目标 URL 重新配置通道。
+- **出站配置必须经过实测。** 正式包（`impersonate-boring`）MITM 出站固定使用 wreq Chrome 配置，不提供 rustls 产品回退；其 golden JA4 是 `t13d1516h2_8daaf6152771_806a8c22fdea`（含 ML-DSA 0x0904/0905/0906）。单条抓包记录只有拿到该连接的测量值才会声明匹配，不能把配置目标当成本次握手证据。检测到 Cloudflare 挑战可「关闭 Hook 并重试」：只关会改写 SubtleCrypto/fetch 的页面 Hook，不会临时绕过 TLS 拦截。
 - **浏览器语言可自由设置。** 在内嵌浏览器右上角菜单输入 `th-TH`、`zh-Hans-CN` 等 BCP 47 语言标签并应用。ShowNet 会统一页面语言、Chrome Profile 与 `Accept-Language`，保存选择，并在运行中修改时自动重启浏览器。
 
 #### API SDK：把一次抓包变成一个客户端（0.4.14 新增）
