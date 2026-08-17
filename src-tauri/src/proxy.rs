@@ -418,6 +418,10 @@ struct TapBody<B> {
     bytes_per_second: Option<u64>,
     pending_frame: Option<Frame<Bytes>>,
     rate_sleep: Option<Pin<Box<Sleep>>>,
+    /// When the response advertised Content-Length, H1 `Connection: close`
+    /// can drop this wrapper after the last data frame without polling
+    /// `Ready(None)`. Meeting that length is a complete capture.
+    expected_wire_bytes: Option<usize>,
 }
 
 impl<B> TapBody<B> {
@@ -435,6 +439,7 @@ impl<B> TapBody<B> {
             bytes_per_second: None,
             pending_frame: None,
             rate_sleep: None,
+            expected_wire_bytes: None,
         }
     }
 
@@ -453,12 +458,23 @@ impl<B> TapBody<B> {
             bytes_per_second: None,
             pending_frame: None,
             rate_sleep: None,
+            expected_wire_bytes: None,
         }
     }
 
     fn with_rate_limit(mut self, bytes_per_second: Option<u64>) -> Self {
         self.bytes_per_second = bytes_per_second.filter(|value| *value > 0);
         self
+    }
+
+    fn with_expected_wire_bytes(mut self, expected_wire_bytes: Option<usize>) -> Self {
+        self.expected_wire_bytes = expected_wire_bytes;
+        self
+    }
+
+    fn reached_expected_wire_bytes(&self) -> bool {
+        self.expected_wire_bytes
+            .is_some_and(|expected| self.capture.total_bytes >= expected)
     }
 
     fn finish(&mut self) {
@@ -471,7 +487,9 @@ impl<B> TapBody<B> {
 impl<B> Drop for TapBody<B> {
     fn drop(&mut self) {
         if self.callback.is_some() {
-            if self.capture.error.is_none() {
+            if self.reached_expected_wire_bytes() {
+                self.capture.complete = true;
+            } else if self.capture.error.is_none() {
                 self.capture.error = Some("正文流在结束前关闭".to_string());
             }
             self.finish();
@@ -513,7 +531,7 @@ where
                     this.capture.bytes.extend_from_slice(&data[..captured]);
                     this.capture.truncated |= captured < data.len();
                 }
-                if this.inner.is_end_stream() {
+                if this.inner.is_end_stream() || this.reached_expected_wire_bytes() {
                     this.capture.complete = true;
                     this.finish();
                 }
@@ -3589,6 +3607,11 @@ fn captured_response_body(
     start: Instant,
     bytes_per_second: Option<u64>,
 ) -> ProxyBody {
+    let expected_wire_bytes = pending
+        .response_headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+        .and_then(|header| header.value.trim().parse::<usize>().ok());
     TapBody::new(body, MAX_CAPTURED_WIRE_BYTES, move |response_capture| {
         let request_capture = request_capture
             .lock()
@@ -3612,6 +3635,7 @@ fn captured_response_body(
         pending.response_body_metadata = Some(response_metadata);
         capture_sink(pending);
     })
+    .with_expected_wire_bytes(expected_wire_bytes)
     .with_rate_limit(bytes_per_second)
     .boxed_unsync()
 }
@@ -6432,6 +6456,54 @@ mod tests {
             complete: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn tap_body_marks_content_length_met_complete_without_end_stream() {
+        use std::future::poll_fn;
+        use std::sync::{Arc, Mutex};
+
+        struct OneChunkThenHang {
+            chunk: Option<Bytes>,
+        }
+        impl Body for OneChunkThenHang {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                let this = self.get_mut();
+                match this.chunk.take() {
+                    Some(chunk) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+                    None => Poll::Pending,
+                }
+            }
+            fn is_end_stream(&self) -> bool {
+                false
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_for_callback = seen.clone();
+        let mut tap = TapBody::new(
+            OneChunkThenHang {
+                chunk: Some(Bytes::from_static(b"empty-ok")),
+            },
+            MAX_CAPTURED_WIRE_BYTES,
+            move |snapshot| {
+                *seen_for_callback.lock().unwrap() = Some(snapshot);
+            },
+        )
+        .with_expected_wire_bytes(Some(8));
+
+        let frame = poll_fn(|context| Pin::new(&mut tap).poll_frame(context)).await;
+        assert!(frame.unwrap().is_ok());
+        drop(tap);
+        let snapshot = seen.lock().unwrap().take().expect("capture callback");
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.bytes, b"empty-ok");
+        assert_eq!(snapshot.error, None);
     }
 
     fn test_tls_fingerprint() -> crate::tls_fingerprint::TlsFingerprintRecord {

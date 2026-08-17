@@ -431,8 +431,12 @@ async fn capture_integrity_mitm_wreq_sqlite_roundtrip() {
                     && item.response_body_metadata.complete
                     && item.response_body == "empty-ok"
             });
-        if ready || tokio::time::Instant::now() >= deadline {
+        if ready {
             break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let listed = storage.list_requests(&session.id, None, None).unwrap();
+            panic!("POST /empty never completed before reopen: {listed:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
