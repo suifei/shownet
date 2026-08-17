@@ -22,29 +22,31 @@ async function assertNonEmptyFile(relativePath: string, minBytes = 1024): Promis
 }
 
 describe("marketing: core capabilities, demo assets, beginner path", () => {
-  it("README leads with four dedicated core-capability sections", async () => {
+  it("README leads with user pain and unnamed scenarios, not a feature catalog", async () => {
     const readme = await readUtf8("README.md");
 
-    assert.match(readme, /AI 原生抓包 · 自动部署数字证书 · 自动协议逆向 · 一键生成可运行逆向 \/ 客户端代码/);
-    assert.match(readme, /## 核心能力（重点）/);
-    assert.match(readme, /### 1\. AI 能力：可审计的自动逆向/);
-    assert.match(readme, /### 2\. 自动部署数字证书：本机与设备一条链路/);
-    assert.match(readme, /### 3\. 自动逆向：从流量到算法 \/ 接口结论/);
-    assert.match(readme, /### 4\. 自动生成逆向与客户端代码/);
+    assert.match(readme, /系统浏览器能登|重放发不出去/);
+    assert.match(readme, /## 它解决什么/);
+    assert.match(readme, /## 真实场景/);
+    assert.match(readme, /某某网站|某某 App|某某接口/);
+    assert.match(readme, /## AI 端点与支持/);
+    assert.match(readme, /https:\/\/claudegpt\.org\/v1/);
+    assert.match(readme, /553354813/);
 
     // Product-truth guards (must not overclaim)
     assert.match(readme, /不宣称.*JA3|位级浏览器 JA3/);
     assert.match(readme, /无需 Root/);
+    assert.doesNotMatch(readme, /12306|春秋航空|kyfw\.|ch\.com/i);
   });
 
   it("README beginner path is zero-to-success ordered: browser without CA → CA → AI → code", async () => {
     const readme = await readUtf8("README.md");
-    const start = readme.indexOf("## 推荐上手路径");
-    assert.ok(start >= 0, "missing 推荐上手路径 section");
+    const start = readme.indexOf("## 十分钟上手");
+    assert.ok(start >= 0, "missing 十分钟上手 section");
     const nextHeading = readme.indexOf("\n## ", start + 1);
     const section = nextHeading >= 0 ? readme.slice(start, nextHeading) : readme.slice(start);
 
-    assert.match(section, /小白开箱|推荐上手路径/);
+    assert.match(section, /十分钟上手|小白开箱|推荐上手路径/);
     assert.match(section, /### 1\..*零配置|不必先装证书|不必.*装证书/);
     assert.match(section, /内嵌浏览器/);
     assert.match(section, /开始抓包/);
