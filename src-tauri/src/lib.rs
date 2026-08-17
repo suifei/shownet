@@ -15,6 +15,8 @@ mod browser;
 mod browser_bus;
 mod browser_hook;
 mod ca;
+#[cfg(all(test, feature = "impersonate-boring"))]
+mod capture_integrity;
 mod capture_rules;
 mod challenge_decoder;
 mod client_access;

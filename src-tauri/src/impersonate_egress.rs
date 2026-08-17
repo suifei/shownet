@@ -38,6 +38,7 @@ impl Drop for TestRootGuard {
         if let Ok(mut der) = TEST_ROOT_DER.lock() {
             *der = None;
         }
+        crate::proxy::clear_test_host_ips();
     }
 }
 
@@ -210,6 +211,18 @@ async fn build_client_for_route_inner(
     let same_host = connection_host
         .trim_matches(['[', ']'])
         .eq_ignore_ascii_case(tls_identity_host.trim_matches(['[', ']']));
+    #[cfg(test)]
+    if let Some(ip) = crate::proxy::test_host_ip(tls_identity_host) {
+        return build_client_inner(
+            upstream,
+            Some(DirectRouteOverride {
+                identity_host: tls_identity_host.trim_matches(['[', ']']).to_string(),
+                connection_host: connection_host.to_string(),
+                addresses: vec![SocketAddr::new(ip, connection_port)],
+            }),
+            cert_store,
+        );
+    }
     if same_host && connection_port == tls_identity_port {
         return build_client_inner(upstream, None, cert_store);
     }

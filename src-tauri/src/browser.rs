@@ -212,6 +212,26 @@ impl ProxyBrowserHandle {
         proxy_port: u16,
         browser_language: Option<&str>,
     ) -> Result<Self, String> {
+        Self::launch_inner(data_dir, proxy_port, browser_language, &[]).await
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub async fn launch_with_extra_args(
+        data_dir: &Path,
+        proxy_port: u16,
+        browser_language: Option<&str>,
+        extra_args: &[&str],
+    ) -> Result<Self, String> {
+        Self::launch_inner(data_dir, proxy_port, browser_language, extra_args).await
+    }
+
+    async fn launch_inner(
+        data_dir: &Path,
+        proxy_port: u16,
+        browser_language: Option<&str>,
+        extra_args: &[&str],
+    ) -> Result<Self, String> {
         let chrome = chrome_executable()?;
         let installed_chrome_major = chrome_major_version(&chrome);
         let active_preset = tls_outbound::active_preset().ok();
@@ -244,6 +264,7 @@ impl ProxyBrowserHandle {
             proxy_port,
             honest_launch_user_agent.as_deref(),
             browser_language.as_deref(),
+            extra_args,
         );
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let mut child = match command.spawn() {
@@ -393,6 +414,7 @@ fn chrome_command(
     proxy_port: u16,
     user_agent: Option<&str>,
     browser_language: Option<&str>,
+    extra_args: &[&str],
 ) -> Command {
     let mut command = Command::new(chrome);
     command
@@ -464,6 +486,9 @@ fn chrome_command(
     }
     if let Some(language) = browser_language {
         command.arg(format!("--lang={language}"));
+    }
+    for extra in extra_args {
+        command.arg(extra);
     }
     command.arg("about:blank");
     command
@@ -892,6 +917,7 @@ mod tests {
             8080,
             Some("Mozilla/5.0 Chrome/151.0.0.0"),
             Some("th-TH"),
+            &[],
         );
         let args = command
             .get_args()
@@ -927,6 +953,7 @@ mod tests {
             8080,
             None,
             None,
+            &[],
         );
         let args = command
             .get_args()
