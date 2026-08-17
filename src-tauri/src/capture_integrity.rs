@@ -481,10 +481,10 @@ async fn capture_integrity_chrome_mitm_wreq_records_empty_post() {
     .await
     .unwrap();
     let proxy_port = handle.local_addr().port();
-    let extra = [
-        format!("--host-resolver-rules=MAP {INTEGRITY_HOST} 127.0.0.1"),
-        "--ignore-certificate-errors".to_string(),
-    ];
+    // Chrome sends CONNECT capture.shownet.test:<port> without resolving the
+    // host. Mapping that name to 127.0.0.1 would give it a loopback bypass
+    // path around MITM. Proxy/wreq already remap the name via set_test_host_ip.
+    let extra = ["--ignore-certificate-errors".to_string()];
     let extra_refs = extra.iter().map(String::as_str).collect::<Vec<_>>();
     let mut browser = crate::browser::ProxyBrowserHandle::launch_with_extra_args(
         &dir,
@@ -499,14 +499,15 @@ async fn capture_integrity_chrome_mitm_wreq_records_empty_post() {
     browser.bus().navigate(&target).await.expect("navigate");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        if seen
-            .lock()
-            .unwrap()
+        let origin = seen.lock().unwrap();
+        let empty = origin
             .iter()
-            .any(|item| item.method == "POST" && item.path == "/empty")
-        {
+            .any(|item| item.method == "POST" && item.path == "/empty");
+        let echoed = origin.iter().any(|item| item.path == "/echo-cookie");
+        if empty && echoed {
             break;
         }
+        drop(origin);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -530,18 +531,44 @@ async fn capture_integrity_chrome_mitm_wreq_records_empty_post() {
     drop(storage);
 
     let origin = seen.lock().unwrap().clone();
+    assert_eq!(
+        origin
+            .iter()
+            .filter(|item| item.method == "POST" && item.path == "/empty")
+            .count(),
+        1,
+        "origin must see exactly one MITM-rebuilt empty POST: {origin:?}"
+    );
     assert_empty_post_on_origin(&origin);
-    if let Some(empty) = origin
+    let empty = origin
         .iter()
         .find(|item| item.method == "POST" && item.path == "/empty")
-    {
-        if let Some(language) = header_value(&empty.headers, "accept-language") {
-            assert_eq!(language, "th-TH,th;q=0.9");
-        }
-    }
+        .expect("chrome empty post");
+    assert_eq!(
+        header_value(&empty.headers, "accept-language").as_deref(),
+        Some("th-TH,th;q=0.9")
+    );
 
     let details = reopen_details(&db, &session.id);
     assert_sqlite_pair(&details, "POST", "/empty", "");
+    let stored = details
+        .iter()
+        .find(|item| item.method == "POST" && item.path == "/empty")
+        .expect("sqlite empty post");
+    assert!(stored
+        .request_body
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(
+        stored
+            .request_headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("content-length")
+                && header.value == "0"),
+        "sqlite request must keep Content-Length: 0: {:?}",
+        stored.request_headers
+    );
     assert!(
         details.iter().all(|item| item.hook.is_none()),
         "default hook injection must stay off"
