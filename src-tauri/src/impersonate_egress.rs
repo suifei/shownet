@@ -21,6 +21,56 @@ use tokio::net::lookup_host;
 use wreq::{Body, Client, IntoEmulation, Response, Uri};
 use wreq_util::Profile;
 
+#[cfg(test)]
+static TEST_ROOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+static TEST_ROOT_DER: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub struct TestRootGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestRootGuard {
+    fn drop(&mut self) {
+        if let Ok(mut der) = TEST_ROOT_DER.lock() {
+            *der = None;
+        }
+        crate::proxy::clear_test_host_ips();
+    }
+}
+
+#[cfg(test)]
+pub fn install_test_root_certificate_der(der: Vec<u8>) -> TestRootGuard {
+    let serial = TEST_ROOT_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *TEST_ROOT_DER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(der);
+    TestRootGuard { _serial: serial }
+}
+
+fn overlay_test_cert_store(
+    cert_store: Option<wreq::tls::trust::CertStore>,
+) -> Option<wreq::tls::trust::CertStore> {
+    if cert_store.is_some() {
+        return cert_store;
+    }
+    #[cfg(test)]
+    {
+        let guard = TEST_ROOT_DER.lock().ok()?;
+        let der = guard.as_ref()?;
+        return wreq::tls::trust::CertStore::builder()
+            .add_der_cert(der.as_slice())
+            .build()
+            .ok();
+    }
+    #[cfg(not(test))]
+    None
+}
+
 /// The newest Chrome profile provided by the linked wreq-util release. Chrome
 /// 151 keeps this profile's ClientHello and HTTP/2 shape, but prepends the three
 /// ML-DSA signature schemes below.
@@ -76,6 +126,7 @@ fn build_client_inner(
     route: Option<DirectRouteOverride>,
     cert_store: Option<wreq::tls::trust::CertStore>,
 ) -> Result<ImpersonateClient, String> {
+    let cert_store = overlay_test_cert_store(cert_store);
     // no_proxy() first: wreq, like reqwest, reads http_proxy/https_proxy from
     // the environment by default, and ShowNet points the system proxy at
     // itself — an inherited env proxy would loop the app's own egress back
@@ -159,6 +210,18 @@ async fn build_client_for_route_inner(
     let same_host = connection_host
         .trim_matches(['[', ']'])
         .eq_ignore_ascii_case(tls_identity_host.trim_matches(['[', ']']));
+    #[cfg(test)]
+    if let Some(ip) = crate::proxy::test_host_ip(tls_identity_host) {
+        return build_client_inner(
+            upstream,
+            Some(DirectRouteOverride {
+                identity_host: tls_identity_host.trim_matches(['[', ']']).to_string(),
+                connection_host: connection_host.to_string(),
+                addresses: vec![SocketAddr::new(ip, connection_port)],
+            }),
+            cert_store,
+        );
+    }
     if same_host && connection_port == tls_identity_port {
         return build_client_inner(upstream, None, cert_store);
     }

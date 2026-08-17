@@ -881,7 +881,7 @@ impl ProxyHandle {
     }
 
     #[cfg(test)]
-    async fn start_with_sinks(
+    pub(crate) async fn start_with_sinks(
         address: SocketAddr,
         allow_lan_clients: bool,
         session_id: String,
@@ -998,7 +998,7 @@ impl ProxyHandle {
     }
 
     #[cfg(test)]
-    fn local_addr(&self) -> SocketAddr {
+    pub(crate) fn local_addr(&self) -> SocketAddr {
         self.address
     }
 
@@ -5691,8 +5691,44 @@ fn order_connect_addrs_ipv4_first(addrs: impl IntoIterator<Item = SocketAddr>) -
     v4
 }
 
+#[cfg(test)]
+static TEST_HOST_IPS: std::sync::OnceLock<StdMutex<HashMap<String, IpAddr>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn set_test_host_ip(host: &str, ip: IpAddr) {
+    TEST_HOST_IPS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(host.trim().to_ascii_lowercase(), ip);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_host_ips() {
+    if let Some(map) = TEST_HOST_IPS.get() {
+        map.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_host_ip(host: &str) -> Option<IpAddr> {
+    TEST_HOST_IPS
+        .get()?
+        .lock()
+        .ok()?
+        .get(&host.trim().to_ascii_lowercase())
+        .copied()
+}
+
 async fn resolve_connect_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    #[cfg(test)]
+    if let Some(ip) = test_host_ip(host) {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
     let resolved: Vec<SocketAddr> = lookup_host((host, port))
@@ -8876,6 +8912,20 @@ mod tests {
     fn blocks_self_proxy_loop() {
         assert!(reject_proxy_loop("127.0.0.1", 8888).is_err());
         assert!(reject_proxy_loop("127.0.0.1", 7890).is_ok());
+    }
+
+    #[test]
+    fn test_host_ip_map_is_used_by_destination_resolution() {
+        set_test_host_ip(
+            "capture.shownet.test",
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
+        assert_eq!(
+            test_host_ip("capture.shownet.test"),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        );
+        clear_test_host_ips();
+        assert_eq!(test_host_ip("capture.shownet.test"), None);
     }
 
     #[test]
