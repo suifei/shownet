@@ -1045,8 +1045,42 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a locally installed Chrome; run via npm run test:browser-launch"]
     async fn a_real_embedded_browser_stays_headless_and_applies_its_language() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let data_dir =
             std::env::temp_dir().join(format!("shownet-browser-launch-{}", std::process::id()));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a local language observer");
+        let observer_address = listener.local_addr().expect("read observer address");
+        let observer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Chrome request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read Chrome request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "Chrome request headers are unexpectedly large"
+                );
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .expect("write observer response");
+            String::from_utf8_lossy(&request)
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("accept-language")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("Chrome sent Accept-Language")
+        });
         eprintln!(
             "launching isolated Chrome from {}",
             chrome_executable().unwrap().display()
@@ -1056,6 +1090,16 @@ mod tests {
             .expect("launch an isolated headless Chrome");
         eprintln!("Chrome launched; reading page identity");
         let status = browser.status();
+        browser
+            .bus()
+            .call(
+                "Emulation.setUserAgentOverride",
+                serde_json::json!({
+                    "userAgent": status.honest_user_agent.clone(),
+                }),
+            )
+            .await
+            .expect("apply the production UA override without a language override");
         // `about:blank` has an opaque origin and Chrome reports notifications
         // as denied there. Real sites such as bot.sannysoft.com have a normal
         // secure/local origin, so read the permission on the same kind of page
@@ -1093,6 +1137,17 @@ mod tests {
             .unwrap_or_default()
             .contains("Headless"));
         assert_eq!(identity["notifications"], "prompt");
+
+        browser
+            .bus()
+            .navigate(&format!("http://{observer_address}/language"))
+            .await
+            .expect("navigate to the language observer");
+        let observed_accept_language = timeout(Duration::from_secs(5), observer)
+            .await
+            .expect("Chrome reached the language observer")
+            .expect("language observer completed");
+        assert_eq!(observed_accept_language, "th-TH,th;q=0.9");
 
         eprintln!("page identity verified; stopping Chrome");
         browser.stop().await;

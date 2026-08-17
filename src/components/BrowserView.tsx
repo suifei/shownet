@@ -39,7 +39,6 @@ import { userAgentMetadataFor } from "../browserIdentity";
 import {
   BROWSER_LANGUAGE_STORAGE_KEY,
   BROWSER_LANGUAGE_SUGGESTIONS,
-  browserAcceptLanguage,
   cloudflareChallengeHost,
   initialBrowserLanguage,
   normalizeBrowserLanguage,
@@ -815,10 +814,9 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
             // exposes no way to read back the --user-agent launch flag, so this
             // stays as the per-target backstop. The flag is what actually covers
             // subresources and workers; this covers only the attached page.
-            //
-            // A bare single token with no q-values is itself anomalous; real
-            // Chrome always sends a weighted list.
-            acceptLanguage: status.acceptLanguage || browserAcceptLanguage(status.browserLanguage || browserLanguage),
+            // Language is intentionally absent. The launch profile stores an
+            // unweighted preference and Chrome generates the HTTP q-values. A
+            // weighted CDP override made Chrome append a second `;q=0.9`.
             platform: navigatorPlatform(),
           });
         }
