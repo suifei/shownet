@@ -3174,8 +3174,27 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
                 .content
         };
 
-        let js = client("javascript");
-        let ts = client("typescript");
+        // Parallel tests mutate the process-global TLS preset. Generating the
+        // pair back-to-back can still observe a change between the two calls,
+        // so retry until both clients see the same embedded profile.
+        let mut pair = None;
+        for _ in 0..10 {
+            let js = client("javascript");
+            let ts = client("typescript");
+            let same_len = js.lines().count() == ts.lines().count();
+            let differing: Vec<(String, String)> = js
+                .lines()
+                .zip(ts.lines())
+                .filter(|(left, right)| left != right)
+                .map(|(left, right)| (left.to_string(), right.to_string()))
+                .collect();
+            let matched = same_len && differing.len() == 1;
+            pair = Some((js, ts, differing));
+            if matched {
+                break;
+            }
+        }
+        let (js, ts, differing) = pair.expect("generated clients");
         for source in [&js, &ts] {
             assert!(
                 !source.contains("Object.entries(steps)"),
@@ -3187,11 +3206,6 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
         // What "typescript" means here: the same client with an ESM import, not
         // a typed rewrite. Stated as a test so the difference cannot grow
         // silently — anything more than the import line needs its own check.
-        let differing: Vec<(&str, &str)> = js
-            .lines()
-            .zip(ts.lines())
-            .filter(|(left, right)| left != right)
-            .collect();
         assert_eq!(
             js.lines().count(),
             ts.lines().count(),

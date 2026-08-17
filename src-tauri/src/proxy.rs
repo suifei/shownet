@@ -1493,7 +1493,9 @@ async fn handle_connect(
         .unwrap_or_else(|| (host.clone(), port));
     reject_proxy_loop(&upstream_host, upstream_port)?;
     let start = Instant::now();
-    let upstream_stream = connect_destination(&upstream, &upstream_host, upstream_port).await?;
+    // CONNECT 200 means this listener accepted interception. Origin dial is
+    // delayed until ClientHello is classified so MITM+wreq does not open a
+    // TCP that is immediately discarded.
     let on_upgrade = hyper::upgrade::on(&mut request);
 
     tauri::async_runtime::spawn(async move {
@@ -1530,6 +1532,31 @@ async fn handle_connect(
                     .as_ref()
                     .map(|route| format!("{}；{error}", mirror_route_detail(route, false)))
                     .unwrap_or_else(|| error.clone());
+                let mut upstream_stream =
+                    match connect_destination(&upstream, &upstream_host, upstream_port).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            capture_connect_record(
+                                &capture_sink,
+                                &connect_request_id,
+                                &session_id,
+                                &source,
+                                peer,
+                                &host,
+                                port,
+                                start.elapsed().as_millis() as i64,
+                                request_headers,
+                                None,
+                                "加密隧道（未识别 TLS）".to_string(),
+                                Some(format!("{detail}；出站连接失败: {error}")),
+                                502,
+                            );
+                            error_sink(format!(
+                                "未识别 TLS 出站连接失败 {upstream_host}:{upstream_port}: {error}"
+                            ));
+                            return;
+                        }
+                    };
                 capture_connect_record(
                     &capture_sink,
                     &connect_request_id,
@@ -1545,7 +1572,6 @@ async fn handle_connect(
                     Some(detail),
                     200,
                 );
-                let mut upstream_stream = upstream_stream;
                 if let Err(write_error) = upstream_stream.write_all(&hello.bytes).await {
                     error_sink(format!("转发 CONNECT 前缀失败: {write_error}"));
                     return;
@@ -1595,6 +1621,31 @@ async fn handle_connect(
             }
             let fingerprint = tunnel_fingerprint(inbound);
             let record_tunnel = tls_interception.record_successful_tunnel || mirror_route.is_some();
+            let mut upstream_stream =
+                match connect_destination(&upstream, &upstream_host, upstream_port).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        capture_connect_record(
+                            &capture_sink,
+                            &connect_request_id,
+                            &session_id,
+                            &source,
+                            peer,
+                            &host,
+                            port,
+                            start.elapsed().as_millis() as i64,
+                            request_headers,
+                            Some(fingerprint),
+                            format!("{offered_version} · 原样隧道失败"),
+                            Some(format!("{reason}；出站连接失败: {error}")),
+                            502,
+                        );
+                        error_sink(format!(
+                            "HTTPS 绕行出站连接失败 {upstream_host}:{upstream_port}: {error}"
+                        ));
+                        return;
+                    }
+                };
             if record_tunnel {
                 queue_mirror_trace_or_report(
                     &rule_engine,
@@ -1619,7 +1670,6 @@ async fn handle_connect(
                     200,
                 );
             }
-            let mut upstream_stream = upstream_stream;
             if let Err(error) = upstream_stream.write_all(&hello.bytes).await {
                 if !record_tunnel {
                     capture_connect_record(
@@ -1755,7 +1805,6 @@ async fn handle_connect(
         #[cfg(feature = "impersonate-boring")]
         let (sender, outbound_tls, negotiated_alpn) = {
             let _ = (prefer_origin_h2, force_http11, outbound_profile);
-            drop(upstream_stream);
             let client = match crate::impersonate_egress::build_client_for_route(
                 &upstream,
                 &upstream_host,
@@ -1798,6 +1847,40 @@ async fn handle_connect(
         let (sender, outbound_tls, negotiated_alpn) = {
             // Portable / test builds only. Shipped packages compile with
             // impersonate-boring and never take this arm.
+            let upstream_stream =
+                match connect_destination(&upstream, &upstream_host, upstream_port).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        queue_mirror_trace_or_report(
+                            &rule_engine,
+                            &mirror_route,
+                            &connect_request_id,
+                            "https-mitm",
+                            &error_sink,
+                        );
+                        let detail = mirror_route
+                            .as_ref()
+                            .map(|route| format!("{}；{error}", mirror_route_detail(route, false)))
+                            .unwrap_or_else(|| error.clone());
+                        capture_connect_record(
+                            &capture_sink,
+                            &connect_request_id,
+                            &session_id,
+                            &source,
+                            peer,
+                            &host,
+                            port,
+                            start.elapsed().as_millis() as i64,
+                            request_headers,
+                            Some(fingerprint),
+                            format!("{inbound_tls} · 上游未连接"),
+                            Some(detail),
+                            502,
+                        );
+                        error_sink(error);
+                        return;
+                    }
+                };
             let verified = match connect_verified_tls_measured(
                 upstream_stream,
                 &tls_identity_host,
@@ -1906,23 +1989,25 @@ async fn handle_connect(
             "https-mitm",
             &error_sink,
         );
-        let upstream_detail = mirror_route
-            .as_ref()
-            .map(|route| {
+        let upstream_detail = {
+            let origin_note = if cfg!(feature = "impersonate-boring") {
                 format!(
-                    "{}；上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
-                    mirror_route_detail(route, false),
+                    "上游 {outbound_tls} · ALPN={} · app={} · 本地 MITM 已建立，出站由首请求拨号",
                     negotiated_alpn.as_deref().unwrap_or("none"),
                     if origin_http2 { "h2" } else { "http/1.1" }
                 )
-            })
-            .unwrap_or_else(|| {
+            } else {
                 format!(
                     "上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
                     negotiated_alpn.as_deref().unwrap_or("none"),
                     if origin_http2 { "h2" } else { "http/1.1" }
                 )
-            });
+            };
+            mirror_route
+                .as_ref()
+                .map(|route| format!("{}；{origin_note}", mirror_route_detail(route, false)))
+                .unwrap_or(origin_note)
+        };
         capture_connect_record(
             &capture_sink,
             &connect_request_id,
@@ -2899,7 +2984,7 @@ async fn forward_mitm_https(
             // in 20 seconds while h1 settled after one navigation. The current
             // request still fails, but the retry the page is about to make
             // succeeds instead of looping forever.
-            if outbound_is_http2
+            let message = if outbound_is_http2
                 && looks_like_origin_http2_refusal(&error)
                 && tls_outbound::note_origin_http2_rejected(&host)
             {
@@ -2911,7 +2996,38 @@ async fn forward_mitm_https(
                     routine_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 format!("转发目标请求失败: {error}")
+            };
+            if !routine_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                capture_sink(CapturedRequestInput {
+                    id: Some(request_id.clone()),
+                    session_id: session_id.clone(),
+                    source: source.clone(),
+                    source_instance_id: Some(format!("proxy:{}", peer.ip())),
+                    timestamp: None,
+                    method: method.clone(),
+                    scheme: Some(scheme.clone()),
+                    host: host.clone(),
+                    port: Some(port as i64),
+                    path: path.clone(),
+                    query: query.clone(),
+                    status: 502,
+                    resource_type: "fetch".to_string(),
+                    size_bytes: 0,
+                    duration_ms: start.elapsed().as_millis() as i64,
+                    protocol: http_protocol.clone(),
+                    tls_version: Some(tls_version.clone()),
+                    tls_fingerprint: Some(tls_fingerprint.clone()),
+                    risk_level: "warning".to_string(),
+                    request_headers: request_headers.clone(),
+                    response_headers: Vec::new(),
+                    request_body: None,
+                    response_body: Some(message.clone()),
+                    response_body_metadata: None,
+                    crypto_snippets: None,
+                    hook: None,
+                });
             }
+            message
         })?;
         // h2 multiplexes, so the guard goes as soon as the headers are in hand:
         // holding it through whole-body buffering for rewrite rules and through
@@ -4874,7 +4990,6 @@ async fn forward_http(
         .map(RuntimeMirrorRoute::connection_target)
         .unwrap_or((&host, port));
     reject_proxy_loop(connection_host, connection_port)?;
-    let stream = connect_destination(&upstream, connection_host, connection_port).await?;
     let (tls_identity_host, tls_identity_port) = active_mirror_route
         .map(RuntimeMirrorRoute::identity_target)
         .unwrap_or((&host, port));
@@ -4885,6 +5000,8 @@ async fn forward_http(
             if websocket {
                 // Upgrade needs a raw TLS stream; wreq cannot terminate
                 // Connection: Upgrade. Prefer MITM tunnel's dedicated path.
+                let stream =
+                    connect_destination(&upstream, connection_host, connection_port).await?;
                 let profile = tls_outbound::global_profile();
                 let verified =
                     connect_verified_tls_measured(stream, tls_identity_host, profile, true).await?;
@@ -4892,7 +5009,7 @@ async fn forward_http(
                     .await?
             } else {
                 // Explicit / replay HTTPS must match MITM Chrome JA4.
-                drop(stream);
+                // Do not pre-dial: wreq opens the only origin TCP.
                 let _ = force_http11;
                 let client = crate::impersonate_egress::build_client_for_route(
                     &upstream,
@@ -4911,6 +5028,7 @@ async fn forward_http(
         }
         #[cfg(not(feature = "impersonate-boring"))]
         {
+            let stream = connect_destination(&upstream, connection_host, connection_port).await?;
             let profile = tls_outbound::global_profile();
             let verified =
                 connect_verified_tls_measured(stream, tls_identity_host, profile, force_http11)
@@ -4924,6 +5042,7 @@ async fn forward_http(
             .await?
         }
     } else {
+        let stream = connect_destination(&upstream, connection_host, connection_port).await?;
         let (http1_sender, connection) =
             hyper::client::conn::http1::handshake::<_, TapBody<ProxyBody>>(TokioIo::new(stream))
                 .await
@@ -8940,6 +9059,480 @@ mod tests {
     fn blocks_self_proxy_loop() {
         assert!(reject_proxy_loop("127.0.0.1", 8888).is_err());
         assert!(reject_proxy_loop("127.0.0.1", 7890).is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_loop_is_rejected_before_the_tunnel_is_accepted() {
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-connect-loop".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(b"CONNECT 127.0.0.1:8888 HTTP/1.1\r\nHost: 127.0.0.1:8888\r\n\r\n")
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 502"),
+            "CONNECT loop must fail before 200: {response}"
+        );
+        handle.stop().await;
+    }
+
+    #[tokio::test]
+    async fn unrecognized_tls_dials_once_and_forwards_the_original_bytes() {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = {
+            let accepted = accepted.clone();
+            let received = received.clone();
+            tokio::spawn(async move {
+                let (mut stream, _) = target.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut bytes = Vec::new();
+                let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes)).await;
+                *received.lock().unwrap() = bytes;
+            })
+        };
+
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-unrecognized-tls".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {target_address} HTTP/1.1\r\nHost: {target_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        // Handshake record type 23 is not ClientHello — the tunnel path must
+        // still open exactly one origin TCP and forward the original bytes.
+        let unrecognized = [23_u8, 3, 3, 0, 4, b't', b'e', b's', b't'];
+        client.write_all(&unrecognized).await.unwrap();
+        client.shutdown().await.unwrap();
+        target_task.await.unwrap();
+        handle.stop().await;
+
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(&*received.lock().unwrap(), &unrecognized);
+    }
+
+    #[tokio::test]
+    async fn bypass_connect_failure_is_reported_after_local_accept() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_address = dead.local_addr().unwrap();
+        drop(dead);
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let settings = crate::tls_interception::normalize_tls_interception_settings(
+            crate::tls_interception::TlsInterceptionSettings {
+                mode: crate::tls_interception::TlsInterceptionMode::BypassSelected,
+                bypass: vec!["127.0.0.1".to_string()],
+                show_bypassed_connections: true,
+            },
+        )
+        .unwrap();
+        let mut rule_engine =
+            RuleEngine::request_only(Arc::new(|_| Ok(RuntimeRuleControl::default())));
+        rule_engine.tls_interception = Arc::new(move |host, sni| Ok(settings.decision(host, sni)));
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-delayed-dial-fail".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            capture_sink,
+            Some(rule_engine),
+            Arc::new(|_| {}),
+            error_sink,
+        )
+        .await
+        .unwrap();
+
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {dead_address} HTTP/1.1\r\nHost: {dead_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "local CONNECT accept must not wait on origin dial: {response}"
+        );
+        client
+            .write_all(&test_client_hello_wire("api.pinned.test"))
+            .await
+            .unwrap();
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut Vec::new())).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.stop().await;
+
+        let captured = captured.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|request| request.method == "CONNECT" && request.status == 502),
+            "origin dial failure after CONNECT 200 must be captured: {captured:?}"
+        );
+        assert!(
+            errors
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|error| error.contains("出站连接失败") || error.contains("连接")),
+            "browser-facing error must surface: {:?}",
+            errors.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn bypass_tls_dials_once_and_forwards_the_original_client_hello() {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let expected = test_client_hello_wire("api.pinned.test");
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = {
+            let accepted = accepted.clone();
+            let received = received.clone();
+            let expected_len = expected.len();
+            tokio::spawn(async move {
+                let (mut stream, _) = target.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut bytes = vec![0_u8; expected_len];
+                stream.read_exact(&mut bytes).await.unwrap();
+                *received.lock().unwrap() = bytes;
+            })
+        };
+        let settings = crate::tls_interception::normalize_tls_interception_settings(
+            crate::tls_interception::TlsInterceptionSettings {
+                mode: crate::tls_interception::TlsInterceptionMode::BypassSelected,
+                bypass: vec!["127.0.0.1".to_string()],
+                show_bypassed_connections: true,
+            },
+        )
+        .unwrap();
+        let mut rule_engine =
+            RuleEngine::request_only(Arc::new(|_| Ok(RuntimeRuleControl::default())));
+        rule_engine.tls_interception = Arc::new(move |host, sni| Ok(settings.decision(host, sni)));
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-bypass-one-tcp".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            Arc::new(|_| {}),
+            Some(rule_engine),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {target_address} HTTP/1.1\r\nHost: {target_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        client.write_all(&expected).await.unwrap();
+        client.shutdown().await.unwrap();
+        target_task.await.unwrap();
+        handle.stop().await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(&*received.lock().unwrap(), &expected);
+    }
+
+    #[tokio::test]
+    async fn mitm_dead_origin_is_captured_as_502_after_local_connect_ok() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_address = dead.local_addr().unwrap();
+        drop(dead);
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let ca = test_certificate_authority();
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-mitm-dead-origin".to_string(),
+            direct_upstream(),
+            ca.clone(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+        let mut tunnel = TcpStream::connect(handle.local_addr()).await.unwrap();
+        tunnel
+            .write_all(
+                format!("CONNECT {dead_address} HTTP/1.1\r\nHost: {dead_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut tunnel).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "local CONNECT accept must not wait on origin dial: {response}"
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.certificate_der()).unwrap();
+        let tls = timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ))
+            .connect(
+                ServerName::try_from(dead_address.ip().to_string()).unwrap(),
+                tunnel,
+            ),
+        )
+        .await;
+        match tls {
+            Ok(Ok(mut stream)) => {
+                let _ = stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut Vec::new())).await;
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.stop().await;
+        let captured = captured.lock().unwrap();
+        assert!(
+            captured.iter().any(|request| request.status == 502),
+            "MITM dead origin after CONNECT 200 must leave a 502: {captured:?}"
+        );
+        assert!(
+            errors
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|error| error.contains("连接")
+                    || error.contains("转发")
+                    || error.contains("上游")),
+            "MITM origin failure must surface: {:?}",
+            errors.lock().unwrap()
+        );
+    }
+
+    #[cfg(feature = "impersonate-boring")]
+    async fn counting_https_origin(
+        host: &str,
+        ca: &CertificateAuthority,
+    ) -> (
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_config = ca.server_config(host).unwrap();
+        let accepted_for_server = accepted.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(_) => break,
+                };
+                accepted_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let server_config = server_config.clone();
+                tokio::spawn(async move {
+                    let tls = match TlsAcceptor::from(server_config).accept(stream).await {
+                        Ok(tls) => tls,
+                        Err(_) => return,
+                    };
+                    let service = service_fn(|request: Request<Incoming>| async move {
+                        let empty = request.method() == Method::POST
+                            && request.uri().path() == "/empty"
+                            && request
+                                .headers()
+                                .get(CONTENT_LENGTH)
+                                .and_then(|value| value.to_str().ok())
+                                == Some("0");
+                        let body = if empty { "empty-ok" } else { "one" };
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "text/plain")
+                                .header(CONTENT_LENGTH, body.len().to_string())
+                                .body(Full::new(Bytes::from_static(if empty {
+                                    b"empty-ok"
+                                } else {
+                                    b"one"
+                                })))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls), service)
+                        .await;
+                });
+            }
+        });
+        (port, accepted, server)
+    }
+
+    #[cfg(feature = "impersonate-boring")]
+    #[tokio::test]
+    async fn mitm_wreq_opens_one_target_tcp() {
+        let ca = test_certificate_authority();
+        let _roots = crate::impersonate_egress::install_test_root_certificate_der(
+            ca.certificate_der().as_ref().to_vec(),
+        );
+        let host = "localhost";
+        let (port, accepted, server) = counting_https_origin(host, &ca).await;
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-one-tcp-mitm".to_string(),
+            direct_upstream(),
+            ca.clone(),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        let client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        let mut tunnel = BoxedIo(Box::new(client));
+        tunnel
+            .write_all(
+                format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut tunnel).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.certificate_der()).unwrap();
+        let mut tls = TlsConnector::from(Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ))
+        .connect(ServerName::try_from(host.to_string()).unwrap(), tunnel)
+        .await
+        .expect("MITM client TLS");
+        tls.write_all(
+            format!("GET /one HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut raw = Vec::new();
+        timeout(Duration::from_secs(10), tls.read_to_end(&mut raw))
+            .await
+            .expect("origin response timeout")
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("one"), "{text}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.stop().await;
+        server.abort();
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "MITM+wreq must open exactly one origin TCP"
+        );
+    }
+
+    #[cfg(feature = "impersonate-boring")]
+    #[tokio::test]
+    async fn explicit_https_wreq_opens_one_target_tcp() {
+        let ca = test_certificate_authority();
+        let _roots = crate::impersonate_egress::install_test_root_certificate_der(
+            ca.certificate_der().as_ref().to_vec(),
+        );
+        let host = "localhost";
+        let (port, accepted, server) = counting_https_origin(host, &ca).await;
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-one-tcp-explicit".to_string(),
+            direct_upstream(),
+            ca,
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST https://{host}:{port}/empty HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        timeout(Duration::from_secs(10), client.read_to_end(&mut raw))
+            .await
+            .expect("explicit response timeout")
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("empty-ok"), "{text}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.stop().await;
+        server.abort();
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "explicit HTTPS+wreq must open exactly one origin TCP"
+        );
     }
 
     #[test]
