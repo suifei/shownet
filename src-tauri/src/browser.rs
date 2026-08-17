@@ -1035,7 +1035,7 @@ mod tests {
 
         let data_dir =
             std::env::temp_dir().join(format!("shownet-browser-launch-{}", std::process::id()));
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind a local language observer");
         let observer_address = listener.local_addr().expect("read observer address");
@@ -1128,7 +1128,7 @@ mod tests {
             .navigate(&format!("http://{observer_address}/language"))
             .await
             .expect("navigate to the language observer");
-        let observed_accept_language = timeout(Duration::from_secs(5), observer)
+        let observed_accept_language = tokio::time::timeout(Duration::from_secs(5), observer)
             .await
             .expect("Chrome reached the language observer")
             .expect("language observer completed");
