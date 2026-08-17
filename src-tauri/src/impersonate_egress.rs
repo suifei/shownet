@@ -396,9 +396,15 @@ mod tests {
             .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
             .collect();
-        assert_eq!(cookies.len(), 1, "wreq.header replaces; only one Cookie may remain");
+        assert_eq!(
+            cookies.len(),
+            1,
+            "wreq.header replaces; only one Cookie may remain"
+        );
         assert_eq!(cookies[0].1, b"_os=a; session=secret; s6=z");
-        assert!(folded.iter().any(|(name, value)| name == "accept" && value == b"*/*"));
+        assert!(folded
+            .iter()
+            .any(|(name, value)| name == "accept" && value == b"*/*"));
     }
 
     #[test]
