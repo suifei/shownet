@@ -17,7 +17,7 @@
   <img src="docs/assets/readme/hero-workspace.jpg" alt="本地工作台上的会话分析" width="920" />
 </p>
 
-当前发布版：[v0.4.28](https://github.com/suifei/shownet/releases/tag/v0.4.28)。更细的能力边界见 [功能全景](docs/feature-map.md)。
+当前发布版：[v0.4.29](https://github.com/suifei/shownet/releases/tag/v0.4.29)。更细的能力边界见 [功能全景](docs/feature-map.md)。
 
 ## 它解决什么
 
