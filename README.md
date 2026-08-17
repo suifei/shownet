@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/hero-workspace.jpg" alt="本地工作台上的会话分析" width="920" />
+  <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet 实时流量" width="920" />
 </p>
 
 当前发布版：[v0.4.29](https://github.com/suifei/shownet/releases/tag/v0.4.29)。更细的能力边界见 [功能全景](docs/feature-map.md)。
@@ -42,7 +42,7 @@
 
 **ShowNet 怎么收：** 默认不注入页面 Hook；Cookie 碎屑会合后再发给源站；正式包装了与 Chrome 对齐的出站。指纹面板只在**测到当次连接**时才说匹配，不会把预置目标当成证据。
 
-<img src="docs/assets/readme/scenario-login-split.jpg" alt="同一会话在系统浏览器成功、在抓包链路断开" width="920" />
+<img src="docs/assets/readme/ui-browser.jpg" alt="内嵌浏览器，默认不注入页面 Hook" width="920" />
 
 ### 2. 某某 App：电脑抓得到元数据，手机 HTTPS 全是乱码或空白
 
@@ -52,7 +52,7 @@
 
 **ShowNet 怎么收：** 每份安装自带独立 Root CA，私钥加密存在本地库。本机一键写入系统信任库；手机扫码页同时给证书和 Wi‑Fi 代理参数。Android 可从电脑推用户证书，**无需 Root**。证书锁定的 App 只采元数据，不会伪造成功解密。
 
-<img src="docs/assets/readme/scenario-device-ca.jpg" alt="手机与电脑通过本地证书连在同一条抓包链路上" width="920" />
+<img src="docs/assets/readme/ui-settings.jpg" alt="本机 Root CA 一键安装与解密策略" width="920" />
 
 ### 3. 某某接口：请求体看懂了，签名永远对不上
 
@@ -62,7 +62,7 @@
 
 **ShowNet 怎么收：** 需要时再打开 JS Hook，把加解密调用和代理请求按时间对齐。AI 分析只读当前会话，报告必须链回 `#序号` 请求。算法重放只写入**用抓包真值跑通**的步骤；识别到但没复现的只列名。
 
-<img src="docs/assets/readme/scenario-signature.jpg" alt="签名链路里的密钥与摘要节点" width="920" />
+<img src="docs/assets/readme/ui-analysis-graph.jpg" alt="真实分析报告：Phase、Graph 与 Agent 轨迹" width="920" />
 
 ### 4. 某某后台：抓了一下午，还要手写一套客户端
 
@@ -72,7 +72,7 @@
 
 **ShowNet 怎么收：** 把样本收成端点，抓到的凭据变成构造函数参数，而不是写死的密钥。能推出登录链路就生成 `authenticate_*()`。缺口进 `GAPS.md`。Request Lab 还可直接生成 Python / JS / Go / cURL。
 
-<img src="docs/assets/readme/scenario-to-code.jpg" alt="会话证据整理成可调用的客户端草稿" width="920" />
+<img src="docs/assets/readme/ui-lab.jpg" alt="请求实验室：从抓包构建、重放与生成代码" width="920" />
 
 ## 十分钟上手
 
@@ -82,7 +82,7 @@
 
 打开应用 → **内嵌浏览器** → **开始抓包** → 访问目标页。请求进当前会话，列表立刻可点。默认不装页面 Hook，登录和支付走 Chrome 原生 API。
 
-<img src="docs/assets/tutorial/07-browser-capturing.png" alt="内嵌浏览器开始抓包" width="920" />
+<img src="docs/assets/readme/ui-browser.jpg" alt="内嵌浏览器开始抓包" width="920" />
 
 ### 2. 要解密 App / 系统 HTTPS 时，再安装 CA
 
@@ -91,6 +91,20 @@
 ### 3. 用 AI 把会话说清楚
 
 选自动 / API / 安全 / 性能 / JS 加密等模式。Agent 只读本会话。失败时会展示模型返回的错误码（而不是只显示 502），也可以改上次提示词重试或换本地模型。
+
+<p align="center">
+  <img src="docs/assets/readme/ui-analysis-start.jpg" alt="选择分析模式并开始" width="920" />
+</p>
+
+下面 7 帧是真实软件里「选模式 → 出报告 → Graph / Skill / 控制台 / 实验室 / 流量」走一遍（循环播放）：
+
+<p align="center">
+  <img src="docs/assets/readme/ui-analysis-flow.webp" alt="从分析到报告的七帧界面" width="920" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/readme/ui-analysis-report.jpg" alt="已完成的 API 逆向报告" width="920" />
+</p>
 
 ### 4. 从报告导出算法重放或客户端代码
 
@@ -165,7 +179,7 @@ xattr -dr com.apple.quarantine /Applications/ShowNet.app
   <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-B站横版.mp4">
-        <img src="docs/assets/tutorial/04-ai-report.png" alt="横版教程预览" width="100%" />
+        <img src="docs/assets/readme/ui-analysis-report.jpg" alt="横版教程预览" width="100%" />
       </a>
       <br />
       <strong>横版教程</strong><br />
@@ -174,7 +188,7 @@ xattr -dr com.apple.quarantine /Applications/ShowNet.app
     </td>
     <td width="50%" valign="top">
       <a href="docs/assets/tutorial/ShowNet-真实操作新手教程-小红书竖版.mp4">
-        <img src="docs/assets/tutorial/06-agent-workflow.png" alt="竖版教程预览" width="100%" />
+        <img src="docs/assets/readme/ui-advanced.jpg" alt="竖版教程预览" width="100%" />
       </a>
       <br />
       <strong>竖版教程</strong><br />
