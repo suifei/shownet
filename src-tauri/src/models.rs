@@ -1248,8 +1248,12 @@ pub struct StoredCertificateAuthority {
     pub created_at: i64,
 }
 
-/// Token window assumed for a provider that has never been configured.
-pub const DEFAULT_AI_CONTEXT_TOKENS: u32 = 200_000;
+/// Conservative default: about 100 KiB of prompt at two budget-bytes per token.
+/// Large enough to iterate; small enough for common local and hosted windows.
+pub const DEFAULT_AI_CONTEXT_TOKENS: u32 = 51_200;
+/// Previous product default. Existing installs that never customized the field
+/// still store this value and would keep overflowing short model windows.
+pub const LEGACY_DEFAULT_AI_CONTEXT_TOKENS: u32 = 200_000;
 /// Smallest window the analysis prompt builder can still work with.
 pub const MIN_AI_CONTEXT_TOKENS: u32 = 1_024;
 /// Ceiling that keeps a mistyped value from turning into an unbounded prompt.
@@ -1279,6 +1283,16 @@ impl Default for AiProviderSettings {
 
 fn default_context_tokens() -> u32 {
     DEFAULT_AI_CONTEXT_TOKENS
+}
+
+/// Map the never-customized legacy 200k default onto the 100 KiB budget.
+pub fn normalize_ai_context_tokens(tokens: u32) -> u32 {
+    let tokens = if tokens == LEGACY_DEFAULT_AI_CONTEXT_TOKENS {
+        DEFAULT_AI_CONTEXT_TOKENS
+    } else {
+        tokens
+    };
+    tokens.clamp(MIN_AI_CONTEXT_TOKENS, MAX_AI_CONTEXT_TOKENS)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1394,6 +1408,16 @@ pub struct StartAnalysisInput {
     pub manual_request_ids: Vec<String>,
     #[serde(default)]
     pub include_annotations: bool,
+    /// Full last-run prompt, edited by the user before retry.
+    #[serde(default)]
+    pub prompt_override: Option<String>,
+    /// Per-run provider/model so a refused remote model can continue locally.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

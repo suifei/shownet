@@ -271,12 +271,28 @@ where
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("内置 Agent 运行失败");
+                if crate::ai_error::extract_ai_provider_error(message).is_some() {
+                    return Err(crate::ai_error::format_ai_failure(None, message));
+                }
+                let serialized = value.to_string();
+                if crate::ai_error::extract_from_value(&value)
+                    .is_some_and(|error| error.is_terminal())
+                {
+                    return Err(crate::ai_error::format_ai_failure(None, &serialized));
+                }
                 return Err(format!("内置 Agent 运行失败: {}", truncate(message, 1_200)));
             }
             "max_turns_reached" => {
                 return Err(TURN_LIMIT_ERROR.to_string());
             }
-            _ => {}
+            other => {
+                if let Some(error) = crate::ai_error::extract_from_value(&value) {
+                    if error.is_terminal() {
+                        return Err(crate::ai_error::format_extracted(None, &error));
+                    }
+                }
+                let _ = other;
+            }
         }
     }
     let status = child
@@ -554,6 +570,13 @@ fn set_private_dir(path: &Path) -> Result<(), String> {
 }
 
 fn with_stderr(message: String, stderr: &str) -> String {
+    if crate::ai_error::extract_ai_provider_error(&message).is_some_and(|error| error.is_terminal())
+    {
+        return crate::ai_error::format_ai_failure(None, &message);
+    }
+    if crate::ai_error::extract_ai_provider_error(stderr).is_some_and(|error| error.is_terminal()) {
+        return crate::ai_error::format_ai_failure(None, stderr);
+    }
     if stderr.trim().is_empty() {
         message
     } else {

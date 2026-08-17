@@ -2094,7 +2094,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 <label className="context-tokens-field">
                   <span>上下文上限</span>
                   <input type="number" min={MIN_AI_CONTEXT_TOKENS} max={MAX_AI_CONTEXT_TOKENS} step="1024" value={contextTokens} onChange={(event) => setContextTokens(Math.trunc(Number(event.target.value)) || 0)} onBlur={() => setContextTokens((current) => clampContextTokens(current))} />
-                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(promptBudgetBytes(contextTokens))}</small>
+                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(promptBudgetBytes(contextTokens))}。默认约 100 KiB；旧版 200K 会改到 51.2K。知道模型窗口时可提高。</small>
                 </label>
               </div>
               <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? "保存中" : "保存设置"}</button>

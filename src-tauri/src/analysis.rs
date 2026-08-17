@@ -28,16 +28,16 @@ const MAX_ANALYSIS_REQUESTS: usize = 120;
 /// This is a budget divisor, not a claim that a token *is* two bytes. Packet JSON
 /// is dense ASCII, where a token averages nearer four bytes, so spending two
 /// leaves roughly half the window for everything the payload does not cover: the
-/// system prompt, the request index (`MAX_REQUEST_INDEX_BYTES`) and the
-/// tool-call transcript. UTF-8 Chinese bodies pack fewer bytes per token, which
-/// only widens that margin.
+/// system prompt, the request index and the tool-call transcript. Those two
+/// auxiliaries scale with the prompt budget so a 100 KiB default cannot be
+/// blown by a pair of fixed 96 KiB dumps. UTF-8 Chinese bodies pack fewer
+/// bytes per token, which only widens that margin.
 const PROMPT_BYTES_PER_TOKEN: usize = 2;
 const MIN_PROMPT_BYTES: usize = 32 * 1024;
 const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024;
-const MAX_ERROR_BYTES: usize = 1_200;
-const MAX_REQUEST_INDEX_BYTES: usize = 96 * 1024;
-const MAX_TOOL_RESULT_BYTES: usize = 96 * 1024;
+const MIN_AUXILIARY_BYTES: usize = 8 * 1024;
+const MAX_AUXILIARY_BYTES: usize = 96 * 1024;
 /// Fallback only when settings are unavailable; prefer `AiAnalysisSettings.max_agent_turns`.
 const DEFAULT_AGENT_TOOL_ROUNDS: usize = 8;
 const MAX_MODELS_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -108,7 +108,8 @@ pub async fn start_analysis(
 ) -> Result<AnalysisReport, String> {
     let analysis_started_at = Instant::now();
     validate_mode(&input.mode)?;
-    let settings = state.storage.effective_ai_provider_settings()?;
+    let settings =
+        apply_analysis_runtime_overrides(state.storage.effective_ai_provider_settings()?, &input)?;
     let analysis_settings = state.storage.get_ai_analysis_settings()?;
     validate_credentials(&settings)?;
     let upstream = state.storage.effective_upstream_proxy()?;
@@ -384,7 +385,14 @@ async fn run_analysis(
     } else {
         None
     };
-    let native_runtime_prompt = messages_to_runtime_prompt(&messages)?;
+    let mut native_runtime_prompt = messages_to_runtime_prompt(&messages)?;
+    if let Some(override_prompt) = resolve_prompt_override(input.prompt_override.as_deref()) {
+        native_runtime_prompt = override_prompt.to_string();
+        messages = override_analysis_messages(override_prompt);
+    }
+    state
+        .storage
+        .save_analysis_prompt(&report.id, &native_runtime_prompt)?;
     let agent_runtime_settings = state.storage.get_agent_runtime_settings()?;
     let native_log_id = state.storage.begin_ai_request_log(
         &report.id,
@@ -1114,7 +1122,7 @@ async fn execute_graph_skill_nodes(
                         truncate_utf8(
                             &serde_json::to_string_pretty(&artifact)
                                 .map_err(|error| error.to_string())?,
-                            MAX_TOOL_RESULT_BYTES,
+                            auxiliary_byte_budget(settings.context_tokens),
                         )
                     )
                 }));
@@ -1609,7 +1617,10 @@ async fn collect_graph_node_evidence(
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": name,
-                        "content": truncate_utf8(&content, MAX_TOOL_RESULT_BYTES),
+                        "content": truncate_utf8(
+                            &content,
+                            auxiliary_byte_budget(settings.context_tokens),
+                        ),
                     }));
                 }
                 Err(error) => {
@@ -1866,6 +1877,10 @@ fn prompt_byte_budget(context_tokens: u32) -> usize {
         .clamp(MIN_PROMPT_BYTES, MAX_PROMPT_BYTES)
 }
 
+fn auxiliary_byte_budget(context_tokens: u32) -> usize {
+    (prompt_byte_budget(context_tokens) / 4).clamp(MIN_AUXILIARY_BYTES, MAX_AUXILIARY_BYTES)
+}
+
 fn analysis_messages(
     session_id: &str,
     mode: &str,
@@ -1919,7 +1934,11 @@ fn analysis_messages(
         used += encoded.len();
         payload.push(value);
     }
-    let request_index = build_request_index(all_requests, &hooks_by_request);
+    let request_index = build_request_index(
+        all_requests,
+        &hooks_by_request,
+        auxiliary_byte_budget(context_tokens),
+    );
     let tool_names = if plan.tool_names.is_empty() {
         "无".to_string()
     } else {
@@ -2020,6 +2039,7 @@ fn messages_to_runtime_prompt(messages: &[Value]) -> Result<String, String> {
 fn build_request_index(
     requests: &[RequestRecord],
     hooks_by_request: &HashMap<&str, Vec<&BrowserHookEvent>>,
+    max_bytes: usize,
 ) -> String {
     let mut index = String::new();
     for request in requests {
@@ -2069,7 +2089,7 @@ fn build_request_index(
             request.crypto_snippet_count,
             body_capture,
         );
-        if !index.is_empty() && index.len() + line.len() > MAX_REQUEST_INDEX_BYTES {
+        if !index.is_empty() && index.len() + line.len() > max_bytes {
             index.push_str("[REQUEST INDEX TRUNCATED]\n");
             break;
         }
@@ -2308,7 +2328,14 @@ async fn collect_agent_evidence(
     } else {
         max_agent_turns as usize
     };
-    prefetch_dynamic_protection_evidence(app, state, report, messages, definitions)?;
+    prefetch_dynamic_protection_evidence(
+        app,
+        state,
+        report,
+        messages,
+        definitions,
+        auxiliary_byte_budget(settings.context_tokens),
+    )?;
     let tools = agent_tools::openai_tool_values(definitions);
     for round in 0..max_rounds {
         let message = chat_completion_with_tools_once(client, settings, messages, &tools).await?;
@@ -2402,7 +2429,10 @@ async fn collect_agent_evidence(
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": name,
-                "content": truncate_utf8(&content, MAX_TOOL_RESULT_BYTES),
+                "content": truncate_utf8(
+                    &content,
+                    auxiliary_byte_budget(settings.context_tokens),
+                ),
             }));
         }
         if round + 1 == max_rounds {
@@ -2428,6 +2458,7 @@ fn prefetch_dynamic_protection_evidence(
     report: &AnalysisReport,
     messages: &mut Vec<Value>,
     definitions: &[ToolDefinition],
+    tool_result_bytes: usize,
 ) -> Result<(), String> {
     let tool_name = "shownet_analyze_dynamic_protection";
     if !definitions
@@ -2478,7 +2509,7 @@ fn prefetch_dynamic_protection_evidence(
         "role": "user",
         "content": format!(
             "ShowNet 已自动执行 `{tool_name}`，以下是动态防护聚合证据。最终报告必须优先使用其中的 providerCandidates、orderedProtectionChain、scriptStaticEvidence、hookRuntimeEvidence 和 evidenceDiscipline，并保持已确认/合理推断/未捕获分区：\n\n```json\n{}\n```",
-            truncate_utf8(&content, MAX_TOOL_RESULT_BYTES)
+            truncate_utf8(&content, tool_result_bytes)
         )
     }));
 
@@ -2540,7 +2571,7 @@ fn prefetch_dynamic_protection_evidence(
             "role": "user",
             "content": format!(
                 "ShowNet 已自动执行 `{extra}`。{hint}\n\n```json\n{}\n```",
-                truncate_utf8(&extra_content, MAX_TOOL_RESULT_BYTES)
+                truncate_utf8(&extra_content, tool_result_bytes)
             )
         }));
     }
@@ -2575,11 +2606,10 @@ async fn chat_completion_with_tools_once(
         .json::<Value>()
         .await
         .map_err(|error| format!("AI 工具调用响应不是有效 JSON: {error}"))?;
-    if let Some(error) = value.get("error") {
-        return Err(format!(
-            "AI 工具调用返回错误: {}",
-            truncate_utf8(&error.to_string(), MAX_ERROR_BYTES)
-        ));
+    if let Some(error) = crate::ai_error::extract_from_value(&value) {
+        if error.is_terminal() {
+            return Err(crate::ai_error::format_extracted(None, &error));
+        }
     }
     value
         .pointer("/choices/0/message")
@@ -2597,6 +2627,11 @@ pub(crate) async fn chat_completion_once(
         .json::<Value>()
         .await
         .map_err(|error| format!("AI 响应不是有效 JSON: {error}"))?;
+    if let Some(error) = crate::ai_error::extract_from_value(&value) {
+        if error.is_terminal() {
+            return Err(crate::ai_error::format_extracted(None, &error));
+        }
+    }
     content_from_response(&value).ok_or_else(|| "AI 响应缺少正文".to_string())
 }
 
@@ -2627,11 +2662,10 @@ where
                     on_delta(&delta)?;
                 }
             }
-            if let Some(error) = value.get("error") {
-                return Err(format!(
-                    "AI 服务返回错误: {}",
-                    truncate_utf8(&error.to_string(), MAX_ERROR_BYTES)
-                ));
+            if let Some(error) = crate::ai_error::extract_from_value(&value) {
+                if error.is_terminal() {
+                    return Err(crate::ai_error::format_extracted(None, &error));
+                }
             }
         }
     }
@@ -2733,10 +2767,12 @@ where
         if status.is_success() {
             return Ok(response);
         }
+        let retry_after = parse_retry_after(&response);
+        let body = response.text().await.unwrap_or_default();
+        let provider_error = crate::ai_error::extract_ai_provider_error(&body);
         let exhausted = attempt + 1 >= MAX_AI_ATTEMPTS;
-        if exhausted || !is_retryable_ai_status(status) {
+        if exhausted || !crate::ai_error::is_retryable_ai_failure(status, provider_error.as_ref()) {
             let retried = attempt;
-            let body = response.text().await.unwrap_or_default();
             let message = ai_http_error(status, &body);
             if status == StatusCode::TOO_MANY_REQUESTS && retried > 0 {
                 return Err(format!(
@@ -2745,7 +2781,7 @@ where
             }
             return Err(message);
         }
-        let delay = ai_retry_delay(attempt, parse_retry_after(&response));
+        let delay = ai_retry_delay(attempt, retry_after);
         attempt += 1;
         tokio::time::sleep(delay).await;
     }
@@ -2786,21 +2822,7 @@ fn chat_request_body(
 }
 
 fn ai_http_error(status: StatusCode, body: &str) -> String {
-    let detail = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .or_else(|| value.get("message"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| truncate_utf8(body, MAX_ERROR_BYTES));
-    if detail.trim().is_empty() {
-        format!("AI 服务返回 HTTP {status}")
-    } else {
-        format!("AI 服务返回 HTTP {status}: {detail}")
-    }
+    crate::ai_error::format_ai_failure(Some(status), body)
 }
 
 fn content_from_response(value: &Value) -> Option<String> {
@@ -2941,6 +2963,64 @@ fn validate_mode(mode: &str) -> Result<(), String> {
     } else {
         Err(format!("不支持的分析模式: {mode}"))
     }
+}
+
+const LOCAL_AI_BASE_URL: &str = "http://127.0.0.1:11434/v1";
+
+fn resolve_prompt_override(prompt_override: Option<&str>) -> Option<&str> {
+    prompt_override
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+}
+
+fn override_analysis_messages(prompt: &str) -> Vec<Value> {
+    vec![
+        json!({
+            "role": "system",
+            "content": "你是 ShowNet 内置分析 Agent。按用户给出的任务与证据完成专业、紧凑的中文 Markdown 报告。只依据证据作答，不能确认的内容写明证据不足。"
+        }),
+        json!({
+            "role": "user",
+            "content": prompt
+        }),
+    ]
+}
+
+fn apply_analysis_runtime_overrides(
+    mut settings: EffectiveAiProviderSettings,
+    input: &StartAnalysisInput,
+) -> Result<EffectiveAiProviderSettings, String> {
+    if let Some(provider) = input
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !matches!(provider, "claudegpt" | "compatible" | "local") {
+            return Err(format!("不支持的 AI 提供方: {provider}"));
+        }
+        settings.provider = provider.to_string();
+        if provider == "local" && input.base_url.as_deref().is_none_or(str::is_empty) {
+            settings.base_url = LOCAL_AI_BASE_URL.to_string();
+        }
+    }
+    if let Some(model) = input
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        settings.model = model.to_string();
+    }
+    if let Some(base_url) = input
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        settings.base_url = base_url.to_string();
+    }
+    Ok(settings)
 }
 
 fn validate_credentials(settings: &EffectiveAiProviderSettings) -> Result<(), String> {
@@ -3239,6 +3319,43 @@ mod tests {
     }
 
     #[test]
+    fn does_not_retry_a_502_that_wraps_an_invalid_request() {
+        let body = r#"{
+            "response": {
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "Your input exceeds the context window of this model.",
+                    "type": "invalid_request_error"
+                },
+                "model": "gpt-5.5",
+                "status": "failed"
+            },
+            "type": "response.failed"
+        }"#;
+        let error = crate::ai_error::extract_ai_provider_error(body).unwrap();
+        assert!(!crate::ai_error::is_retryable_ai_failure(
+            StatusCode::BAD_GATEWAY,
+            Some(&error)
+        ));
+        let formatted = crate::ai_error::format_ai_failure(Some(StatusCode::BAD_GATEWAY), body);
+        assert!(formatted.contains("错误码：context_length_exceeded"));
+        assert!(formatted.contains("类型：invalid_request_error"));
+    }
+
+    #[test]
+    fn scales_auxiliary_caps_with_the_prompt_budget() {
+        assert_eq!(
+            auxiliary_byte_budget(DEFAULT_AI_CONTEXT_TOKENS),
+            prompt_byte_budget(DEFAULT_AI_CONTEXT_TOKENS) / 4
+        );
+        assert!(
+            auxiliary_byte_budget(1_000_000) > auxiliary_byte_budget(DEFAULT_AI_CONTEXT_TOKENS)
+        );
+        assert_eq!(auxiliary_byte_budget(0), MIN_AUXILIARY_BYTES);
+        assert_eq!(auxiliary_byte_budget(u32::MAX), MAX_AUXILIARY_BYTES);
+    }
+
+    #[test]
     fn backs_off_further_on_each_attempt_but_stays_bounded() {
         let delay = |attempt| ai_retry_delay(attempt, None);
         assert!(delay(0) >= AI_RETRY_BASE_DELAY);
@@ -3496,6 +3613,48 @@ mod tests {
 
         settings.allow_mcp_tools = false;
         assert!(built_in_analysis_tool_definitions(&settings, &tool_names).is_empty());
+    }
+
+    #[test]
+    fn prompt_override_replaces_the_built_runtime_prompt() {
+        assert_eq!(
+            resolve_prompt_override(Some("  缩短后的任务  ")),
+            Some("缩短后的任务")
+        );
+        assert_eq!(resolve_prompt_override(Some("   ")), None);
+        assert_eq!(resolve_prompt_override(None), None);
+        let messages = override_analysis_messages("# 用户改过的提示词");
+        assert_eq!(messages[1]["content"], "# 用户改过的提示词");
+    }
+
+    #[test]
+    fn analysis_runtime_override_can_continue_on_local() {
+        let base = EffectiveAiProviderSettings {
+            provider: "claudegpt".to_string(),
+            base_url: "https://claudegpt.org/v1".to_string(),
+            model: "gpt-5.5".to_string(),
+            context_tokens: DEFAULT_AI_CONTEXT_TOKENS,
+            api_key: Some("remote-key".to_string()),
+        };
+        let switched = apply_analysis_runtime_overrides(
+            base,
+            &StartAnalysisInput {
+                session_id: "session".to_string(),
+                mode: "security".to_string(),
+                include_static: false,
+                manual_request_ids: Vec::new(),
+                include_annotations: false,
+                prompt_override: Some("缩短证据".to_string()),
+                provider: Some("local".to_string()),
+                model: Some("llama3.1".to_string()),
+                base_url: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(switched.provider, "local");
+        assert_eq!(switched.model, "llama3.1");
+        assert_eq!(switched.base_url, LOCAL_AI_BASE_URL);
+        validate_credentials(&switched).unwrap();
     }
 
     #[test]

@@ -8,7 +8,9 @@
  * the product does not honour.
  */
 
-export const DEFAULT_AI_CONTEXT_TOKENS = 200_000;
+/** Mirrors `DEFAULT_AI_CONTEXT_TOKENS` — about 100 KiB of prompt budget. */
+export const DEFAULT_AI_CONTEXT_TOKENS = 51_200;
+export const LEGACY_DEFAULT_AI_CONTEXT_TOKENS = 200_000;
 export const MIN_AI_CONTEXT_TOKENS = 1_024;
 export const MAX_AI_CONTEXT_TOKENS = 2_000_000;
 
@@ -18,7 +20,11 @@ const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 
 export function clampContextTokens(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_AI_CONTEXT_TOKENS;
-  return Math.min(MAX_AI_CONTEXT_TOKENS, Math.max(MIN_AI_CONTEXT_TOKENS, Math.trunc(value)));
+  const truncated = Math.trunc(value);
+  const remapped = truncated === LEGACY_DEFAULT_AI_CONTEXT_TOKENS
+    ? DEFAULT_AI_CONTEXT_TOKENS
+    : truncated;
+  return Math.min(MAX_AI_CONTEXT_TOKENS, Math.max(MIN_AI_CONTEXT_TOKENS, remapped));
 }
 
 /** Mirrors `prompt_byte_budget` in src-tauri/src/analysis.rs. */
