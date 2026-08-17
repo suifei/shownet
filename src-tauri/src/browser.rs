@@ -99,15 +99,6 @@ fn normalize_browser_language(language: Option<&str>) -> Result<Option<String>, 
     Ok(Some(normalized))
 }
 
-fn accept_language_for(language: &str) -> String {
-    let base = language.split('-').next().unwrap_or(language);
-    if base.eq_ignore_ascii_case(language) {
-        language.to_string()
-    } else {
-        format!("{language},{base};q=0.9")
-    }
-}
-
 // Chrome's profile preference stores an ordered language list, not an HTTP
 // Accept-Language value. Chrome adds q-values when it builds the request header;
 // persisting them here produces malformed values such as `zh;q=0.9;q=0.9`.
@@ -288,10 +279,6 @@ impl ProxyBrowserHandle {
             running: true,
             honest_user_agent,
             browser_language: browser_language.clone().unwrap_or_default(),
-            accept_language: browser_language
-                .as_deref()
-                .map(accept_language_for)
-                .unwrap_or_default(),
             debug_port,
             target_id: target.id,
             web_socket_debugger_url: target.web_socket_debugger_url.clone(),
@@ -775,10 +762,10 @@ pub(crate) fn chrome_executable() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_language_for, browser_user_agent_major, chrome_command, chrome_executable,
-        chrome_major_version, frozen_user_agent, normalize_browser_language,
-        prepare_browser_profile, profile_accept_languages_for, DISABLED_FEATURES, LAB_SCRIPT,
-        SCREEN_HEIGHT, SCREEN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
+        browser_user_agent_major, chrome_command, chrome_executable, chrome_major_version,
+        frozen_user_agent, normalize_browser_language, prepare_browser_profile,
+        profile_accept_languages_for, DISABLED_FEATURES, LAB_SCRIPT, SCREEN_HEIGHT, SCREEN_WIDTH,
+        WINDOW_HEIGHT, WINDOW_WIDTH,
     };
     use crate::tls_clienthello_catalog::get_preset;
     use std::path::Path;
@@ -891,7 +878,6 @@ mod tests {
             Some("th-TH".to_string())
         );
         assert_eq!(normalize_browser_language(None).unwrap(), None);
-        assert_eq!(accept_language_for("th-TH"), "th-TH,th;q=0.9");
         assert_eq!(profile_accept_languages_for("th-TH"), "th-TH,th");
         assert!(normalize_browser_language(Some("zh_CN")).is_err());
         assert!(normalize_browser_language(Some("-en-US")).is_err());
@@ -1045,8 +1031,42 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a locally installed Chrome; run via npm run test:browser-launch"]
     async fn a_real_embedded_browser_stays_headless_and_applies_its_language() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let data_dir =
             std::env::temp_dir().join(format!("shownet-browser-launch-{}", std::process::id()));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a local language observer");
+        let observer_address = listener.local_addr().expect("read observer address");
+        let observer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Chrome request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read Chrome request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "Chrome request headers are unexpectedly large"
+                );
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .expect("write observer response");
+            String::from_utf8_lossy(&request)
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("accept-language")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("Chrome sent Accept-Language")
+        });
         eprintln!(
             "launching isolated Chrome from {}",
             chrome_executable().unwrap().display()
@@ -1056,6 +1076,16 @@ mod tests {
             .expect("launch an isolated headless Chrome");
         eprintln!("Chrome launched; reading page identity");
         let status = browser.status();
+        browser
+            .bus()
+            .call(
+                "Emulation.setUserAgentOverride",
+                serde_json::json!({
+                    "userAgent": status.honest_user_agent.clone(),
+                }),
+            )
+            .await
+            .expect("apply the production UA override without a language override");
         // `about:blank` has an opaque origin and Chrome reports notifications
         // as denied there. Real sites such as bot.sannysoft.com have a normal
         // secure/local origin, so read the permission on the same kind of page
@@ -1081,7 +1111,6 @@ mod tests {
 
         assert!(status.running);
         assert_eq!(status.browser_language, "th-TH");
-        assert_eq!(status.accept_language, "th-TH,th;q=0.9");
         assert_eq!(identity["language"], "th-TH");
         assert!(identity["languages"]
             .as_array()
@@ -1093,6 +1122,17 @@ mod tests {
             .unwrap_or_default()
             .contains("Headless"));
         assert_eq!(identity["notifications"], "prompt");
+
+        browser
+            .bus()
+            .navigate(&format!("http://{observer_address}/language"))
+            .await
+            .expect("navigate to the language observer");
+        let observed_accept_language = tokio::time::timeout(Duration::from_secs(5), observer)
+            .await
+            .expect("Chrome reached the language observer")
+            .expect("language observer completed");
+        assert_eq!(observed_accept_language, "th-TH,th;q=0.9");
 
         eprintln!("page identity verified; stopping Chrome");
         browser.stop().await;

@@ -27,12 +27,6 @@ export function initialBrowserLanguage(storage: Pick<Storage, "getItem"> | undef
     ?? "en-US";
 }
 
-export function browserAcceptLanguage(language: string): string {
-  const normalized = normalizeBrowserLanguage(language) ?? "en-US";
-  const base = normalized.split("-")[0];
-  return base === normalized ? normalized : `${normalized},${base};q=0.9`;
-}
-
 export interface BrowserChallengeSnapshot {
   url: string;
   title: string;
