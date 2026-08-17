@@ -307,7 +307,16 @@ fn assert_empty_post_on_origin(seen: &[OriginSeen]) {
 fn assert_sqlite_pair(details: &[RequestRecord], method: &str, path: &str, response_body: &str) {
     let record = details
         .iter()
-        .find(|item| item.method == method && item.path == path)
+        .rev()
+        .find(|item| {
+            item.method == method && item.path == path && item.response_body_metadata.complete
+        })
+        .or_else(|| {
+            details
+                .iter()
+                .rev()
+                .find(|item| item.method == method && item.path == path)
+        })
         .unwrap_or_else(|| panic!("sqlite missing {method} {path}: {details:?}"));
     assert!(record.hook.is_none(), "default hook must stay off");
     let metadata = &record.response_body_metadata;
@@ -410,7 +419,23 @@ async fn capture_integrity_mitm_wreq_sqlite_roundtrip() {
         );
     }
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let ready = storage
+            .list_requests(&session.id, None, None)
+            .unwrap()
+            .into_iter()
+            .any(|item| {
+                item.method == "POST"
+                    && item.path == "/empty"
+                    && item.response_body_metadata.complete
+                    && item.response_body == "empty-ok"
+            });
+        if ready || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     handle.stop().await;
     server.abort();
     drop(storage);
