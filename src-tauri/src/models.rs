@@ -86,8 +86,6 @@ pub struct ProxyBrowserStatus {
     pub honest_user_agent: String,
     /// Canonical BCP 47 language applied at launch. Empty means Chrome default.
     pub browser_language: String,
-    /// Weighted value shared by Chrome preferences and CDP's network override.
-    pub accept_language: String,
     /// The ClientHello preset selected when this Chrome process was launched.
     pub browser_preset_id: String,
     pub browser_preset_family: String,

@@ -1287,7 +1287,6 @@ export interface ProxyBrowserStatus {
   labUrl: string;
   honestUserAgent: string;
   browserLanguage: string;
-  acceptLanguage: string;
   browserPresetId: string;
   browserPresetFamily: string;
   browserPresetMajorVersion: number;
