@@ -31,8 +31,8 @@ use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::ext::Protocol;
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST,
-    TRANSFER_ENCODING, USER_AGENT,
+    HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE,
+    HOST, TRANSFER_ENCODING, USER_AGENT,
 };
 use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
@@ -2805,6 +2805,10 @@ async fn forward_mitm_https(
         if parts.version == Version::HTTP_2 {
             strip_http2_forbidden_headers(&mut parts.headers);
         }
+        // HTTP/2 cookie crumbs must be one Cookie header before wreq rebuilds
+        // the origin request. wreq's RequestBuilder::header replaces same-name
+        // values, so iterating crumbs would keep only the last cookie.
+        collapse_cookie_headers(&mut parts.headers);
         request_headers = request_headers_for_capture(
             &parts.headers,
             active_mirror_route,
@@ -4965,6 +4969,7 @@ async fn forward_http(
     if parts.version == Version::HTTP_2 {
         strip_http2_forbidden_headers(&mut parts.headers);
     }
+    collapse_cookie_headers(&mut parts.headers);
     request_headers = request_headers_for_capture(
         &parts.headers,
         active_mirror_route,
@@ -5616,6 +5621,32 @@ fn looks_like_origin_http2_refusal(error: &BoxError) -> bool {
         && !error.is_closed()
         && !error.is_incomplete_message()
         && !error.is_timeout()
+}
+
+/// Join HTTP/2 cookie crumbs into a single `Cookie` header.
+///
+/// Chrome and Edge emit one `Cookie` field per cookie on h2. The MITM captures
+/// every crumb, but wreq's `RequestBuilder::header` replaces an existing name,
+/// so a reconstructed origin request would keep only the last crumb and drop
+/// the session cookies a login just issued. Combining is what RFC 6265 user
+/// agents send on HTTP/1.1 and is legal on HTTP/2.
+pub(crate) fn collapse_cookie_headers(headers: &mut HeaderMap) {
+    let crumbs: Vec<HeaderValue> = headers.get_all(COOKIE).iter().cloned().collect();
+    if crumbs.len() <= 1 {
+        return;
+    }
+    let mut joined = Vec::new();
+    for (index, crumb) in crumbs.iter().enumerate() {
+        if index > 0 {
+            joined.extend_from_slice(b"; ");
+        }
+        joined.extend_from_slice(crumb.as_bytes());
+    }
+    let Ok(value) = HeaderValue::from_bytes(&joined) else {
+        return;
+    };
+    headers.remove(COOKIE);
+    headers.insert(COOKIE, value);
 }
 
 fn strip_http2_forbidden_headers(headers: &mut HeaderMap) {
@@ -6757,20 +6788,26 @@ mod tests {
         // Counting occurrences would count this test's own string literal, so
         // each call site is located by the code that follows it instead.
         let source = production_source();
-        let guarded = source
-            .matches(
-                "strip_http2_forbidden_headers(&mut parts.headers);\n        }\n        request_headers = request_headers_for_capture(",
-            )
+        let stripped = source
+            .matches("strip_http2_forbidden_headers(&mut parts.headers);")
             .count();
-        let guarded_outer = source
+        let collapsed_before_capture = source
             .matches(
-                "strip_http2_forbidden_headers(&mut parts.headers);\n    }\n    request_headers = request_headers_for_capture(",
+                "collapse_cookie_headers(&mut parts.headers);\n        request_headers = request_headers_for_capture(",
             )
-            .count();
+            .count()
+            + source
+                .matches(
+                    "collapse_cookie_headers(&mut parts.headers);\n    request_headers = request_headers_for_capture(",
+                )
+                .count();
+        assert!(
+            stripped >= 2,
+            "both the MITM and explicit-proxy forward paths must strip h2 hop-by-hop headers"
+        );
         assert_eq!(
-            guarded + guarded_outer,
-            2,
-            "both the MITM and explicit-proxy forward paths must strip before capture"
+            collapsed_before_capture, 2,
+            "both forward paths must join cookie crumbs before capture"
         );
     }
 
@@ -7298,10 +7335,37 @@ mod tests {
         let strip = source
             .find("if parts.version == Version::HTTP_2 {\n            strip_http2_forbidden_headers(&mut parts.headers);")
             .expect("outbound h2 requests must be stripped");
+        let cookies = source
+            .find("collapse_cookie_headers(&mut parts.headers);")
+            .expect("cookie crumbs must be joined before wreq rebuilds the request");
         let capture = source
             .find("request_headers = request_headers_for_capture(")
             .expect("request capture site");
-        assert!(strip < capture, "stripping must precede capture");
+        assert!(strip < cookies, "stripping must precede cookie collapse");
+        assert!(cookies < capture, "cookie collapse must precede capture");
+    }
+
+    #[test]
+    fn cookie_crumbs_join_into_one_header() {
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, HeaderValue::from_static("_os=a"));
+        headers.append(COOKIE, HeaderValue::from_static("session=keep"));
+        headers.append(COOKIE, HeaderValue::from_static("s6=z"));
+        collapse_cookie_headers(&mut headers);
+        let all: Vec<_> = headers.get_all(COOKIE).iter().collect();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].to_str().unwrap(), "_os=a; session=keep; s6=z");
+    }
+
+    #[test]
+    fn a_single_cookie_header_is_left_alone() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static("session=only"));
+        collapse_cookie_headers(&mut headers);
+        assert_eq!(
+            headers.get(COOKIE).and_then(|value| value.to_str().ok()),
+            Some("session=only")
+        );
     }
 
     #[test]
