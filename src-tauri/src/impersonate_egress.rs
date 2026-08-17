@@ -255,6 +255,32 @@ fn is_client_owned(name: &str) -> bool {
     )
 }
 
+/// wreq `RequestBuilder::header` replaces same-name values. HTTP/2 clients
+/// send one Cookie header per cookie; iterating those crumbs would keep only
+/// the last one. Join them the way RFC 6265 user agents send a single Cookie.
+fn collapse_cookie_header_pairs(headers: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
+    let mut cookies = Vec::new();
+    let mut folded = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("cookie") {
+            cookies.push(value.as_slice());
+        } else {
+            folded.push((name.clone(), value.clone()));
+        }
+    }
+    if !cookies.is_empty() {
+        let mut joined = Vec::new();
+        for (index, crumb) in cookies.iter().enumerate() {
+            if index > 0 {
+                joined.extend_from_slice(b"; ");
+            }
+            joined.extend_from_slice(crumb);
+        }
+        folded.push(("cookie".to_string(), joined));
+    }
+    folded
+}
+
 /// Sends one reconstructed origin request through wreq and returns its streaming response.
 pub async fn send(
     client: &ImpersonateClient,
@@ -280,7 +306,7 @@ pub async fn send(
         &client.direct
     };
     let mut request = target.request(method, uri);
-    for (name, value) in headers {
+    for (name, value) in collapse_cookie_header_pairs(headers) {
         if is_client_owned(&name.to_ascii_lowercase()) {
             continue;
         }
@@ -356,6 +382,41 @@ mod tests {
         assert!(!is_client_owned("content-length"));
         assert!(is_client_owned("transfer-encoding"));
         assert!(is_client_owned("connection"));
+    }
+
+    #[test]
+    fn cookie_crumbs_become_one_header_before_wreq_replaces_same_name() {
+        let folded = collapse_cookie_header_pairs(&[
+            ("cookie".into(), b"_os=a".to_vec()),
+            ("accept".into(), b"*/*".to_vec()),
+            ("cookie".into(), b"session=secret".to_vec()),
+            ("cookie".into(), b"s6=z".to_vec()),
+        ]);
+        let cookies: Vec<_> = folded
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+            .collect();
+        assert_eq!(
+            cookies.len(),
+            1,
+            "wreq.header replaces; only one Cookie may remain"
+        );
+        assert_eq!(cookies[0].1, b"_os=a; session=secret; s6=z");
+        assert!(folded
+            .iter()
+            .any(|(name, value)| name == "accept" && value == b"*/*"));
+    }
+
+    #[test]
+    fn origin_send_folds_cookie_crumbs_before_wreq_header() {
+        let source = include_str!("impersonate_egress.rs");
+        let fold = source
+            .find("for (name, value) in collapse_cookie_header_pairs(headers)")
+            .expect("send must fold crumbs before wreq.header replaces Cookie");
+        let set = source
+            .find("request = request.header(name.as_str(), value.as_slice());")
+            .expect("wreq.header site");
+        assert!(fold < set);
     }
 
     #[tokio::test]
