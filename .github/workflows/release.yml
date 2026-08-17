@@ -36,8 +36,8 @@ jobs:
         os: [macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -62,7 +62,7 @@ jobs:
       # both were being thrown away with the runner. The one Windows failure so
       # far had to be diagnosed from console text alone.
       - if: failure() && steps.browser-suite.conclusion == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-failure-${{ matrix.os }}
           path: test-results/
@@ -116,7 +116,7 @@ jobs:
           $digest = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           "$digest  shownet.exe`n" | Set-Content -Path "$binary.sha256" -Encoding ascii -NoNewline
       - name: Upload commit-matched quality binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shownet-quality-${{ matrix.os }}-${{ github.sha }}
           path: |
@@ -139,8 +139,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -261,7 +261,7 @@ jobs:
           printf '%s\n' "{\"mode\":\"$signature\",\"architecture\":\"arm64\",\"teamIdentifier\":\"${team:-not set}\",\"note\":\"Built without APPLE_* secrets; mode read from codesign\"}" \
             > src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
           cat src-tauri/target/aarch64-apple-darwin/release/bundle/release-verification-macos.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shownet-macos-aarch64
           path: |
@@ -290,8 +290,8 @@ jobs:
       SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
       SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ secrets.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -360,7 +360,7 @@ jobs:
             Copy-Item $path (Join-Path $staging $name)
           }
           Compress-Archive -Path "$staging/*" -DestinationPath "signing/unsigned.zip" -Force
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.mode.outputs.signed == 'true'
         id: unsigned
         with:
@@ -461,7 +461,7 @@ jobs:
           # v0.4.11 shipped a sidecar that answered "No such file or directory"
           # for the archive sitting right next to it.
           "$digest  $([IO.Path]::GetFileName($archive))`n" | Set-Content -Path "$archive.sha256" -Encoding ascii -NoNewline
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shownet-windows-x86_64
           path: |
@@ -483,10 +483,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: shownet-*
           path: release-assets
