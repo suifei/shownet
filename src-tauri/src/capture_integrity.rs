@@ -135,9 +135,10 @@ async fn start_integrity_origin(
                         });
                         let response = match (method.as_str(), path.as_str()) {
                             ("POST", "/empty") => Response::builder()
-                                .status(StatusCode::NO_CONTENT)
-                                .header(CONTENT_LENGTH, "0")
-                                .body(Full::new(Bytes::new()))
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "text/plain")
+                                .header(CONTENT_LENGTH, "8")
+                                .body(Full::new(Bytes::from_static(b"empty-ok")))
                                 .unwrap(),
                             ("GET", "/set-cookie") => Response::builder()
                                 .status(StatusCode::FOUND)
@@ -365,7 +366,7 @@ async fn capture_integrity_mitm_wreq_sqlite_roundtrip() {
         &format!("POST /empty HTTP/1.1\r\nHost: {INTEGRITY_HOST}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
     )
     .await;
-    assert!(empty.contains("204") || empty.contains("empty"), "{empty}");
+    assert!(empty.contains("empty-ok"), "{empty}");
 
     let redirect = rustls_mitm_exchange(
         proxy,
@@ -426,7 +427,7 @@ async fn capture_integrity_mitm_wreq_sqlite_roundtrip() {
     );
 
     let details = reopen_details(&db, &session.id);
-    assert_sqlite_pair(&details, "POST", "/empty", "");
+    assert_sqlite_pair(&details, "POST", "/empty", "empty-ok");
     assert_sqlite_pair(&details, "GET", "/echo-cookie", "cookie-ok");
     let set_cookie = details
         .iter()
@@ -550,7 +551,7 @@ async fn capture_integrity_chrome_mitm_wreq_records_empty_post() {
     );
 
     let details = reopen_details(&db, &session.id);
-    assert_sqlite_pair(&details, "POST", "/empty", "");
+    assert_sqlite_pair(&details, "POST", "/empty", "empty-ok");
     let stored = details
         .iter()
         .find(|item| item.method == "POST" && item.path == "/empty")
