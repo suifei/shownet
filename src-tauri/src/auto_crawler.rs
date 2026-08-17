@@ -3181,16 +3181,18 @@ print(json.dumps({{"seen": seen, "jar": session.cookies(), "tls": session.tls()}
         for _ in 0..10 {
             let js = client("javascript");
             let ts = client("typescript");
-            let differing: Vec<(&str, &str)> = js
+            let same_len = js.lines().count() == ts.lines().count();
+            let differing: Vec<(String, String)> = js
                 .lines()
                 .zip(ts.lines())
                 .filter(|(left, right)| left != right)
+                .map(|(left, right)| (left.to_string(), right.to_string()))
                 .collect();
-            if js.lines().count() == ts.lines().count() && differing.len() == 1 {
-                pair = Some((js, ts, differing));
+            let matched = same_len && differing.len() == 1;
+            pair = Some((js, ts, differing));
+            if matched {
                 break;
             }
-            pair = Some((js, ts, differing));
         }
         let (js, ts, differing) = pair.expect("generated clients");
         for source in [&js, &ts] {
