@@ -1851,37 +1851,32 @@ async fn handle_connect(
                 match connect_destination(&upstream, &upstream_host, upstream_port).await {
                     Ok(stream) => stream,
                     Err(error) => {
-                        if mirror_route.is_some() {
-                            queue_mirror_trace_or_report(
-                                &rule_engine,
-                                &mirror_route,
-                                &connect_request_id,
-                                "https-mitm",
-                                &error_sink,
-                            );
-                            let detail = format!(
-                                "{}；{error}",
-                                mirror_route_detail(
-                                    mirror_route.as_ref().expect("mirror route"),
-                                    false
-                                )
-                            );
-                            capture_connect_record(
-                                &capture_sink,
-                                &connect_request_id,
-                                &session_id,
-                                &source,
-                                peer,
-                                &host,
-                                port,
-                                start.elapsed().as_millis() as i64,
-                                request_headers,
-                                Some(fingerprint),
-                                format!("{inbound_tls} · 上游未连接"),
-                                Some(detail),
-                                502,
-                            );
-                        }
+                        queue_mirror_trace_or_report(
+                            &rule_engine,
+                            &mirror_route,
+                            &connect_request_id,
+                            "https-mitm",
+                            &error_sink,
+                        );
+                        let detail = mirror_route
+                            .as_ref()
+                            .map(|route| format!("{}；{error}", mirror_route_detail(route, false)))
+                            .unwrap_or_else(|| error.clone());
+                        capture_connect_record(
+                            &capture_sink,
+                            &connect_request_id,
+                            &session_id,
+                            &source,
+                            peer,
+                            &host,
+                            port,
+                            start.elapsed().as_millis() as i64,
+                            request_headers,
+                            Some(fingerprint),
+                            format!("{inbound_tls} · 上游未连接"),
+                            Some(detail),
+                            502,
+                        );
                         error_sink(error);
                         return;
                     }
@@ -1994,23 +1989,25 @@ async fn handle_connect(
             "https-mitm",
             &error_sink,
         );
-        let upstream_detail = mirror_route
-            .as_ref()
-            .map(|route| {
+        let upstream_detail = {
+            let origin_note = if cfg!(feature = "impersonate-boring") {
                 format!(
-                    "{}；上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
-                    mirror_route_detail(route, false),
+                    "上游 {outbound_tls} · ALPN={} · app={} · 本地 MITM 已建立，出站由首请求拨号",
                     negotiated_alpn.as_deref().unwrap_or("none"),
                     if origin_http2 { "h2" } else { "http/1.1" }
                 )
-            })
-            .unwrap_or_else(|| {
+            } else {
                 format!(
                     "上游 {outbound_tls} · ALPN={} · app={} · 证书校验通过",
                     negotiated_alpn.as_deref().unwrap_or("none"),
                     if origin_http2 { "h2" } else { "http/1.1" }
                 )
-            });
+            };
+            mirror_route
+                .as_ref()
+                .map(|route| format!("{}；{origin_note}", mirror_route_detail(route, false)))
+                .unwrap_or(origin_note)
+        };
         capture_connect_record(
             &capture_sink,
             &connect_request_id,
@@ -2983,7 +2980,7 @@ async fn forward_mitm_https(
             // in 20 seconds while h1 settled after one navigation. The current
             // request still fails, but the retry the page is about to make
             // succeeds instead of looping forever.
-            if outbound_is_http2
+            let message = if outbound_is_http2
                 && looks_like_origin_http2_refusal(&error)
                 && tls_outbound::note_origin_http2_rejected(&host)
             {
@@ -2995,7 +2992,38 @@ async fn forward_mitm_https(
                     routine_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 format!("转发目标请求失败: {error}")
+            };
+            if !routine_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                capture_sink(CapturedRequestInput {
+                    id: Some(request_id.clone()),
+                    session_id: session_id.clone(),
+                    source: source.clone(),
+                    source_instance_id: Some(format!("proxy:{}", peer.ip())),
+                    timestamp: None,
+                    method: method.clone(),
+                    scheme: Some(scheme.clone()),
+                    host: host.clone(),
+                    port: Some(port as i64),
+                    path: path.clone(),
+                    query: query.clone(),
+                    status: 502,
+                    resource_type: "fetch".to_string(),
+                    size_bytes: 0,
+                    duration_ms: start.elapsed().as_millis() as i64,
+                    protocol: http_protocol.clone(),
+                    tls_version: Some(tls_version.clone()),
+                    tls_fingerprint: Some(tls_fingerprint.clone()),
+                    risk_level: "warning".to_string(),
+                    request_headers: request_headers.clone(),
+                    response_headers: Vec::new(),
+                    request_body: None,
+                    response_body: Some(message.clone()),
+                    response_body_metadata: None,
+                    crypto_snippets: None,
+                    hook: None,
+                });
             }
+            message
         })?;
         // h2 multiplexes, so the guard goes as soon as the headers are in hand:
         // holding it through whole-body buffering for rewrite rules and through
@@ -9123,6 +9151,151 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("出站连接失败") || error.contains("连接")),
             "browser-facing error must surface: {:?}",
+            errors.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn bypass_tls_dials_once_and_forwards_the_original_client_hello() {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let expected = test_client_hello_wire("api.pinned.test");
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = {
+            let accepted = accepted.clone();
+            let received = received.clone();
+            let expected_len = expected.len();
+            tokio::spawn(async move {
+                let (mut stream, _) = target.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut bytes = vec![0_u8; expected_len];
+                stream.read_exact(&mut bytes).await.unwrap();
+                *received.lock().unwrap() = bytes;
+            })
+        };
+        let settings = crate::tls_interception::normalize_tls_interception_settings(
+            crate::tls_interception::TlsInterceptionSettings {
+                mode: crate::tls_interception::TlsInterceptionMode::BypassSelected,
+                bypass: vec!["127.0.0.1".to_string()],
+                show_bypassed_connections: true,
+            },
+        )
+        .unwrap();
+        let mut rule_engine =
+            RuleEngine::request_only(Arc::new(|_| Ok(RuntimeRuleControl::default())));
+        rule_engine.tls_interception = Arc::new(move |host, sni| Ok(settings.decision(host, sni)));
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-bypass-one-tcp".to_string(),
+            direct_upstream(),
+            test_certificate_authority(),
+            Arc::new(|_| {}),
+            Some(rule_engine),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {target_address} HTTP/1.1\r\nHost: {target_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut client).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        client.write_all(&expected).await.unwrap();
+        client.shutdown().await.unwrap();
+        target_task.await.unwrap();
+        handle.stop().await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(&*received.lock().unwrap(), &expected);
+    }
+
+    #[tokio::test]
+    async fn mitm_dead_origin_is_captured_as_502_after_local_connect_ok() {
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_address = dead.local_addr().unwrap();
+        drop(dead);
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let error_sink: ErrorSink = {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error))
+        };
+        let ca = test_certificate_authority();
+        let handle = ProxyHandle::start_with_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-mitm-dead-origin".to_string(),
+            direct_upstream(),
+            ca.clone(),
+            capture_sink,
+            error_sink,
+        )
+        .await
+        .unwrap();
+        let mut tunnel = TcpStream::connect(handle.local_addr()).await.unwrap();
+        tunnel
+            .write_all(
+                format!("CONNECT {dead_address} HTTP/1.1\r\nHost: {dead_address}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut tunnel).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "local CONNECT accept must not wait on origin dial: {response}"
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.certificate_der()).unwrap();
+        let tls = timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ))
+            .connect(
+                ServerName::try_from(dead_address.ip().to_string()).unwrap(),
+                tunnel,
+            ),
+        )
+        .await;
+        match tls {
+            Ok(Ok(mut stream)) => {
+                let _ = stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut Vec::new())).await;
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.stop().await;
+        let captured = captured.lock().unwrap();
+        assert!(
+            captured.iter().any(|request| request.status == 502),
+            "MITM dead origin after CONNECT 200 must leave a 502: {captured:?}"
+        );
+        assert!(
+            errors
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|error| error.contains("连接")
+                    || error.contains("转发")
+                    || error.contains("上游")),
+            "MITM origin failure must surface: {:?}",
             errors.lock().unwrap()
         );
     }
