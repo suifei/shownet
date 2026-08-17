@@ -11,19 +11,20 @@ use crate::mirror::validate_mirror_action;
 #[cfg(test)]
 use crate::models::ClientAccessMode;
 use crate::models::{
-    AgentRuntimeSettings, AgentRuntimeSettingsInput, AiAnalysisSettings, AiProviderSettings,
-    AiProviderSettingsInput, AnalysisActivity, AnalysisChatMessage, AnalysisReport,
-    BodyCaptureMetadata, BrowserHookEvent, BrowserHookInput, CaptureEvent, CaptureEventInput,
-    CaptureListenerSettings, CaptureRule, CaptureRuleInput, CaptureRuleRevision, CaptureRuleRun,
-    CapturedRequestInput, CollectionImportCommitInput, CollectionImportEnvironment,
-    CollectionImportEnvironmentVariable, CollectionImportItem, CollectionImportMetadata,
-    CollectionImportResult, CollectionSyncChange, CollectionSyncCommitInput, CollectionSyncPreview,
-    CollectionSyncResult, CollectionSyncSelection, CryptoCodeSnippet, DataStorageSettings,
-    DataStorageSettingsInput, EffectiveAiProviderSettings, EffectiveMcpClientSettings,
-    EffectiveMcpServerSettings, EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord,
-    EnvironmentVariable, EnvironmentVariableInput, FacetCount, FilterExpression, HookRecord,
-    McpClientSettings, McpClientSettingsInput, McpServerSettings, McpServerSettingsInput,
-    ReplayBatch, ReplayBatchInput, ReplayBatchItem, RequestAnnotation, RequestAnnotationInput,
+    normalize_ai_context_tokens, AgentRuntimeSettings, AgentRuntimeSettingsInput,
+    AiAnalysisSettings, AiProviderSettings, AiProviderSettingsInput, AnalysisActivity,
+    AnalysisChatMessage, AnalysisReport, BodyCaptureMetadata, BrowserHookEvent, BrowserHookInput,
+    CaptureEvent, CaptureEventInput, CaptureListenerSettings, CaptureRule, CaptureRuleInput,
+    CaptureRuleRevision, CaptureRuleRun, CapturedRequestInput, CollectionImportCommitInput,
+    CollectionImportEnvironment, CollectionImportEnvironmentVariable, CollectionImportItem,
+    CollectionImportMetadata, CollectionImportResult, CollectionSyncChange,
+    CollectionSyncCommitInput, CollectionSyncPreview, CollectionSyncResult,
+    CollectionSyncSelection, CryptoCodeSnippet, DataStorageSettings, DataStorageSettingsInput,
+    EffectiveAiProviderSettings, EffectiveMcpClientSettings, EffectiveMcpServerSettings,
+    EffectiveUpstreamProxy, EnvironmentInput, EnvironmentRecord, EnvironmentVariable,
+    EnvironmentVariableInput, FacetCount, FilterExpression, HookRecord, McpClientSettings,
+    McpClientSettingsInput, McpServerSettings, McpServerSettingsInput, ReplayBatch,
+    ReplayBatchInput, ReplayBatchItem, RequestAnnotation, RequestAnnotationInput,
     RequestAnnotationSummary, RequestCollection, RequestCollectionFolder,
     RequestCollectionFolderInput, RequestCollectionInput, RequestCollectionWorkspace, RequestDraft,
     RequestDraftBatchUpdateInput, RequestDraftInput, RequestDraftLocationInput, RequestFacets,
@@ -692,7 +693,7 @@ impl Storage {
             provider: stored.provider,
             base_url: stored.base_url,
             model: stored.model,
-            context_tokens: stored.context_tokens,
+            context_tokens: normalize_ai_context_tokens(stored.context_tokens),
             has_api_key: stored.encrypted_api_key.is_some(),
         })
     }
@@ -799,7 +800,7 @@ impl Storage {
             provider: input.provider,
             base_url: normalized_base_url,
             model: input.model.trim().to_string(),
-            context_tokens: input.context_tokens,
+            context_tokens: normalize_ai_context_tokens(input.context_tokens),
             encrypted_api_key,
         };
         let value = serde_json::to_string(&stored).map_err(|error| error.to_string())?;
@@ -839,7 +840,7 @@ impl Storage {
             provider: stored.provider,
             base_url: stored.base_url,
             model: stored.model,
-            context_tokens: stored.context_tokens,
+            context_tokens: normalize_ai_context_tokens(stored.context_tokens),
             api_key,
         })
     }
@@ -2497,6 +2498,32 @@ impl Storage {
             return Err("分析报告不存在".to_string());
         }
         self.get_analysis_report(analysis_id)
+    }
+
+    pub fn save_analysis_prompt(&self, analysis_id: &str, prompt: &str) -> Result<(), String> {
+        let changed = self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE analysis_reports SET prompt_text = ?1, updated_at = ?2 WHERE id = ?3",
+                params![prompt, now_ms(), analysis_id],
+            )
+        })?;
+        if changed == 0 {
+            return Err("分析报告不存在".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn get_analysis_prompt(&self, analysis_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT prompt_text FROM analysis_reports WHERE id = ?1",
+                    [analysis_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+        })
+        .map(|value| value.flatten().filter(|prompt| !prompt.is_empty()))
     }
 
     pub fn get_analysis_report(&self, analysis_id: &str) -> Result<AnalysisReport, String> {
@@ -6941,6 +6968,32 @@ fn apply_migrations(connection: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|error| format!("记录数据库迁移 v23 失败: {error}"))?;
+    let analysis_reports_have_prompt_text = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(analysis_reports)")
+            .map_err(|error| error.to_string())?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        columns.iter().any(|column| column == "prompt_text")
+    };
+    if !analysis_reports_have_prompt_text {
+        connection
+            .execute(
+                "ALTER TABLE analysis_reports ADD COLUMN prompt_text TEXT",
+                [],
+            )
+            .map_err(|error| format!("数据库迁移 v24 增加 prompt_text 失败: {error}"))?;
+    }
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+             VALUES (24, unixepoch('now') * 1000)",
+            [],
+        )
+        .map_err(|error| format!("记录数据库迁移 v24 失败: {error}"))?;
     Ok(())
 }
 
@@ -8034,6 +8087,7 @@ mod tests {
     use crate::http2_fingerprint::{Http2Fingerprint, Http2Setting};
     use crate::models::{
         BodyCaptureMetadata, CollectionImportItem, HeaderEntry, DEFAULT_AI_CONTEXT_TOKENS,
+        LEGACY_DEFAULT_AI_CONTEXT_TOKENS,
     };
     use crate::tls_fingerprint::{
         mitm_fingerprint, tunnel_fingerprint, ClientTlsFingerprint, OutboundTlsFingerprint,
@@ -9078,6 +9132,16 @@ mod tests {
         let report = storage
             .create_analysis_report(&session.id, "api", 1, "claudegpt", "gpt-5.6-sol")
             .unwrap();
+        storage
+            .save_analysis_prompt(
+                &report.id,
+                "# ShowNet 内置 Agent 分析任务\n\n缩短证据后重试",
+            )
+            .unwrap();
+        assert_eq!(
+            storage.get_analysis_prompt(&report.id).unwrap().as_deref(),
+            Some("# ShowNet 内置 Agent 分析任务\n\n缩短证据后重试")
+        );
         storage
             .update_analysis_selection(&report.id, std::slice::from_ref(&request.id))
             .unwrap();
@@ -10453,6 +10517,47 @@ mod tests {
         let settings = storage.get_ai_provider_settings().unwrap();
         assert_eq!(settings.model, "gpt-5.5");
         assert_eq!(settings.context_tokens, DEFAULT_AI_CONTEXT_TOKENS);
+    }
+
+    #[test]
+    fn remaps_the_legacy_200k_default_to_the_100kib_budget() {
+        let storage = storage();
+        let legacy = format!(
+            r#"{{"provider":"claudegpt","baseUrl":"https://claudegpt.org/v1","model":"gpt-5.5","contextTokens":{LEGACY_DEFAULT_AI_CONTEXT_TOKENS},"encryptedApiKey":null}}"#
+        );
+        storage
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO app_settings(key, value_json, updated_at) VALUES (?1, ?2, ?3)",
+                    params![AI_PROVIDER_KEY, legacy, now_ms()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            storage.get_ai_provider_settings().unwrap().context_tokens,
+            DEFAULT_AI_CONTEXT_TOKENS
+        );
+        assert_eq!(
+            storage
+                .effective_ai_provider_settings()
+                .unwrap()
+                .context_tokens,
+            DEFAULT_AI_CONTEXT_TOKENS
+        );
+
+        let saved = storage
+            .save_ai_provider_settings(AiProviderSettingsInput {
+                provider: "claudegpt".to_string(),
+                base_url: "https://claudegpt.org/v1".to_string(),
+                model: "gpt-5.5".to_string(),
+                context_tokens: LEGACY_DEFAULT_AI_CONTEXT_TOKENS,
+                api_key: None,
+                clear_api_key: false,
+            })
+            .unwrap();
+        assert_eq!(saved.context_tokens, DEFAULT_AI_CONTEXT_TOKENS);
     }
 
     #[test]

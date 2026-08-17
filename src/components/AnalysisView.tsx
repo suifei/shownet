@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clock3, Copy, FolderOpen, GitBranch, History, KeyRound, LoaderCircle, MessageSquareText, Package, Play, SearchCheck, Send, Settings2, ShieldCheck, Sparkles, Square, Zap } from "lucide-react";
+import { Activity, ArrowRight, Bot, Check, ChevronDown, Circle, CircleAlert, Clock3, Copy, FolderOpen, GitBranch, HardDrive, History, KeyRound, LoaderCircle, MessageSquareText, Package, Play, RefreshCw, SearchCheck, Send, Settings2, ShieldCheck, Sparkles, Square, Zap } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -13,6 +13,13 @@ import {
   type AgentActivityEntry,
 } from "../analysisStreamState";
 import { buildPreviewSkillPlan, builtInSkillPreview } from "../capabilities";
+import { parseAnalysisFailure } from "../analysisFailure";
+import {
+  analysisRetryInvokeInput,
+  continueOnLocalModel,
+  initialAnalysisRetryDraft,
+  type AnalysisRetryDraft,
+} from "../analysisRetry";
 import { pickReplayExportDirectory } from "../replayExport";
 import type { AiAnalysisSettings, AiProviderSettings, AlgorithmReplayExportResult, AnalysisActivity, AnalysisChatMessage, AnalysisGraphRun, AnalysisMode, AnalysisReport, AnalysisStatus, AnalysisStreamEvent, AutonomousAnalysisResult, EvaluationExportResult, RequestListItem, SdkExportResult, SkillPlan, SkillRunAudit } from "../types";
 
@@ -221,6 +228,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   const sdkExportRequestId = useRef(0);
   const [quickScanning, setQuickScanning] = useState(false);
   const [quickScan, setQuickScan] = useState<AutonomousAnalysisResult | null>(null);
+  const [retryOpen, setRetryOpen] = useState(false);
+  const [retryDraft, setRetryDraft] = useState<AnalysisRetryDraft>(() => initialAnalysisRetryDraft(fallbackAiSettings));
+  const [retryLoading, setRetryLoading] = useState(false);
   const quickScanRequestId = useRef(0);
   const reportEndRef = useRef<HTMLDivElement | null>(null);
   const activeAnalysisId = useRef("");
@@ -264,6 +274,8 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   const selectedRequestCount = report?.keyRequestCount || streamKeyCount || (
     scopeEstimate.requestCount
   );
+  const analysisFailure = useMemo(() => parseAnalysisFailure(error), [error]);
+  const analysisFailureMeta = [analysisFailure.code, analysisFailure.type, analysisFailure.model && `模型 ${analysisFailure.model}`, analysisFailure.event].filter(Boolean).join(" · ");
   const running = status === "filtering" || status === "analyzing";
   const requiresApiKey = aiSettings.provider !== "local" && !aiSettings.hasApiKey;
   const smartFilteringEnabled = analysisSettings.twoStageAnalysis && requests.length >= 20 && !manualScope;
@@ -281,7 +293,10 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
   useEffect(() => {
     if (!isTauri()) return;
     invoke<AiProviderSettings>("get_ai_provider_settings")
-      .then(setAiSettings)
+      .then((settings) => {
+        setAiSettings(settings);
+        setRetryDraft((current) => current.prompt ? current : initialAnalysisRetryDraft(settings));
+      })
       .catch(() => setAiSettings(fallbackAiSettings))
       .finally(() => setAiSettingsLoaded(true));
   }, []);
@@ -591,17 +606,32 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     }
   };
 
-  const startAnalysis = async (overrides?: { mode?: AnalysisMode; includeStatic?: boolean }) => {
+  const startAnalysis = async (overrides?: {
+    mode?: AnalysisMode;
+    includeStatic?: boolean;
+    retry?: AnalysisRetryDraft;
+  }) => {
     if (!sessionId || requests.length === 0 || running || analysisCommandPending.current || !streamListenerReady) return;
     const analysisMode = overrides?.mode ?? mode;
     const includeStaticResources = overrides?.includeStatic ?? includeStatic;
+    const retryInput = overrides?.retry
+      ? analysisRetryInvokeInput({
+        sessionId,
+        mode: analysisMode,
+        includeStatic: includeStaticResources,
+        manualRequestIds: manualScope ? manualRequests.map((request) => request.id) : [],
+        includeAnnotations,
+      }, overrides.retry)
+      : {};
     if (overrides?.mode) setMode(overrides.mode);
     if (overrides?.includeStatic !== undefined) setIncludeStatic(overrides.includeStatic);
+    setRetryOpen(false);
     if (!isTauri()) {
       dispatchStream({ type: "fail", message: "真实 AI 分析需要在 ShowNet 桌面应用中运行" });
       return;
     }
-    if (requiresApiKey) {
+    const retryUsesLocal = overrides?.retry?.provider === "local";
+    if (requiresApiKey && !retryUsesLocal) {
       dispatchStream({ type: "fail", message: "尚未配置 AI API Key。加入 QQ 群后可联系管理员申请一次性 5 美金免费额度。" });
       return;
     }
@@ -636,6 +666,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           includeStatic: includeStaticResources,
           manualRequestIds: manualScope ? manualRequests.map((request) => request.id) : [],
           includeAnnotations,
+          ...retryInput,
         },
       });
       if (
@@ -668,6 +699,29 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
         analysisCommandPending.current = false;
       }
     }
+  };
+
+  const openAnalysisRetry = async () => {
+    const draft = initialAnalysisRetryDraft(aiSettings, retryDraft.prompt);
+    setRetryDraft(draft);
+    setRetryOpen(true);
+    const analysisId = report?.id || activeAnalysisId.current;
+    if (!isTauri() || !analysisId) return;
+    setRetryLoading(true);
+    try {
+      const prompt = await invoke<string | null>("get_analysis_prompt", { analysisId });
+      if (prompt?.trim()) setRetryDraft((current) => ({ ...current, prompt }));
+    } catch (promptError) {
+      dispatchStream({ type: "notice", message: `读取上次提示词失败：${String(promptError)}` });
+    } finally {
+      setRetryLoading(false);
+    }
+  };
+
+  const submitAnalysisRetry = async (draft: AnalysisRetryDraft) => {
+    setRetryOpen(false);
+    setRetryDraft(draft);
+    await startAnalysis({ retry: draft });
   };
 
   const cancelAnalysis = async () => {
@@ -1018,9 +1072,86 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
             {agentActivities.length > 0 && <AgentActivityPanel activities={agentActivities} skillRuns={skillRuns} running={running} firstVisibleLatencyMs={firstVisibleLatencyMs} />}
             {status === "failed" && (
               <div className="analysis-error">
+                <div className="analysis-error__head">
                 <span><CircleAlert size={20} /></span>
-                <div><strong>{failureKind === "cancelled" ? "分析已停止" : "分析未完成"}</strong><p>{error}</p></div>
-                {(requiresApiKey || error.includes("API Key")) && <button onClick={onConfigureAi}><KeyRound size={14} />配置 AI</button>}
+                <div>
+                  <strong>{failureKind === "cancelled" ? "分析已停止" : analysisFailure.headline}</strong>
+                  {failureKind !== "cancelled" && analysisFailureMeta ? <p className="analysis-error__meta">{analysisFailureMeta}</p> : null}
+                  <p>{failureKind === "cancelled" ? error : analysisFailure.detail}</p>
+                </div>
+                <div className="analysis-error__actions">
+                  {(requiresApiKey || error.includes("API Key")) && <button type="button" onClick={onConfigureAi}><KeyRound size={14} />配置 AI</button>}
+                  {failureKind !== "cancelled" && (
+                    <button type="button" onClick={() => void openAnalysisRetry()}><RefreshCw size={14} />调整并重试</button>
+                  )}
+                </div>
+                </div>
+                {retryOpen && (
+                  <form
+                    className="analysis-retry"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void submitAnalysisRetry(retryDraft);
+                    }}
+                  >
+                    <label>
+                      <span>上次任务提示词</span>
+                      <textarea
+                        value={retryDraft.prompt}
+                        onChange={(event) => setRetryDraft((current) => ({ ...current, prompt: event.target.value }))}
+                        rows={10}
+                        placeholder={retryLoading ? "正在读取上次提示词…" : "可删减证据、改写任务要求后再重试"}
+                        disabled={retryLoading}
+                      />
+                    </label>
+                    <div className="analysis-retry__row">
+                      <label>
+                        <span>提供方</span>
+                        <select
+                          value={retryDraft.provider}
+                          onChange={(event) => {
+                            const provider = event.target.value as AnalysisRetryDraft["provider"];
+                            setRetryDraft((current) => provider === "local"
+                              ? continueOnLocalModel({ ...current, provider })
+                              : { ...current, provider });
+                          }}
+                        >
+                          <option value="claudegpt">ClaudeGPT</option>
+                          <option value="compatible">兼容接口</option>
+                          <option value="local">本地模型</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>模型</span>
+                        <input
+                          value={retryDraft.model}
+                          onChange={(event) => setRetryDraft((current) => ({ ...current, model: event.target.value }))}
+                          placeholder={retryDraft.provider === "local" ? "本地模型名" : "模型"}
+                        />
+                      </label>
+                    </div>
+                    {retryDraft.provider !== "claudegpt" && (
+                      <label>
+                        <span>接口地址</span>
+                        <input
+                          value={retryDraft.baseUrl}
+                          onChange={(event) => setRetryDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                          placeholder="http://127.0.0.1:11434/v1"
+                        />
+                      </label>
+                    )}
+                    <div className="analysis-retry__actions">
+                      <button type="submit" disabled={running || retryLoading}><RefreshCw size={14} />重试</button>
+                      <button
+                        type="button"
+                        disabled={running || retryLoading}
+                        onClick={() => void submitAnalysisRetry(continueOnLocalModel(retryDraft))}
+                      >
+                        <HardDrive size={14} />用本地模型继续
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             )}
             {content && (

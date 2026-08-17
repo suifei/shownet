@@ -1,5 +1,6 @@
 mod agent_runtime;
 mod agent_tools;
+mod ai_error;
 mod algorithm_ground_truth;
 mod algorithm_reconstruction;
 mod algorithm_replay;
@@ -2829,6 +2830,14 @@ async fn start_ai_analysis(
 }
 
 #[tauri::command]
+fn get_analysis_prompt(
+    analysis_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    state.storage.get_analysis_prompt(analysis_id.trim())
+}
+
+#[tauri::command]
 fn cancel_ai_analysis(analysis_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sender = state
         .analysis
@@ -4002,6 +4011,7 @@ pub fn run() {
             get_analysis_graph_run,
             is_ai_analysis_running,
             start_ai_analysis,
+            get_analysis_prompt,
             cancel_ai_analysis,
             followup_ai_analysis,
             list_websocket_frames,
