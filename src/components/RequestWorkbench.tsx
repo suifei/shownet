@@ -8,6 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../i18n.ts";
 import { BUILDABLE_METHODS } from "../httpMethods";
 import { ruleTraceResultLabel } from "../ruleTrace";
 import { SEND_SETTINGS } from "../sendSettings";
@@ -43,12 +44,12 @@ interface Props {
 }
 
 const tabs = [
-  { id: "lab" as const, label: "请求构建", icon: FlaskConical },
-  { id: "replay" as const, label: "请求重放", icon: ListRestart },
-  { id: "diff" as const, label: "请求对比", icon: GitCompareArrows },
-  { id: "collections" as const, label: "请求集合", icon: FolderTree },
-  { id: "environment" as const, label: "环境变量", icon: KeyRound },
-  { id: "rules" as const, label: "规则工作台", icon: SlidersHorizontal },
+  { id: "lab" as const, labelKey: "lab.build" as const, icon: FlaskConical },
+  { id: "replay" as const, labelKey: "lab.replay" as const, icon: ListRestart },
+  { id: "diff" as const, labelKey: "lab.compare" as const, icon: GitCompareArrows },
+  { id: "collections" as const, labelKey: "lab.collections" as const, icon: FolderTree },
+  { id: "environment" as const, labelKey: "lab.env" as const, icon: KeyRound },
+  { id: "rules" as const, labelKey: "lab.rules" as const, icon: SlidersHorizontal },
 ];
 
 const bodyTypes = ["none", "json", "text", "xml", "raw", "form-data", "urlencoded", "file"] as const;
@@ -96,24 +97,25 @@ export function RequestWorkbench({ sessionId, selected, breakpointCount, initial
 
   return <section className="request-workbench">
       <div className="request-workbench__layout">
-        <nav className="request-workbench__nav" aria-label="请求实验室工具">
+        <nav className="request-workbench__nav" aria-label={t("lab.tools")}>
           {tabs.map((tab) => {
             const Icon = tab.icon;
+            const label = t(tab.labelKey);
             const disabled = tab.id === "replay" && selected.length === 0 || tab.id === "diff" && selected.length !== 2;
-            const title = tab.id === "replay" && disabled ? "请先从流量页带入请求" : tab.id === "diff" && disabled ? "请从流量页带入两条请求" : tab.label;
+            const title = tab.id === "replay" && disabled ? t("lab.needReplay") : tab.id === "diff" && disabled ? t("lab.needDiff") : label;
             // The breakpoint queue lives inside 规则 and each task expires on a
             // timer, so its pending count has to be visible from any mode.
             const badge = tab.id === "rules" && breakpointCount > 0 ? breakpointCount : undefined;
-            return <button key={tab.id} className={mode === tab.id ? "is-active" : ""} disabled={disabled} aria-pressed={mode === tab.id} onClick={() => setMode(tab.id)} title={badge ? `${title} · ${badge} 条断点待处理` : title}><Icon size={15} /><span>{tab.label}</span>{badge !== undefined && <em className="request-workbench__nav-badge">{badge}</em>}</button>;
+            return <button key={tab.id} className={mode === tab.id ? "is-active" : ""} disabled={disabled} aria-pressed={mode === tab.id} onClick={() => setMode(tab.id)} title={badge ? t("lab.pendingBreakpoints", { title, count: badge }) : title}><Icon size={15} /><span>{label}</span>{badge !== undefined && <em className="request-workbench__nav-badge">{badge}</em>}</button>;
           })}
           <div className="request-workbench__nav-footer">
-            {selected.length > 0 && <span className="request-workbench__context">{selected.length} 条请求上下文</span>}
-            <button className="request-workbench__nav-back" onClick={onBack} title="返回流量" aria-label="返回流量"><ArrowLeft size={15} /></button>
+            {selected.length > 0 && <span className="request-workbench__context">{t("lab.nContext", { count: selected.length })}</span>}
+            <button className="request-workbench__nav-back" onClick={onBack} title={t("lab.backTraffic")} aria-label={t("lab.backTraffic")}><ArrowLeft size={15} /></button>
           </div>
         </nav>
         <div className={`request-workbench__content ${mode === "lab" ? "is-lab" : ""}`}>
           {error && <Notice>{error}</Notice>}
-          {loading && !["collections", "environment", "rules"].includes(mode) ? <div className="workbench-loading"><LoaderCircle className="spin" size={20} /><span>正在读取请求证据</span></div> : <>
+          {loading && !["collections", "environment", "rules"].includes(mode) ? <div className="workbench-loading"><LoaderCircle className="spin" size={20} /><span>{t("lab.readingEvidence")}</span></div> : <>
             {mode === "replay" && <ReplayPanel sessionId={sessionId} selected={selected} onOpenRequest={onOpenRequest} />}
             {mode === "diff" && <DiffPanel details={details} />}
             {mode === "lab" && <LabPanel sessionId={sessionId} selected={selected} details={details} autoCreateFromSelection={autoCreateFromSelection} initialDraftId={requestedDraftId} onSelectCapture={onBack} />}
@@ -466,39 +468,39 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
 
   if (creatingFromCapture) return <div className="lab-create-progress" role="status" aria-live="polite">
     <span className="lab-create-progress__icon"><LoaderCircle className="spin" size={21} /></span>
-    <span className="lab-create-progress__copy"><strong>正在创建可编辑请求</strong><code>{selected[0]?.method} {selected[0]?.host}{selected[0]?.path}</code></span>
+    <span className="lab-create-progress__copy"><strong>{t("lab.creating")}</strong><code>{selected[0]?.method} {selected[0]?.host}{selected[0]?.path}</code></span>
   </div>;
 
   if (!draft) return <div className="lab-start">
     <header className="lab-start__header">
-      <div><span className="section-kicker">REQUEST LAB</span><h2>新建请求</h2></div>
-      <button className="primary-button" onClick={createBlank}><Plus size={14} />空白请求</button>
+      <div><span className="section-kicker">REQUEST LAB</span><h2>{t("lab.newRequest")}</h2></div>
+      <button className="primary-button" onClick={createBlank}><Plus size={14} />{t("lab.blank")}</button>
     </header>
     <div className="lab-start__create-grid">
       <section className="lab-source-section">
-        <header><strong>抓包来源</strong><span>{selected.length === 1 ? "已选择 1 条" : "未选择"}</span></header>
+        <header><strong>{t("lab.captureSource")}</strong><span>{selected.length === 1 ? t("lab.selectedOne") : t("lab.noSelection")}</span></header>
         {selected.length === 1 ? <div className="lab-source-request">
           <span className={`method method-${selected[0].method.toLowerCase()}`}>{selected[0].method}</span>
           <div><strong>{selected[0].host}</strong><code>{selected[0].path}{selected[0].query ? `?${selected[0].query}` : ""}</code></div>
           <span className="lab-source-request__meta">{selected[0].status ?? selected[0].state}</span>
-          <button className="primary-button" onClick={() => void createFromRequest()}><Plus size={14} />创建草稿</button>
-        </div> : <button className="lab-source-request is-empty" onClick={onSelectCapture} title="返回流量选择一条请求">
+          <button className="primary-button" onClick={() => void createFromRequest()}><Plus size={14} />{t("lab.createDraft")}</button>
+        </div> : <button className="lab-source-request is-empty" onClick={onSelectCapture} title={t("lab.pickFromTraffic")}>
           <span className="lab-start-action-icon"><Activity size={16} /></span>
-          <span className="lab-source-request__copy"><strong>从抓包创建</strong><small>{selected.length > 1 ? `当前带入 ${selected.length} 条请求` : "未选择请求"}</small></span>
+          <span className="lab-source-request__copy"><strong>{t("lab.fromCapture")}</strong><small>{selected.length > 1 ? t("traffic.nRequests", { count: selected.length }) : t("lab.noSelection")}</small></span>
           <ChevronRight size={15} />
         </button>}
       </section>
       <section className="lab-curl-section">
-        <header><strong>导入 cURL</strong><Code2 size={15} /></header>
+        <header><strong>{t("lab.importCurl")}</strong><Code2 size={15} /></header>
         <div className="lab-curl-compose">
-          <textarea aria-label="粘贴 cURL 命令" value={curlInput} onChange={(event) => setCurlInput(event.target.value)} placeholder="curl https://api.example.com/..." />
-          <button className="secondary-button" onClick={importCurl} disabled={!curlInput.trim()}><Code2 size={14} />导入</button>
+          <textarea aria-label={t("lab.pasteCurl")} value={curlInput} onChange={(event) => setCurlInput(event.target.value)} placeholder="curl https://api.example.com/..." />
+          <button className="secondary-button" onClick={importCurl} disabled={!curlInput.trim()}><Code2 size={14} />{t("lab.import")}</button>
         </div>
         {message && <p className="lab-curl-message">{message}</p>}
       </section>
     </div>
     <section className="lab-recents">
-      <header><div><strong>最近草稿</strong><span>{drafts.length}</span></div><small>最近更新</small></header>
+      <header><div><strong>{t("lab.recentDrafts")}</strong><span>{drafts.length}</span></div><small>{t("lab.recentUpdated")}</small></header>
       {drafts.length > 0 ? <div className="lab-draft-list">{drafts.slice(0, 10).map((item) => {
         const target = draftTarget(item.url);
         return <button key={item.id} onClick={() => setDraft(item)} title={item.url}>
@@ -508,7 +510,7 @@ function LabPanel({ sessionId, selected, details, autoCreateFromSelection, initi
           <time>{formatDraftTime(item.updatedAt)}</time>
           <ChevronRight size={14} />
         </button>;
-      })}</div> : <div className="lab-recents__empty"><History size={17} /><span>暂无草稿</span></div>}
+      })}</div> : <div className="lab-recents__empty"><History size={17} /><span>{t("lab.noDrafts")}</span></div>}
     </section>
   </div>;
 

@@ -1,5 +1,7 @@
 import { X } from "lucide-react";
 
+import { t } from "../i18n.ts";
+
 interface ShortcutsSheetProps {
   onClose: () => void;
 }
@@ -17,39 +19,43 @@ interface ShortcutGroup {
  * appear anywhere in the UI. They were reachable only through `title` tooltips
  * or by accident.
  */
-const GROUPS: ShortcutGroup[] = [
-  {
-    title: "全局",
-    items: [
-      { keys: ["⌘", "K"], description: "打开命令面板，搜索任何功能" },
-      { keys: ["?"], description: "打开这份快捷键说明" },
-      { keys: ["Esc"], description: "依次关闭：详情 → 筛选 → 选择" },
-    ],
-  },
-  {
-    title: "流量列表",
-    items: [
-      { keys: ["↑", "↓"], description: "上下移动当前行", alt: true },
-      { keys: ["Enter"], description: "打开或关闭详情面板" },
-      { keys: ["⌘", "A"], description: "全选当前窗口的请求" },
-      { keys: ["⌘", "点击"], description: "加选或取消单条，不打开详情" },
-      { keys: ["Shift", "点击"], description: "连选一段范围" },
-      { keys: ["右键"], description: "打开请求操作菜单" },
-    ],
-  },
-  {
-    title: "列与排序",
-    note: "以下操作都在表头进行。",
-    items: [
-      { keys: ["点击"], description: "按该列排序，再点切换升降序或取消" },
-      { keys: ["Shift", "点击"], description: "追加为次级排序条件，序号显示优先级" },
-      { keys: ["拖动列名"], description: "调整列的先后顺序" },
-      { keys: ["拖动分隔线"], description: "调整列宽" },
-      { keys: ["双击分隔线"], description: "按内容自适应列宽" },
-      { keys: ["右键"], description: "配置显示哪些列" },
-    ],
-  },
-];
+function shortcutGroups(): ShortcutGroup[] {
+  const click = t("shortcuts.click");
+  const right = t("shortcuts.rightClick");
+  return [
+    {
+      title: t("shortcuts.global"),
+      items: [
+        { keys: ["⌘", "K"], description: t("shortcuts.openPalette") },
+        { keys: ["?"], description: t("shortcuts.openThis") },
+        { keys: ["Esc"], description: t("shortcuts.escape") },
+      ],
+    },
+    {
+      title: t("shortcuts.list"),
+      items: [
+        { keys: ["↑", "↓"], description: t("shortcuts.move"), alt: true },
+        { keys: ["Enter"], description: t("shortcuts.toggleDetail") },
+        { keys: ["⌘", "A"], description: t("shortcuts.selectAll") },
+        { keys: ["⌘", click], description: t("shortcuts.cmdClick") },
+        { keys: ["Shift", click], description: t("shortcuts.shiftClick") },
+        { keys: [right], description: t("shortcuts.rowMenu") },
+      ],
+    },
+    {
+      title: t("shortcuts.columns"),
+      note: t("shortcuts.columnsNote"),
+      items: [
+        { keys: [click], description: t("shortcuts.sort") },
+        { keys: ["Shift", click], description: t("shortcuts.multiSort") },
+        { keys: [t("shortcuts.dragName")], description: t("shortcuts.reorder") },
+        { keys: [t("shortcuts.dragSplit")], description: t("shortcuts.resize") },
+        { keys: [t("shortcuts.dblSplit")], description: t("shortcuts.autofit") },
+        { keys: [right], description: t("shortcuts.columnsMenu") },
+      ],
+    },
+  ];
+}
 
 export function ShortcutsSheet({ onClose }: ShortcutsSheetProps) {
   return (
@@ -64,12 +70,12 @@ export function ShortcutsSheet({ onClose }: ShortcutsSheetProps) {
         <header>
           <div>
             <span className="section-kicker">KEYBOARD &amp; MOUSE</span>
-            <h2 id="shortcuts-sheet-title">快捷操作</h2>
+            <h2 id="shortcuts-sheet-title">{t("shortcuts.title")}</h2>
           </div>
-          <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <button className="icon-button" onClick={onClose} title={t("common.close")}><X size={18} /></button>
         </header>
         <div className="shortcuts-sheet__groups">
-          {GROUPS.map((group) => (
+          {shortcutGroups().map((group) => (
             <section key={group.title}>
               <h3>{group.title}</h3>
               {group.note && <p>{group.note}</p>}

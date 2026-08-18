@@ -110,7 +110,7 @@ describe("request list incremental updates", () => {
     assert.match(traffic, /request-grid-row is-loading/);
     assert.match(traffic, /shouldChangeRequestListWindow\(desiredWindowOffset/);
     assert.match(app, /requestWindowTargetOffset/);
-    assert.match(traffic, /当前窗口/);
+    assert.match(traffic, /traffic\.currentWindow/);
     assert.match(styles, /\.request-grid-statusbar\.has-selection/);
     assert.match(styles, /\.selection-window-compact/);
   });

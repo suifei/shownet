@@ -9,6 +9,8 @@
  * four screens.
  */
 
+import { t } from "./i18n.ts";
+
 export type SetupStepId = "capture" | "source" | "certificate" | "ai";
 
 export type SetupStepState = "done" | "pending" | "blocked";
@@ -50,45 +52,47 @@ export function buildSetupSteps(signals: SetupSignals): SetupStep[] {
   return [
     {
       id: "capture",
-      title: "开始抓包",
-      summary: "代理已启动，流量会写入当前会话",
-      hint: "点「开始抓包」启动本机代理，这一步不需要任何配置。",
+      title: t("setup.capture.title"),
+      summary: t("setup.capture.summary"),
+      hint: t("setup.capture.hint"),
       state: capturing ? "done" : "pending",
       // Never offer "停止抓包" here. This panel is where a beginner clicks the
       // biggest button on screen; undoing the step they just completed is the
       // one outcome it must not produce.
-      actionLabel: capturing ? "代理设置" : "开始抓包",
+      actionLabel: capturing ? t("setup.capture.actionReady") : t("shell.startCapture"),
       optional: false,
     },
     {
       id: "source",
-      title: "接入流量来源",
+      title: t("setup.source.title"),
       summary: hasTraffic
-        ? `已收到 ${requestCount} 条请求${sourceCount > 0 ? ` · ${sourceCount} 个来源` : ""}`
-        : "浏览器、终端、手机或桌面应用的流量进入 ShowNet",
-      hint: "最快的方式是打开内嵌浏览器 —— 它已经指向本机代理，不用装证书。",
+        ? sourceCount > 0
+          ? t("setup.source.summarySources", { count: requestCount, sources: sourceCount })
+          : t("setup.source.summary", { count: requestCount })
+        : t("setup.source.empty"),
+      hint: t("setup.source.hint"),
       // Traffic is proof the source works; without capture running there is
       // nothing to connect to yet, so the step reads as blocked rather than todo.
       state: hasTraffic ? "done" : capturing ? "pending" : "blocked",
-      actionLabel: hasTraffic ? "查看流量" : "打开内嵌浏览器",
+      actionLabel: hasTraffic ? t("setup.source.view") : t("setup.source.open"),
       optional: false,
     },
     {
       id: "certificate",
-      title: "安装 HTTPS 证书",
-      summary: "解密手机 App 与桌面程序的 HTTPS 正文",
-      hint: "只看内嵌浏览器可以跳过。要抓 App / 系统流量时再装。",
+      title: t("setup.cert.title"),
+      summary: t("setup.cert.summary"),
+      hint: t("setup.cert.hint"),
       state: caInstalled ? "done" : "pending",
-      actionLabel: caInstalled ? "证书设置" : "一键安装 CA",
+      actionLabel: caInstalled ? t("setup.cert.ready") : t("setup.cert.action"),
       optional: true,
     },
     {
       id: "ai",
-      title: "配置 AI 分析",
-      summary: "自动逆向接口与加密链路，导出可运行代码",
-      hint: "填入 API Key，或使用内置 Agent / 本地模型。",
+      title: t("setup.ai.title"),
+      summary: t("setup.ai.summary"),
+      hint: t("setup.ai.hint"),
       state: aiConfigured ? "done" : "pending",
-      actionLabel: aiConfigured ? "AI 设置" : "配置 AI 服务",
+      actionLabel: aiConfigured ? t("setup.ai.ready") : t("setup.ai.action"),
       optional: true,
     },
   ];

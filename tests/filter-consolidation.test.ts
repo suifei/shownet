@@ -20,7 +20,10 @@ import {
   TYPE_LABELS,
   type QuickFilterState,
 } from "../src/requestFilters.ts";
+import { activateUiLocale } from "../src/i18n.ts";
 import type { FilterExpression } from "../src/types.ts";
+
+activateUiLocale("zh-CN");
 
 const traffic = await readFile(new URL("../src/components/TrafficView.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -129,7 +132,7 @@ describe("active filter description", () => {
 describe("traffic filter surface", () => {
   it("has one filter button instead of three", () => {
     assert.match(traffic, /className="traffic-popover filter-panel"/);
-    assert.match(traffic, /role="tablist" aria-label="筛选方式"/);
+    assert.match(traffic, /role="tablist" aria-label=\{t\("traffic\.filterMode"\)\}/);
     // The three former sibling popovers are gone as separate toolbar entries.
     assert.doesNotMatch(traffic, /menu === "quick" \? undefined : "quick"/);
     assert.doesNotMatch(traffic, /menu === "advanced" \? undefined : "advanced"/);
@@ -142,7 +145,7 @@ describe("traffic filter surface", () => {
   });
 
   it("shows the combined filter state as removable chips", () => {
-    assert.match(traffic, /className="active-filters" role="region" aria-label="生效中的筛选"/);
+    assert.match(traffic, /className="active-filters" role="region" aria-label=\{t\("traffic\.activeFilters"\)\}/);
     assert.match(traffic, /className="active-filter-chip"/);
     assert.match(traffic, /onClick=\{\(\) => removeFilterChip\(chip\)\}/);
     assert.match(traffic, /className="active-filters__clear"/);

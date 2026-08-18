@@ -43,6 +43,7 @@ import {
   initialBrowserLanguage,
   normalizeBrowserLanguage,
 } from "../browserLanguage";
+import { t } from "../i18n.ts";
 import { useDismissibleLayer } from "../useDismissibleLayer";
 import { useConfirm } from "./ConfirmDialog";
 import {
@@ -146,7 +147,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const [browserConnecting, setBrowserConnecting] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const [browserLoading, setBrowserLoading] = useState(false);
-  const [pageTitle, setPageTitle] = useState("新标签页");
+  const [pageTitle, setPageTitle] = useState(() => t("browser.newTab"));
   const [screencastFrame, setScreencastFrame] = useState<ScreencastFrame | null>(null);
   const [labState, setLabState] = useState<"idle" | "running" | "complete" | "error">("idle");
   const [fileDropState, setFileDropState] = useState<BrowserFileDropState>(null);
@@ -324,7 +325,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     setAddress(nextUrl);
     setCurrentUrl(nextUrl);
     setExternalPage(null);
-    setPageTitle("新标签页");
+    setPageTitle(t("browser.newTab"));
     setChallengeHost("");
     setReloadLoopHost("");
     navigationGenerationRef.current += 1;
@@ -1548,7 +1549,7 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
     setExternalPage(null);
     setCurrentUrl("");
     setAddress("");
-    setPageTitle("新标签页");
+    setPageTitle(t("browser.newTab"));
   };
 
   const toggleHooks = async () => {
@@ -1598,10 +1599,10 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
         <div className="browser-tabs">
           <div className="browser-tab is-active"><span className="target-favicon">{pageTitle.trim().charAt(0).toUpperCase() || "S"}</span><span>{pageTitle}</span></div>
           <div className="browser-tabs__spacer" />
-          <span className="browser-owner" title={`浏览器流量与 Hook 写入 ${sessionName}`}><CircleDot size={13} />写入 {sessionName}</span>
-          <span className={`cdp-state ${receiverReady ? "is-connected" : ""}`}><CircleDot size={13} />浏览器通道 {receiverReady ? "已就绪" : "连接中"}</span>
+          <span className="browser-owner" title={t("browser.writeTitle", { name: sessionName })}><CircleDot size={13} />{t("browser.writeTo", { name: sessionName })}</span>
+          <span className={`cdp-state ${receiverReady ? "is-connected" : ""}`}><CircleDot size={13} />{t("browser.channel")} {receiverReady ? t("browser.ready") : t("browser.connecting")}</span>
           <div className="browser-menu-anchor" ref={browserMenuRef}>
-            <button className={`icon-button ${browserMenuOpen ? "is-active" : ""}`} onClick={() => setBrowserMenuOpen((open) => !open)} title="浏览器菜单" aria-expanded={browserMenuOpen}><MoreHorizontal size={17} /></button>
+            <button className={`icon-button ${browserMenuOpen ? "is-active" : ""}`} onClick={() => setBrowserMenuOpen((open) => !open)} title={t("browser.menu")} aria-expanded={browserMenuOpen}><MoreHorizontal size={17} /></button>
             {browserMenuOpen && <div className="browser-menu-popover" role="menu">
               <button role="menuitem" onClick={() => void copyCurrentAddress()} disabled={!currentUrl}><Copy size={14} />复制当前地址</button>
               <button role="menuitem" onClick={() => { setHookPanel((open) => !open); setProbePanelOpen(false); setBrowserMenuOpen(false); }}><Braces size={14} />{hookPanel && !probePanelOpen ? "收起 Hook 面板" : "打开 Hook 面板"}</button>
@@ -1628,45 +1629,45 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
           </div>
         </div>
         <div className="browser-toolbar">
-          <button className="icon-button" onClick={() => navigateHistory(-1)} disabled={!proxyBrowser?.running} title="后退"><ArrowLeft size={17} /></button>
-          <button className="icon-button" onClick={() => navigateHistory(1)} disabled={!proxyBrowser?.running} title="前进"><ArrowRight size={17} /></button>
-          <button className="icon-button" onClick={reload} disabled={!proxyBrowser?.running && desktop} title="刷新"><RefreshCw className={reloading ? "spin" : ""} size={16} /></button>
+          <button className="icon-button" onClick={() => navigateHistory(-1)} disabled={!proxyBrowser?.running} title={t("browser.back")}><ArrowLeft size={17} /></button>
+          <button className="icon-button" onClick={() => navigateHistory(1)} disabled={!proxyBrowser?.running} title={t("browser.forward")}><ArrowRight size={17} /></button>
+          <button className="icon-button" onClick={reload} disabled={!proxyBrowser?.running && desktop} title={t("browser.reload")}><RefreshCw className={reloading ? "spin" : ""} size={16} /></button>
           <form className="address-bar" onSubmit={navigate}>
             <Lock size={13} />
-            <input ref={addressRef} value={address} onChange={(event) => setAddress(event.target.value)} aria-label="地址" />
+            <input ref={addressRef} value={address} onChange={(event) => setAddress(event.target.value)} aria-label={t("browser.address")} />
             <ShieldCheck size={14} />
           </form>
-          <button className="hook-toggle" onClick={openCryptoLab} disabled={!capturing || browserConnecting} title="运行 Crypto Lab 并自动分析"><FlaskConical size={16} /><span>验证分析</span></button>
+          <button className="hook-toggle" onClick={openCryptoLab} disabled={!capturing || browserConnecting} title={t("browser.cryptoLabHint")}><FlaskConical size={16} /><span>{t("browser.cryptoLab")}</span></button>
           <button
             className={`hook-toggle ${labInstalling ? "is-active" : ""}`}
             onClick={() => void installRiskLab()}
             disabled={!proxyBrowser?.running || labInstalling || !capturing}
-            title="经统一 Browser 总线注入固定参数 + 请求劫持 + 对象自吐"
+            title={t("browser.riskLabHint")}
           >
             <ShieldCheck size={16} />
-            <span>{labInstalling ? "注入中" : "风控 Lab"}</span>
+            <span>{labInstalling ? t("common.processing") : t("browser.riskLab")}</span>
           </button>
           <button
             className={`hook-toggle ${fixtureProbing || probePanelOpen ? "is-active" : ""}`}
             onClick={() => void runFixtureProbe()}
             disabled={!desktop || fixtureProbing}
-            title="一键：创建样本会话 → 离线对象导出 → 视觉试运行映射；浏览器运行时同步执行实页注入"
+            title={t("browser.probeHint")}
           >
             <FlaskConical size={16} />
-            <span>{fixtureProbing ? "探针中" : "样本探针"}</span>
+            <span>{fixtureProbing ? t("common.processing") : t("browser.probe")}</span>
           </button>
-          <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? "停止内嵌浏览器（会清除临时登录状态）" : "启动内嵌浏览器"}><Chrome size={16} /><span>{browserConnecting ? "连接中" : proxyBrowser?.running ? "停止" : "Chrome"}</span></button>
+          <button className={`hook-toggle ${proxyBrowser?.running ? "is-active" : ""}`} onClick={() => void launchProxyChrome()} disabled={browserConnecting || !capturing} title={proxyBrowser?.running ? t("browser.stop") : t("browser.startEmbedded")}><Chrome size={16} /><span>{browserConnecting ? t("browser.connecting") : proxyBrowser?.running ? t("browser.stopShort") : "Chrome"}</span></button>
           <button
             className={`hook-toggle ${hooksEnabled ? "is-active" : ""}`}
             disabled={browserConnecting}
             onClick={() => void toggleHooks()}
             aria-pressed={hooksEnabled}
-            title={hooksEnabled ? "关闭深度 JS 分析；MITM 流量抓取不受影响" : "开启深度 JS 分析（会修改页面 API，仅在分析加密调用时使用）"}
+            title={hooksEnabled ? t("browser.deepOffHint") : t("browser.deepOnHint")}
           >
-            <Code2 size={16} /><span>{hooksEnabled ? "深度分析开" : "深度分析关"}</span>
+            <Code2 size={16} /><span>{hooksEnabled ? t("browser.deepOn") : t("browser.deepOff")}</span>
           </button>
-          <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title={hooksEnabled ? "脚本 Hook 面板" : "脚本 Hook 面板（当前未启用实时 Hook）"}><Braces size={16} /><span>{hooksEnabled ? hookEvents.length : 0}</span></button>
-          <button className="icon-button" onClick={() => void openInSystemBrowser()} disabled={!currentUrl.trim()} title="在系统浏览器中打开" aria-label="在系统浏览器中打开"><ExternalLink size={16} /></button>
+          <button className={`hook-toggle ${hookPanel && !probePanelOpen ? "is-active" : ""}`} onClick={() => { if (probePanelOpen) { setProbePanelOpen(false); setHookPanel(true); } else { setHookPanel((open) => !open); } }} title={hooksEnabled ? t("browser.hookPanel") : t("browser.hookPanelOff")}><Braces size={16} /><span>{hooksEnabled ? hookEvents.length : 0}</span></button>
+          <button className="icon-button" onClick={() => void openInSystemBrowser()} disabled={!currentUrl.trim()} title={t("browser.openSystem")} aria-label={t("browser.openSystem")}><ExternalLink size={16} /></button>
         </div>
         <div className="browser-viewport">
           {desktop ? (
@@ -1713,9 +1714,9 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
               ) : (
                 <div className="browser-launch-state">
                   <span><Chrome size={24} /></span>
-                  <strong>{browserConnecting ? "正在连接" : capturing ? "浏览器未启动" : "抓包已暂停"}</strong>
+                  <strong>{browserConnecting ? t("browser.connecting") : capturing ? t("browser.notStarted") : t("common.paused")}</strong>
                   {browserError && <small>{browserError}</small>}
-                  <button type="button" onClick={() => void launchProxyChrome()} disabled={!capturing || browserConnecting}><Chrome size={15} />启动浏览器</button>
+                  <button type="button" onClick={() => void launchProxyChrome()} disabled={!capturing || browserConnecting}><Chrome size={15} />{t("browser.launch")}</button>
                 </div>
               )}
               {browserLoading && proxyBrowser?.running && <div className="browser-loading-indicator"><RefreshCw className="spin" size={13} /></div>}
@@ -1767,12 +1768,12 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
               <span><Braces size={13} />{hookEvents.length} 条事件</span>
             </>
           ) : (
-            <span title="页面 API 保持原生；网络流量仍经 MITM 解密抓取"><ShieldCheck size={13} />原生页面 · MITM 抓包</span>
+            <span title={t("browser.nativeMitm")}><ShieldCheck size={13} />{t("browser.nativeMitm")}</span>
           )}
           <span><FlaskConical size={13} />{labState === "complete" ? "已转交内置 Agent" : labState === "error" ? "场景验证失败" : labState === "running" ? "加密场景运行中" : "Crypto Lab"}</span>
-          <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : "浏览器未启动"}</span>
-          <span title="统一 Browser 执行总线（Agent/UI 共用）"><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || "总线就绪") : busNote || "总线未连接"}</span>
-          <span title="浏览器页面与请求使用同一语言"><Globe2 size={13} />{proxyBrowser?.browserLanguage || browserLanguage}</span>
+          <span title={browserError || undefined}><Chrome size={13} />{browserError ? "CDP 异常" : screencastFrame ? "内嵌画面实时" : proxyBrowser?.running ? "等待首帧" : t("browser.notStarted")}</span>
+          <span title={t("browser.busShared")}><MousePointer2 size={13} />{proxyBrowser?.running ? (busNote || t("browser.busReady")) : busNote || t("browser.busOff")}</span>
+          <span title={t("browser.sameLanguage")}><Globe2 size={13} />{proxyBrowser?.browserLanguage || browserLanguage}</span>
           {(reloadLoopHost || /baidu\.com|bdstatic\.com|bcebos\.com/i.test(currentUrl)) && (
             <span className="browser-statusbar__hint" title={reloadLoopHost ? "确认逐字节 Chrome 出站并关闭 Hook；图裂时才用静态 CDN 绕行" : "图裂时：设置 → HTTPS 解密 → 静态 CDN 绕行"}>
               {reloadLoopHost ? `${reloadLoopHost} 反复刷新：查 JA4/关 Hook` : "图裂时启用静态 CDN 绕行"}

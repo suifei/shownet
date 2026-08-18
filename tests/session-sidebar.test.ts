@@ -12,8 +12,8 @@ describe("session sidebar", () => {
     const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 
     assert.doesNotMatch(source, /setActiveView\(session\.analysisReportCount/);
-    assert.match(source, /title=\{isCaptureTarget \? `\${session\.name} 正在接收抓包；点击查看记录` : `打开 \${session\.name} 的抓包记录`\}/);
-    assert.match(source, /aria-label={`打开 \${session\.name} 的最近 AI 报告`}/);
+    assert.match(source, /title=\{isCaptureTarget \? t\("shell\.captureTarget", \{ name: session\.name \}\) : t\("shell\.openCapture", \{ name: session\.name \}\)\}/);
+    assert.match(source, /aria-label=\{t\("shell\.openReportNamed", \{ name: session\.name \}\)\}/);
     assert.match(source, /invoke<Session>\("rename_session"/);
   });
 
@@ -21,7 +21,7 @@ describe("session sidebar", () => {
     const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 
     assert.match(source, /className="session-delete-button"/);
-    assert.match(source, /aria-label={`删除 \${session\.name}`}/);
+    assert.match(source, /aria-label=\{t\("shell\.deleteSession"\) \+ " " \+ session\.name\}/);
     assert.match(source, /event\.stopPropagation\(\);\s*void deleteSession\(session\);/);
     assert.match(source, /invoke\("delete_session", \{ sessionId: session\.id \}\)/);
     assert.match(

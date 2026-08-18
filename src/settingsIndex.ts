@@ -7,6 +7,8 @@
  * sections inside a tab — most-needed first, power-user knobs last.
  */
 
+import { t, type MessageKey } from "./i18n.ts";
+
 export type SettingsTabId = "capture" | "ai" | "data" | "mcp";
 
 export interface SettingsSectionEntry {
@@ -20,12 +22,27 @@ export interface SettingsSectionEntry {
   keywords: string[];
 }
 
+const SETTINGS_TAB_KEYS = {
+  capture: "settings.tab.capture",
+  ai: "settings.tab.ai",
+  data: "settings.tab.data",
+  mcp: "settings.tab.mcp",
+} as const satisfies Record<SettingsTabId, MessageKey>;
+
 export const SETTINGS_TAB_LABELS: Record<SettingsTabId, string> = {
-  capture: "抓包与 HTTPS",
-  ai: "AI 模型",
-  data: "数据与存储",
-  mcp: "MCP 服务",
+  get capture() { return t(SETTINGS_TAB_KEYS.capture); },
+  get ai() { return t(SETTINGS_TAB_KEYS.ai); },
+  get data() { return t(SETTINGS_TAB_KEYS.data); },
+  get mcp() { return t(SETTINGS_TAB_KEYS.mcp); },
 };
+
+export function settingsSectionTitle(id: string): string {
+  return t(`settings.${id}.title` as MessageKey);
+}
+
+export function settingsSectionSummary(id: string): string {
+  return t(`settings.${id}.summary` as MessageKey);
+}
 
 /**
  * Order within a tab is the render order. `capture` deliberately leads with the
@@ -147,16 +164,22 @@ export function searchSettings(query: string): SettingsSearchHit[] {
   if (!needle) return [];
   return SETTINGS_INDEX
     .map((entry) => {
-      const title = entry.title.toLowerCase();
+      const title = settingsSectionTitle(entry.id).toLowerCase();
+      const summary = settingsSectionSummary(entry.id).toLowerCase();
       let score = -1;
       if (title.includes(needle)) score = title.startsWith(needle) ? 100 : 80;
       else if (entry.keywords.some((keyword) => keyword.includes(needle))) score = 60;
-      else if (entry.summary.toLowerCase().includes(needle)) score = 40;
+      else if (summary.includes(needle)) score = 40;
       return { entry, score };
     })
     .filter((hit) => hit.score >= 0)
     .sort((left, right) => right.score - left.score)
-    .map((hit) => ({ ...hit.entry, tabLabel: SETTINGS_TAB_LABELS[hit.entry.tab] }));
+    .map((hit) => ({
+      ...hit.entry,
+      title: settingsSectionTitle(hit.entry.id),
+      summary: settingsSectionSummary(hit.entry.id),
+      tabLabel: SETTINGS_TAB_LABELS[hit.entry.tab],
+    }));
 }
 
 /** Sections belonging to a tab, in render order. */

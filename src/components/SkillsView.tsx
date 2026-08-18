@@ -28,6 +28,7 @@ import {
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ANALYSIS_MODES } from "../analysisModes";
+import { t } from "../i18n.ts";
 import { buildPreviewSkillPlan, builtInSkillPreview, mcpToolPreview } from "../capabilities";
 import { defaultMcpServerStatus } from "../mcpDefaults";
 import { calculateWorkflowLayout, partitionWorkflowStages } from "../workflowLayout";
@@ -99,7 +100,7 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
       setSelectedSkill((current) => loadedSkills.some((skill) => skill.id === current) ? current : loadedSkills[0]?.id ?? "");
       setError("");
     } catch (loadError) {
-      setError(`能力状态读取失败：${String(loadError)}`);
+      setError(t("skills.loadFailed", { error: String(loadError) }));
     } finally {
       setRefreshing(false);
     }
@@ -116,7 +117,7 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
       setPlan(loaded);
       setError("");
     } catch (loadError) {
-      setError(`编排计划读取失败：${String(loadError)}`);
+      setError(t("skills.planFailed", { error: String(loadError) }));
     } finally {
       setRefreshing(false);
     }
@@ -158,7 +159,7 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
       setSignatureHarness(generated);
       setError("");
     } catch (generateError) {
-      setError(`适配器生成失败：${String(generateError)}`);
+      setError(t("skills.adapterFailed", { error: String(generateError) }));
     } finally {
       setGeneratingHarness(false);
     }
@@ -174,9 +175,9 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
   return (
     <section className="capabilities-view">
       <div className="capabilities-tabs">
-        <button className={tab === "skills" ? "is-active" : ""} onClick={() => setTab("skills")}><Sparkles size={16} />内置 Skills<span>{skills.length}</span></button>
-        <button className={tab === "mcp" ? "is-active" : ""} onClick={() => setTab("mcp")}><Server size={16} />MCP 服务<span>{mcpStatus.toolCount}</span></button>
-        <button className={tab === "workflow" ? "is-active" : ""} onClick={() => setTab("workflow")}><GitBranch size={16} />Agent 编排<span>{plan.selectedSkillIds.length}</span></button>
+        <button className={tab === "skills" ? "is-active" : ""} onClick={() => setTab("skills")}><Sparkles size={16} />{t("skills.builtin")}<span>{skills.length}</span></button>
+        <button className={tab === "mcp" ? "is-active" : ""} onClick={() => setTab("mcp")}><Server size={16} />{t("skills.mcp")}<span>{mcpStatus.toolCount}</span></button>
+        <button className={tab === "workflow" ? "is-active" : ""} onClick={() => setTab("workflow")}><GitBranch size={16} />{t("skills.workflow")}<span>{plan.selectedSkillIds.length}</span></button>
       </div>
 
       {error && <div className="capability-error">{error}</div>}
@@ -185,29 +186,29 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
         <div className="skills-layout">
           <div className="skill-directory">
             <div className="skill-directory__toolbar">
-              <div className="search-field search-field--compact"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Skill" /></div>
-              <button className="icon-button" title="刷新" onClick={() => void refreshCapabilities()}><RefreshCw className={refreshing ? "spin" : ""} size={16} /></button>
+              <div className="search-field search-field--compact"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("skills.search")} /></div>
+              <button className="icon-button" title={t("common.refresh")} onClick={() => void refreshCapabilities()}><RefreshCw className={refreshing ? "spin" : ""} size={16} /></button>
             </div>
             <div className="skill-list">
               {filtered.map((skill) => {
                 const Icon = iconBySkill[skill.id] ?? Sparkles;
-                return <button key={skill.id} className={selectedSkill === skill.id ? "is-active" : ""} onClick={() => setSelectedSkill(skill.id)}><span className="skill-list__icon"><Icon size={17} /></span><span><strong>{skill.name}</strong><small>{skill.summary}</small></span><i className={skill.status === "ready" ? "is-ready" : "is-beta"}>{skill.status === "ready" ? "启用" : "BETA"}</i></button>;
+                return <button key={skill.id} className={selectedSkill === skill.id ? "is-active" : ""} onClick={() => setSelectedSkill(skill.id)}><span className="skill-list__icon"><Icon size={17} /></span><span><strong>{skill.name}</strong><small>{skill.summary}</small></span><i className={skill.status === "ready" ? "is-ready" : "is-beta"}>{skill.status === "ready" ? t("skills.enable") : "BETA"}</i></button>;
               })}
             </div>
           </div>
           <div className="skill-detail">
             <header className="skill-detail__header"><div className="skill-detail__identity"><span><SelectedIcon size={22} /></span><div><span className="section-kicker">{selected.category}</span><h2>{selected.name}</h2><p>{selected.summary}</p></div></div></header>
-            <div className="skill-detail__meta"><span><Check size={13} />{selected.status === "ready" ? "已启用" : "Beta"}</span><span>v{selected.version}</span><span>ShowNet 内置</span><span>内置 Agent</span></div>
-            <section className="skill-section"><div className="skill-section__heading"><h3>工具契约</h3><span>{selected.tools.length}</span></div><div className="skill-tools">{selected.tools.map((tool) => <div key={tool}><Wrench size={14} /><code>{tool}</code><ChevronRight size={14} /></div>)}</div></section>
-            <section className="skill-section"><div className="skill-section__heading"><h3>触发规则</h3></div><div className="trigger-rule"><Zap size={16} /><span>{selected.trigger}</span></div></section>
-            <section className="skill-section"><div className="skill-section__heading"><h3>权限与输出</h3></div><div className="permission-chips">{selected.permissions.map((permission) => <span key={permission}><LockKeyhole size={13} />{permission}</span>)}{selected.outputs.map((output) => <span key={output}><Braces size={13} />{output}</span>)}</div></section>
+            <div className="skill-detail__meta"><span><Check size={13} />{selected.status === "ready" ? t("skills.enabled") : "Beta"}</span><span>v{selected.version}</span><span>ShowNet</span><span>{t("skills.builtinAgent")}</span></div>
+            <section className="skill-section"><div className="skill-section__heading"><h3>{t("skills.contracts")}</h3><span>{selected.tools.length}</span></div><div className="skill-tools">{selected.tools.map((tool) => <div key={tool}><Wrench size={14} /><code>{tool}</code><ChevronRight size={14} /></div>)}</div></section>
+            <section className="skill-section"><div className="skill-section__heading"><h3>{t("skills.triggers")}</h3></div><div className="trigger-rule"><Zap size={16} /><span>{selected.trigger}</span></div></section>
+            <section className="skill-section"><div className="skill-section__heading"><h3>{t("skills.permissions")}</h3></div><div className="permission-chips">{selected.permissions.map((permission) => <span key={permission}><LockKeyhole size={13} />{permission}</span>)}{selected.outputs.map((output) => <span key={output}><Braces size={13} />{output}</span>)}</div></section>
             {selected.id === "dynamic-signature" && (
               <section className="skill-section signature-adapter">
                 <div className="skill-section__heading">
-                  <div><span className="section-kicker">VERSIONED ADAPTER</span><h3>动态签名适配器</h3></div>
+                  <div><span className="section-kicker">VERSIONED ADAPTER</span><h3>{t("skills.adapter")}</h3></div>
                   <button className="adapter-generate-button" onClick={() => void generateSignatureHarness()} disabled={generatingHarness || !sessionId}>
                     {generatingHarness ? <RefreshCw className="spin" size={14} /> : <FileCode2 size={14} />}
-                    {generatingHarness ? "正在生成" : signatureHarness ? "重新生成" : "生成适配器"}
+                    {generatingHarness ? t("skills.generatingAdapter") : signatureHarness ? t("skills.regenerateAdapter") : t("skills.generateAdapter")}
                   </button>
                 </div>
                 {signatureHarness && (
@@ -218,16 +219,16 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
                       <code title={signatureHarness.evidenceHash}>{signatureHarness.evidenceHash.slice(0, 12)}</code>
                     </div>
                     <div className="adapter-result__metrics">
-                      <span><strong>{signatureHarness.matchedRequests.length}</strong><small>匹配请求</small></span>
-                      <span><strong>{signatureHarness.dynamicFields.length}</strong><small>动态字段</small></span>
+                      <span><strong>{signatureHarness.matchedRequests.length}</strong><small>{t("skills.matchedRequests")}</small></span>
+                      <span><strong>{signatureHarness.dynamicFields.length}</strong><small>{t("skills.dynamicFields")}</small></span>
                       <span><strong>{signatureHarness.hookNames.length}</strong><small>Hook</small></span>
-                      <span><strong>{signatureHarness.fingerprintDependencies.length}</strong><small>指纹依赖</small></span>
+                      <span><strong>{signatureHarness.fingerprintDependencies.length}</strong><small>{t("skills.fpDeps")}</small></span>
                     </div>
                     <div className="adapter-evidence-row">
                       {signatureHarness.dynamicFields.slice(0, 8).map((field) => <code key={field}>{field}</code>)}
-                      {signatureHarness.dynamicFields.length === 0 && <span>未识别动态字段</span>}
+                      {signatureHarness.dynamicFields.length === 0 && <span>{t("skills.noDynamicFields")}</span>}
                     </div>
-                    <div className="adapter-code-head"><span>Node.js · evidence {signatureHarness.evidenceHash.slice(0, 8)}</span><button onClick={() => void copyHarness()}>{harnessCopied ? <Check size={13} /> : <Copy size={13} />}{harnessCopied ? "已复制" : "复制代码"}</button></div>
+                    <div className="adapter-code-head"><span>Node.js · evidence {signatureHarness.evidenceHash.slice(0, 8)}</span><button onClick={() => void copyHarness()}>{harnessCopied ? <Check size={13} /> : <Copy size={13} />}{harnessCopied ? t("common.copied") : t("traffic.copyCode")}</button></div>
                     <pre className="adapter-code"><code>{signatureHarness.code}</code></pre>
                     {signatureHarness.evidenceGaps.length > 0 && <div className="adapter-gaps">{signatureHarness.evidenceGaps.map((gap) => <span key={gap}><CircleDot size={12} />{gap}</span>)}</div>}
                   </div>
@@ -241,18 +242,18 @@ export function SkillsView({ sessionId, requests, onOpenMcpSettings, mode: workf
       {tab === "mcp" && (
         <div className="mcp-layout">
           <section className="mcp-own-server">
-            <header><div><span className="server-emblem"><RadioTower size={22} /></span><div><span className="section-kicker">SHOWNET MCP SERVER</span><h2>本机服务</h2></div></div><span className={`server-running ${mcpStatus.running ? "" : "is-off"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? "启动中" : mcpStatus.running ? "运行中" : "已停止"}</span></header>
-            <div className="endpoint-row"><code>{mcpStatus.endpoint}</code><button onClick={copyEndpoint} title="复制地址">{copied ? <Check size={15} /> : <Copy size={15} />}</button></div>
-            <div className="server-metrics"><div><strong>{tools.length}</strong><span>Tools</span></div><div><strong>{mcpStatus.allowWrites ? "读写" : "只读"}</strong><span>Access</span></div><div><strong>Streamable</strong><span>HTTP Transport</span></div><div><strong>{mcpStatus.protocolVersion}</strong><span>Protocol</span></div></div>
-            <div className="mcp-tools-header"><h3>对外工具 · {mcpStatus.allowWrites ? "读写" : "只读"}</h3><button onClick={() => void refreshCapabilities()}><RefreshCw className={refreshing ? "spin" : ""} size={14} />刷新</button></div>
-            <div className="mcp-tool-grid">{tools.map((tool) => <div className="mcp-tool-item" key={tool.name} title={tool.description}><Wrench size={13} /><code>{tool.name}</code><span className={`tool-access tool-access--${tool.access}`}>{tool.access === "write" ? "写" : "读"}</span></div>)}</div>
+            <header><div><span className="server-emblem"><RadioTower size={22} /></span><div><span className="section-kicker">SHOWNET MCP SERVER</span><h2>{t("skills.localServer")}</h2></div></div><span className={`server-running ${mcpStatus.running ? "" : "is-off"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? t("settings.mcp.starting") : mcpStatus.running ? t("common.running") : t("settings.mcp.stopped")}</span></header>
+            <div className="endpoint-row"><code>{mcpStatus.endpoint}</code><button onClick={copyEndpoint} title={t("skills.copyEndpoint")}>{copied ? <Check size={15} /> : <Copy size={15} />}</button></div>
+            <div className="server-metrics"><div><strong>{tools.length}</strong><span>Tools</span></div><div><strong>{mcpStatus.allowWrites ? t("skills.readWrite") : t("skills.readOnly")}</strong><span>Access</span></div><div><strong>Streamable</strong><span>HTTP Transport</span></div><div><strong>{mcpStatus.protocolVersion}</strong><span>Protocol</span></div></div>
+            <div className="mcp-tools-header"><h3>{t("skills.publicTools", { access: mcpStatus.allowWrites ? t("skills.readWrite") : t("skills.readOnly") })}</h3><button onClick={() => void refreshCapabilities()}><RefreshCw className={refreshing ? "spin" : ""} size={14} />{t("common.refresh")}</button></div>
+            <div className="mcp-tool-grid">{tools.map((tool) => <div className="mcp-tool-item" key={tool.name} title={tool.description}><Wrench size={13} /><code>{tool.name}</code><span className={`tool-access tool-access--${tool.access}`}>{tool.access === "write" ? t("skills.write") : t("skills.read")}</span></div>)}</div>
           </section>
           <aside className="mcp-connections">
-            <div className="mcp-connections__head"><div><span className="section-kicker">AGENT TOOL SOURCE</span><h2>能力边界</h2></div></div>
+            <div className="mcp-connections__head"><div><span className="section-kicker">AGENT TOOL SOURCE</span><h2>{t("skills.boundary")}</h2></div></div>
             <div className="connection-list">
-              <div className="connection-item"><span className="connection-logo connection-logo--fs"><Sparkles size={17} /></span><span><strong>内置 Agent</strong><small>{plan.toolNames.length} 个按需取证工具</small></span><i className="is-ready">可用</i></div>
-              <div className="connection-item"><span className="connection-logo connection-logo--git"><Server size={17} /></span><span><strong>ShowNet MCP</strong><small>与 Agent 共用工具实现</small></span><i className={mcpStatus.running ? "is-ready" : ""}>{mcpStatus.running ? "已连接" : "关闭"}</i></div>
-              <button type="button" className="connection-item is-actionable" onClick={onOpenMcpSettings} title="在设置里添加外部 MCP Server"><span className="connection-logo connection-logo--db"><Unplug size={17} /></span><span><strong>外部 MCP</strong><small>接入第三方 MCP 工具</small></span><i>去配置</i></button>
+              <div className="connection-item"><span className="connection-logo connection-logo--fs"><Sparkles size={17} /></span><span><strong>{t("skills.builtinAgent")}</strong><small>{t("skills.onDemandTools", { count: plan.toolNames.length })}</small></span><i className="is-ready">{t("skills.available")}</i></div>
+              <div className="connection-item"><span className="connection-logo connection-logo--git"><Server size={17} /></span><span><strong>ShowNet MCP</strong><small>{t("skills.sharedImpl")}</small></span><i className={mcpStatus.running ? "is-ready" : ""}>{mcpStatus.running ? t("skills.connected") : t("skills.closed")}</i></div>
+              <button type="button" className="connection-item is-actionable" onClick={onOpenMcpSettings} title={t("skills.openMcpSettings")}><span className="connection-logo connection-logo--db"><Unplug size={17} /></span><span><strong>{t("skills.externalMcp")}</strong><small>{t("skills.externalMcpHint")}</small></span><i>{t("skills.goConfigure")}</i></button>
             </div>
           </aside>
         </div>
@@ -307,16 +308,16 @@ function WorkflowView({ mode, plan, refreshing, onModeChange, onRefresh }: { mod
 
   return (
     <div className="workflow-layout">
-      <aside className="workflow-list" aria-label="分析流程"><div className="workflow-list__head"><span className="section-kicker">WORKFLOWS</span></div>{workflows.map((workflow) => { const Icon = workflow.icon; return <button key={workflow.mode} className={mode === workflow.mode ? "is-active" : ""} onClick={() => onModeChange(workflow.mode)}><span><Icon size={15} /></span><div><strong>{workflow.name}</strong><small>{mode === workflow.mode ? `${plan.selectedSkillIds.length} Skills · ${plan.toolNames.length} Tools` : "按会话证据编排"}</small></div><ChevronRight size={14} /></button>; })}</aside>
+      <aside className="workflow-list" aria-label={t("skills.workflowsAria")}><div className="workflow-list__head"><span className="section-kicker">WORKFLOWS</span></div>{workflows.map((workflow) => { const Icon = workflow.icon; return <button key={workflow.mode} className={mode === workflow.mode ? "is-active" : ""} onClick={() => onModeChange(workflow.mode)}><span><Icon size={15} /></span><div><strong>{workflow.name}</strong><small>{mode === workflow.mode ? `${plan.selectedSkillIds.length} Skills · ${plan.toolNames.length} Tools` : t("skills.planByEvidence")}</small></div><ChevronRight size={14} /></button>; })}</aside>
       <section className="workflow-canvas">
-        <header><div><span className="section-kicker">CURRENT PLAN</span><h2>{activeWorkflow.name}</h2></div><button className="analysis-start-button" onClick={onRefresh} disabled={refreshing}>{refreshing ? <Activity className="spin" size={15} /> : <RefreshCw size={14} />}{refreshing ? "编排中" : "刷新计划"}</button></header>
+        <header><div><span className="section-kicker">CURRENT PLAN</span><h2>{activeWorkflow.name}</h2></div><button className="analysis-start-button" onClick={onRefresh} disabled={refreshing}>{refreshing ? <Activity className="spin" size={15} /> : <RefreshCw size={14} />}{refreshing ? t("skills.planning") : t("skills.refreshPlan")}</button></header>
         <div className="workflow-flow" ref={flowRef}>
           <div
             className="workflow-track"
             data-columns={layout.columns}
             data-rows={layout.rows}
             role="list"
-            aria-label={`${activeWorkflow.name}执行流程`}
+            aria-label={t("skills.flowAria", { name: activeWorkflow.name })}
             style={{ width: layout.graphWidth, minHeight: layout.graphHeight }}
           >
             {stageRows.map((row, rowIndex) => {
@@ -339,7 +340,7 @@ function WorkflowView({ mode, plan, refreshing, onModeChange, onRefresh }: { mod
             })}
           </div>
         </div>
-        <div className="workflow-log">{plan.reasons.slice(0, 3).map((reason, index) => <div key={reason}><CircleDot size={14} /><span>{index === 0 ? "触发" : "证据"}</span><code>{reason}</code></div>)}<div><Database size={14} /><span>输出</span><code>report + tool trace</code></div></div>
+        <div className="workflow-log">{plan.reasons.slice(0, 3).map((reason, index) => <div key={reason}><CircleDot size={14} /><span>{index === 0 ? t("skills.trigger") : t("skills.evidence")}</span><code>{reason}</code></div>)}<div><Database size={14} /><span>{t("skills.output")}</span><code>report + tool trace</code></div></div>
       </section>
     </div>
   );
@@ -351,9 +352,9 @@ function WorkflowStage({ stage }: { stage: SkillPlanStage }) {
 }
 
 function confidenceLabel(confidence: SignatureAdapterHarness["confidence"]) {
-  if (confidence === "high") return "高置信";
-  if (confidence === "medium") return "中置信";
-  return "低置信";
+  if (confidence === "high") return t("skills.confidenceHigh");
+  if (confidence === "medium") return t("skills.confidenceMedium");
+  return t("skills.confidenceLow");
 }
 
 function previewSignatureHarness(requests: RequestListItem[]): SignatureAdapterHarness {
@@ -385,7 +386,7 @@ function previewSignatureHarness(requests: RequestListItem[]): SignatureAdapterH
     cryptoAlgorithms: [],
     fingerprintDependencies: matched.some((request) => request.tlsIntercepted) ? ["TLS", "H2"] : [],
     requiredInputs: manifest.requiredInputs,
-    evidenceGaps: [isAkamai ? "适配器必须用当前目标版本的真实响应与 Cookie 状态回归验证" : "缺少厂商特征，已生成通用动态字段输入契约"],
+    evidenceGaps: [isAkamai ? t("skills.gapAkamai") : t("skills.gapGeneric")],
     language: "javascript",
     code: `// Generated by ShowNet. Runtime credentials are supplied through context; captured evidence remains in ShowNet.\nexport const manifest = Object.freeze(${JSON.stringify(manifest, null, 2)});\n\nexport function createSignatureAdapter(computeDynamicFields) {\n  return { manifest, buildRequest: async (context) => ({\n    url: manifest.endpoints[0]?.url,\n    method: manifest.endpoints[0]?.method ?? "POST",\n    headers: { ...context.headers },\n    body: JSON.stringify({ ...context.staticFields, ...await computeDynamicFields(context) }),\n  }) };\n}\n`,
   };

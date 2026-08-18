@@ -1,4 +1,5 @@
 import { Check, ChevronRight, Lock, Sparkles, X } from "lucide-react";
+import { t } from "../i18n.ts";
 import type { SetupStep, SetupProgress, SetupStepId } from "../setupChecklist";
 
 interface SetupGuideProps {
@@ -31,19 +32,17 @@ export function SetupGuide({ steps, progress, onRunStep, onClose, onDismissForev
         <header className="setup-guide__header">
           <div>
             <span className="section-kicker">GET STARTED</span>
-            <h2 id="setup-guide-title">{progress.ready ? "已经可以开始了" : "三分钟跑通第一条流量"}</h2>
+            <h2 id="setup-guide-title">{progress.ready ? t("setup.readyTitle") : t("setup.startTitle")}</h2>
             <p>
-              {progress.ready
-                ? "抓包链路已就绪，剩下的是可选增强。"
-                : "按顺序完成下面两步就能看到流量，证书和 AI 可以之后再说。"}
+              {progress.ready ? t("setup.readyBody") : t("setup.startBody")}
             </p>
           </div>
-          <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <button className="icon-button" onClick={onClose} title={t("common.close")}><X size={18} /></button>
         </header>
 
-        <div className="setup-guide__progress" role="img" aria-label={`必做步骤完成 ${progress.done} / ${progress.total}`}>
+        <div className="setup-guide__progress" role="img" aria-label={t("setup.progressAria", { done: progress.done, total: progress.total })}>
           <div className="setup-guide__progress-bar"><i style={{ width: `${percent}%` }} /></div>
-          <span>{progress.done} / {progress.total} 必做步骤</span>
+          <span>{t("setup.progress", { done: progress.done, total: progress.total })}</span>
         </div>
 
         <ol className="setup-guide__steps">
@@ -55,7 +54,7 @@ export function SetupGuide({ steps, progress, onRunStep, onClose, onDismissForev
               <span className="setup-step__body">
                 <strong>
                   {step.title}
-                  {step.optional && <em className="setup-step__tag">可选</em>}
+                  {step.optional && <em className="setup-step__tag">{t("common.optional")}</em>}
                 </strong>
                 <small>{step.state === "done" ? step.summary : step.hint}</small>
               </span>
@@ -63,7 +62,7 @@ export function SetupGuide({ steps, progress, onRunStep, onClose, onDismissForev
                 className={step.id === progress.next?.id ? "primary-button" : "secondary-button"}
                 onClick={() => onRunStep(step.id)}
                 disabled={step.state === "blocked"}
-                title={step.state === "blocked" ? "先完成上一步" : step.actionLabel}
+                title={step.state === "blocked" ? t("setup.blocked") : step.actionLabel}
               >
                 {step.actionLabel}
                 <ChevronRight size={14} />
@@ -73,10 +72,10 @@ export function SetupGuide({ steps, progress, onRunStep, onClose, onDismissForev
         </ol>
 
         <footer className="setup-guide__footer">
-          <span><Sparkles size={14} />随时按 ⌘K 搜索任何功能</span>
+          <span><Sparkles size={14} />{t("setup.hint")}</span>
           <span className="dialog-actions">
-            <button className="secondary-button" onClick={onDismissForever}>不再自动显示</button>
-            <button className="primary-button" onClick={onClose}>知道了</button>
+            <button className="secondary-button" onClick={onDismissForever}>{t("setup.dismiss")}</button>
+            <button className="primary-button" onClick={onClose}>{t("common.knowIt")}</button>
           </span>
         </footer>
       </section>

@@ -13,13 +13,13 @@ const styles = await readFile(new URL("../src/styles.css", import.meta.url), "ut
 const settings = await readFile(new URL("../src/components/SettingsView.tsx", import.meta.url), "utf8");
 
 const NAMED_SWITCH_LABELS = [
-  "接管系统代理",
-  "允许局域网设备接入",
-  "两阶段分析",
-  "允许 MCP 工具调用",
-  "流式输出",
-  "自动清理",
-  "保存二进制响应",
+  't("settings.route.takeover")',
+  't("settings.device.allowLan")',
+  't("settings.ai.twoStage")',
+  't("settings.ai.allowMcp")',
+  't("settings.ai.streaming")',
+  't("settings.data.autoCleanup")',
+  't("settings.data.saveBinary")',
 ] as const;
 
 interface Rgb {
@@ -222,14 +222,14 @@ describe("Settings switch contrast (#54)", () => {
 
   it("wires the reported Settings switches to those classes", () => {
     for (const label of NAMED_SWITCH_LABELS) {
-      const needle = `<strong>${label}</strong>`;
+      const needle = `<strong>{${label}}</strong>`;
       const at = settings.indexOf(needle);
       assert.ok(at >= 0, `missing switch label ${label}`);
       const window = settings.slice(Math.max(0, at - 180), at);
       assert.match(window, /className="settings-switch-row"/, `${label} is not a settings-switch-row`);
     }
     assert.match(settings, /className="compact-switch"/);
-    assert.match(settings, /title=\{server\.enabled \? "停用 Agent 工具" : "启用 Agent 工具"\}/);
-    assert.match(settings, /<strong>供内置 Agent 使用<\/strong>/);
+    assert.match(settings, /title=\{server\.enabled \? t\("settings\.mcp\.disableAgent"\) : t\("settings\.mcp\.enableAgent"\)\}/);
+    assert.match(settings, /t\("settings\.mcp\.forBuiltin"\)/);
   });
 });

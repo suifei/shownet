@@ -80,13 +80,13 @@ describe("dirty section computation", () => {
 
 describe("settings surfaces its unsaved state", () => {
   it("badges a section header, which is visible while collapsed", () => {
-    assert.match(settings, /className="settings-section__dirty" title="有未保存的更改"/);
+    assert.match(settings, /className="settings-section__dirty" title=\{t\("settings\.unsavedEdits"\)\}/);
     assert.match(styles, /\.settings-section__dirty \{/);
   });
 
   it("keeps a page-level summary that names the sections", () => {
     assert.match(settings, /className="settings-unsaved" role="status"/);
-    assert.match(settings, /\{dirtySections\.length\} 处未保存的更改/);
+    assert.match(settings, /settings\.unsavedN/);
     assert.match(settings, /dirtySections\.map\(sectionTitle\)\.join\("、"\)/);
     assert.match(settings, /onClick=\{\(\) => revealSection\(dirtySections\[0\]\)\}/);
     assert.match(styles, /\.settings-unsaved \{[^}]*position: sticky/s);
@@ -152,9 +152,9 @@ describe("analysis scope is written once", () => {
     // The two were verbatim copies, so every label change had to be made twice.
     assert.match(analysis, /const scopeControls = \(/);
     assert.match(analysis, /className="analysis-config__section analysis-scope">\{scopeControls\}<\/div>/);
-    assert.match(analysis, /aria-label="移动端分析范围">\{scopeControls\}<\/section>/);
-    assert.equal((analysis.match(/仅分析已标记关键请求/g) ?? []).length, 1);
-    assert.equal((analysis.match(/总提示受 \{formatContextSize\(/g) ?? []).length, 1);
+    assert.match(analysis, /aria-label=\{t\("analysis\.mobileScope"\)\}>\{scopeControls\}<\/section>/);
+    assert.equal((analysis.match(/analysis\.manualFocusHint/g) ?? []).length, 1);
+    assert.equal((analysis.match(/analysis\.contextCap/g) ?? []).length, 1);
     // The budget follows the configured context window; a literal here would go
     // stale the moment the user changes 上下文上限.
     assert.doesNotMatch(analysis, /总提示受 \d+ KiB/);

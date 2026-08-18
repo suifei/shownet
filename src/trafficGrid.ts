@@ -1,3 +1,4 @@
+import { t, type MessageKey } from "./i18n.ts";
 import type { RequestField, RequestListItem, RequestSort } from "./types";
 
 export const REQUEST_GRID_ROW_HEIGHT = 38;
@@ -71,6 +72,31 @@ export const requestColumnDefinitions: RequestColumnDefinition[] = [
   { id: "cryptoSnippetCount", label: "代码片段", field: "cryptoSnippetCount", width: 82, minWidth: 72, maxWidth: 130, defaultVisible: false },
   { id: "tlsIntercepted", label: "TLS", field: "tlsIntercepted", width: 68, minWidth: 60, maxWidth: 110, defaultVisible: false },
 ];
+
+const COLUMN_LABEL_KEYS = {
+  order: "traffic.col.order",
+  state: "traffic.col.state",
+  method: "traffic.col.method",
+  url: "traffic.col.url",
+  host: "traffic.col.host",
+  path: "traffic.col.path",
+  status: "traffic.col.status",
+  type: "traffic.col.type",
+  source: "traffic.col.source",
+  sourceInstanceId: "traffic.col.sourceInstanceId",
+  protocol: "traffic.col.protocol",
+  sizeBytes: "traffic.col.sizeBytes",
+  durationMs: "traffic.col.durationMs",
+  startedAt: "traffic.col.startedAt",
+  risk: "traffic.col.risk",
+  hasHook: "traffic.col.hasHook",
+  cryptoSnippetCount: "traffic.col.cryptoSnippetCount",
+  tlsIntercepted: "traffic.col.tlsIntercepted",
+} as const satisfies Record<RequestColumnId, MessageKey>;
+
+export function requestColumnLabel(id: RequestColumnId): string {
+  return t(COLUMN_LABEL_KEYS[id]);
+}
 
 const definitionsById = new Map(requestColumnDefinitions.map((column) => [column.id, column]));
 

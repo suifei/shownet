@@ -1,3 +1,5 @@
+import { t } from "./i18n.ts";
+
 export type McpGuideClientId = "codex" | "claude-code" | "cursor" | "vscode";
 
 export interface McpClientGuide {
@@ -66,13 +68,13 @@ export function buildMcpClientGuide(
       id,
       name: "Codex",
       configPath: "~/.codex/config.toml",
-      configLabel: "TOML 配置",
+      configLabel: t("settings.mcp.tomlConfig"),
       config,
       authSummary: embedsToken
-        ? "访问令牌已写入配置，请勿提交或分享此文件"
-        : "从环境变量 SHOWNET_MCP_TOKEN 读取令牌",
-      reloadHint: "保存后重新打开 Codex",
-      verifyHint: "在 Codex 的 MCP 列表中确认 shownet 已启用",
+        ? t("settings.mcp.tokenInFile")
+        : t("settings.mcp.tokenFromEnv"),
+      reloadHint: t("settings.mcp.reloadCodex"),
+      verifyHint: t("settings.mcp.verifyCodex"),
       embedsToken,
     };
   }
@@ -82,8 +84,8 @@ export function buildMcpClientGuide(
     return {
       id,
       name: "Claude Code",
-      configPath: "项目根目录/.mcp.json",
-      configLabel: "项目 MCP 配置",
+      configPath: t("settings.mcp.projectRoot", { path: ".mcp.json" }),
+      configLabel: t("settings.mcp.projectConfig"),
       config: jsonConfig({
         mcpServers: {
           shownet: {
@@ -94,10 +96,10 @@ export function buildMcpClientGuide(
         },
       }),
       authSummary: embedsToken
-        ? "访问令牌已写入项目配置，请勿提交到 Git"
-        : "从环境变量 SHOWNET_MCP_TOKEN 读取令牌",
-      reloadHint: "保存后重新启动 Claude Code",
-      verifyHint: "运行 /mcp，确认 shownet 为 connected",
+        ? t("settings.mcp.tokenInProject")
+        : t("settings.mcp.tokenFromEnv"),
+      reloadHint: t("settings.mcp.reloadClaude"),
+      verifyHint: t("settings.mcp.verifyClaude"),
       embedsToken,
     };
   }
@@ -107,8 +109,8 @@ export function buildMcpClientGuide(
     return {
       id,
       name: "Cursor",
-      configPath: "项目根目录/.cursor/mcp.json",
-      configLabel: "Cursor MCP 配置",
+      configPath: t("settings.mcp.projectRoot", { path: ".cursor/mcp.json" }),
+      configLabel: t("settings.mcp.cursorConfig"),
       config: jsonConfig({
         mcpServers: {
           shownet: {
@@ -118,10 +120,10 @@ export function buildMcpClientGuide(
         },
       }),
       authSummary: embedsToken
-        ? "访问令牌已写入项目配置，请勿提交到 Git"
-        : "从环境变量 SHOWNET_MCP_TOKEN 读取令牌",
-      reloadHint: "保存后在 Cursor 设置中刷新 MCP Servers",
-      verifyHint: "确认 shownet 显示绿色连接状态",
+        ? t("settings.mcp.tokenInProject")
+        : t("settings.mcp.tokenFromEnv"),
+      reloadHint: t("settings.mcp.reloadCursor"),
+      verifyHint: t("settings.mcp.verifyCursor"),
       embedsToken,
     };
   }
@@ -140,8 +142,8 @@ export function buildMcpClientGuide(
   return {
     id,
     name: "VS Code",
-    configPath: "项目根目录/.vscode/mcp.json",
-    configLabel: "VS Code MCP 配置",
+    configPath: t("settings.mcp.projectRoot", { path: ".vscode/mcp.json" }),
+    configLabel: t("settings.mcp.vscodeConfig"),
     config: jsonConfig({
       ...(inputs ? { inputs } : {}),
       servers: {
@@ -153,10 +155,10 @@ export function buildMcpClientGuide(
       },
     }),
     authSummary: embedsToken
-      ? "访问令牌已写入项目配置，请勿提交到 Git"
-      : "首次启动时由 VS Code 安全询问令牌",
-    reloadHint: "保存后运行 MCP: List Servers",
-    verifyHint: "启动 shownet，并确认状态为 Running",
+      ? t("settings.mcp.tokenInProject")
+      : t("settings.mcp.tokenFromVscode"),
+    reloadHint: t("settings.mcp.reloadVscode"),
+    verifyHint: t("settings.mcp.verifyVscode"),
     embedsToken,
   };
 }

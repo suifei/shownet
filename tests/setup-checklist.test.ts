@@ -50,8 +50,8 @@ describe("setup checklist", () => {
     const step = buildSetupSteps({ ...cold, capturing: true, requestCount: 3, sourceCount: 2 })
       .find((entry) => entry.id === "source");
     assert.equal(step?.state, "done");
-    assert.match(step?.summary ?? "", /3 条请求/);
-    assert.match(step?.summary ?? "", /2 个来源/);
+    assert.match(step?.summary ?? "", /3/);
+    assert.match(step?.summary ?? "", /2/);
   });
 
   it("never suggests a blocked step as the next move", () => {

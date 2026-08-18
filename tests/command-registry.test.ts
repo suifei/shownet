@@ -127,7 +127,7 @@ describe("command palette wiring", () => {
 
   it("explains disabled commands instead of leaving them dead", async () => {
     const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-    assert.match(app, /disabledReason: "请先停止抓包"/);
+    assert.match(app, /disabledReason: t\("cmd\.session\.stopFirst"\)/);
     assert.match(app, /action\.disabled \? action\.disabledReason/);
   });
 });

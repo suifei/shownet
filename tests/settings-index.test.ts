@@ -20,14 +20,14 @@ import {
 describe("settings index", () => {
   it("covers every section the view renders, with matching ids and titles", async () => {
     const view = await readFile(new URL("../src/components/SettingsView.tsx", import.meta.url), "utf8");
-    const rendered = [...view.matchAll(/<SettingsSection id="([^"]+)" title="([^"]+)">/g)]
-      .map((match) => ({ id: match[1], title: match[2] }));
+    const rendered = [...view.matchAll(/<SettingsSection id="([^"]+)" title=\{settingsSectionTitle\("([^"]+)"\)\}>/g)]
+      .map((match) => ({ id: match[1], titleId: match[2] }));
 
     assert.equal(rendered.length, SETTINGS_INDEX.length, "index and view must describe the same sections");
     for (const section of rendered) {
       const entry = SETTINGS_INDEX.find((item) => item.id === section.id);
       assert.ok(entry, `${section.id} is rendered but missing from the index`);
-      assert.equal(entry.title, section.title, `${section.id} title drifted from the index`);
+      assert.equal(section.titleId, section.id, `${section.id} title lookup must use the same id`);
     }
   });
 
@@ -136,7 +136,7 @@ describe("settings view wiring", () => {
       readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
     ]);
     assert.match(view, /className="settings-section__heading"/);
-    assert.match(view, /\{entry && <small>\{entry\.summary\}<\/small>\}/);
+    assert.match(view, /\{entry && <small>\{settingsSectionSummary\(entry\.id\)\}<\/small>\}/);
     assert.match(styles, /\.settings-section__heading small/);
   });
 });

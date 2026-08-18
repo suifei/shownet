@@ -11,7 +11,7 @@ describe("no-proxy capture entry", () => {
     assert.match(source, /invoke<ReverseProxyStatus>\("start_reverse_proxy"/);
     assert.match(source, /invoke<ReverseProxyStatus>\("stop_reverse_proxy"/);
     assert.match(source, /启动抓包与入口/);
-    assert.match(source, /远程 HTTPS 由 ShowNet 校验，客户端无需安装 CA/);
+    assert.match(source, /connect\.caByReverse/);
   });
 
   it("treats reverse traffic as a first-class filterable source", async () => {
@@ -22,7 +22,7 @@ describe("no-proxy capture entry", () => {
     ]);
 
     assert.match(types, /\| "reverse"/);
-    assert.match(data, /reverse: "免代理接入"/);
+    assert.match(data, /reverse: "source\.reverse"/);
     assert.match(traffic, /"mobile", "iot", "reverse"/);
   });
 

@@ -32,7 +32,7 @@ describe("capture session startup", () => {
 
     assert.match(app, /await ensureCaptureSession\(activeSession\.id/);
     assert.match(app, /sessionId:\s*next \? sessionId : null/);
-    assert.match(app, /已自动创建会话并开始抓包/);
+    assert.match(app, /shell\.captureCreated|已自动创建会话并开始抓包/);
     assert.doesNotMatch(app, /id: "capture-toggle"[\s\S]{0,500}disabled: !activeSession\.id/);
     assert.match(app, /id: "session-new"[\s\S]{0,500}disabled: captureTransitioning/);
   });

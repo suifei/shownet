@@ -8,13 +8,15 @@
  * match" — the opposite of what happened, in the one panel people open to work
  * out why a rule did or did not fire.
  */
+import { t } from "./i18n.ts";
+
 export const RULE_TRACE_RESULT_LABELS: Record<string, string> = {
-  applied: "已执行",
-  inherited: "沿用连接",
-  skipped: "已跳过",
-  preview: "预览",
-  error: "错误",
-  "not-matched": "未命中",
+  get applied() { return t("traffic.rule.applied"); },
+  get inherited() { return t("traffic.rule.inherited"); },
+  get skipped() { return t("traffic.rule.skipped"); },
+  get preview() { return t("traffic.rule.preview"); },
+  get error() { return t("traffic.rule.error"); },
+  get "not-matched"() { return t("traffic.rule.notMatched"); },
 };
 
 export function ruleTraceResultLabel(result: string): string {

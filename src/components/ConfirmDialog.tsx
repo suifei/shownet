@@ -1,6 +1,8 @@
 import { CircleAlert, X } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
+import { t } from "../i18n.ts";
+
 /**
  * In-app confirmation, replacing `window.confirm`.
  *
@@ -66,16 +68,16 @@ export function useConfirm(): ConfirmController {
             <h2 id="confirm-dialog-title">{pending.title}</h2>
             {pending.detail && <p>{pending.detail}</p>}
           </div>
-          <button className="icon-button" onClick={() => settle(false)} title="关闭"><X size={17} /></button>
+          <button className="icon-button" onClick={() => settle(false)} title={t("common.close")}><X size={17} /></button>
         </header>
         <footer>
-          <button className="secondary-button" onClick={() => settle(false)}>{pending.cancelLabel ?? "取消"}</button>
+          <button className="secondary-button" onClick={() => settle(false)}>{pending.cancelLabel ?? t("common.cancel")}</button>
           <button
             autoFocus
             className={pending.tone === "danger" ? "primary-button is-danger" : "primary-button"}
             onClick={() => settle(true)}
           >
-            {pending.confirmLabel ?? "确认"}
+            {pending.confirmLabel ?? t("common.confirm")}
           </button>
         </footer>
       </section>

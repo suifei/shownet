@@ -101,11 +101,11 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
     );
     assert.match(src, /from ["']\.\.\/advancedConsoleCapabilities["']/);
     assert.match(src, /WORKFLOW_STAGES/);
-    assert.match(src, /何时用/);
-    assert.match(src, /最佳实践/);
-    assert.match(src, /下一步/);
-    assert.match(src, /抓包过程/);
-    assert.match(src, /AI 分析过程/);
+    assert.match(src, /advanced\.when/);
+    assert.match(src, /advanced\.best/);
+    assert.match(src, /advanced\.next/);
+    assert.match(src, /advanced\.capturePhase/);
+    assert.match(src, /advanced\.analysisPhase/);
     assert.match(src, /onOpenAnalysis/);
     assert.match(src, /honestyBanner|ja3Parity/);
     assert.match(src, /get_tls_fingerprints/);
@@ -113,7 +113,7 @@ describe("advanced console UI consumes capability map and codex tokens", () => {
     assert.match(src, /set_outbound_tls_profile/);
     // Compact layout: step strip titles only + tip line; long tips not inside step cards
     assert.match(src, /advanced-workflow-tip/);
-    assert.match(src, /TAB_SHORT_LABEL/);
+    assert.match(src, /TAB_SHORT_LABEL_KEYS/);
     assert.match(src, /advanced-panel-guide-more/);
     assert.doesNotMatch(src, /advanced-workflow-body/);
   });

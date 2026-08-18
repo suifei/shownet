@@ -14,16 +14,15 @@ describe("HTTPS interception settings", () => {
     assert.match(types, /showBypassedConnections: boolean/);
     assert.match(settings, /invoke<TlsInterceptionSettings>\("get_tls_interception_settings"\)/);
     assert.match(settings, /invoke<TlsInterceptionSettings>\("save_tls_interception_settings"/);
-    assert.match(settings, /解密全部/);
-    assert.match(settings, /绕行指定/);
-    assert.match(settings, /全部绕行/);
-    assert.match(settings, /aria-label="HTTPS 绕行域名"/);
-    assert.match(settings, /支持 \* 和 \?/);
-    assert.match(settings, /ClientHello 中的 SNI/);
+    assert.match(settings, /settings\.tls\.decryptAll/);
+    assert.match(settings, /settings\.tls\.bypassSelected/);
+    assert.match(settings, /settings\.tls\.bypassAll/);
+    assert.match(settings, /aria-label=\{t\("settings\.tls\.bypassHostsAria"\)\}/);
+    assert.match(settings, /settings\.tls\.keepRawHint/);
     assert.match(settings, /全部 HTTPS 将不再解密，成功连接也不会出现在流量列表中；失败仍保留/);
-    assert.match(settings, /在流量列表显示绕行连接/);
-    assert.match(settings, /只隐藏成功连接；连接失败仍会保留用于排查/);
-    assert.match(settings, /新连接立即生效/);
+    assert.match(settings, /settings\.tls\.showBypass/);
+    assert.match(settings, /settings\.tls\.showBypassOff/);
+    assert.match(settings, /settings\.tls\.policyHint/);
     assert.match(lib, /get_tls_interception_settings,/);
     assert.match(lib, /save_tls_interception_settings,/);
   });
@@ -46,8 +45,8 @@ describe("HTTPS interception settings", () => {
     assert.match(rust, /fn apply_static_cdn_bypass_preset/);
     assert.match(rust, /static_cdn_preset_bypasses_baidu_cdn_hosts_without_mitm/);
     assert.match(settings, /applyStaticCdnBypassPreset/);
-    assert.match(settings, /aria-label="推荐：绕过常见静态 CDN"/);
-    assert.match(settings, /不解密正文/);
+    assert.match(settings, /aria-label=\{t\("settings\.tls\.cdnPreset"\)\}/);
+    assert.match(settings, /settings\.tls\.cdnWriteTitle/);
     assert.match(settings, /bypass_selected/);
     assert.match(settings, /STATIC_CDN_BYPASS_PRESET/);
     assert.match(styles, /\.tls-static-cdn-preset/);
@@ -81,7 +80,7 @@ describe("HTTPS interception settings", () => {
     assert.match(traffic, /requestStateLabel\(request\.state\)/);
     assert.match(
       await readFile(new URL("../src/requestFilters.ts", import.meta.url), "utf8"),
-      /tunnel: "未解密"/,
+      /traffic\.state\.tunnel/,
     );
     assert.match(storage, /json_extract\(r\.tls_fingerprint_json, '\$\.captureMode'\) = 'mitm'/);
     assert.match(storage, /UPPER\(r\.method\) != 'CONNECT'/);

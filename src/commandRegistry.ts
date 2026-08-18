@@ -7,11 +7,13 @@
  * initials of the label ("kbz" for 开始抓包). All three feed the same scorer.
  */
 
+import { t, type MessageKey } from "./i18n.ts";
+
 export type CommandGroupId = "start" | "capture" | "session" | "navigate" | "config";
 
 export interface CommandAction {
   id: string;
-  /** Visible label, always Chinese. */
+  /** Visible label from the active language pack. */
   title: string;
   /** One line of "what this does" shown under the title. */
   subtitle?: string;
@@ -29,12 +31,20 @@ export interface CommandAction {
   run: () => void;
 }
 
+const COMMAND_GROUP_KEYS = {
+  start: "cmd.group.start",
+  capture: "cmd.group.capture",
+  session: "cmd.group.session",
+  navigate: "cmd.group.navigate",
+  config: "cmd.group.config",
+} as const satisfies Record<CommandGroupId, MessageKey>;
+
 export const COMMAND_GROUP_LABELS: Record<CommandGroupId, string> = {
-  start: "开始使用",
-  capture: "抓包与连接",
-  session: "会话与导出",
-  navigate: "前往",
-  config: "设置与证书",
+  get start() { return t(COMMAND_GROUP_KEYS.start); },
+  get capture() { return t(COMMAND_GROUP_KEYS.capture); },
+  get session() { return t(COMMAND_GROUP_KEYS.session); },
+  get navigate() { return t(COMMAND_GROUP_KEYS.navigate); },
+  get config() { return t(COMMAND_GROUP_KEYS.config); },
 };
 
 /** Render order for groups; anything unlisted falls to the end. */

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { t } from "../i18n.ts";
 import {
   Activity,
   ArrowRight,
@@ -57,23 +58,23 @@ const TAB_ORDER: ConsoleTabId[] = [
 ];
 
 /** What you can do with a PX evidence row. Was three separate console tabs. */
-const PX_MODES = [
-  { id: "decode" as const, label: "解码", hint: "点请求查看结构解码；解码为结构解析，非无密钥硬破。" },
-  { id: "compare" as const, label: "对比", hint: "标记 A / B 两条请求，再到流量或实验室做字段 diff。" },
-  { id: "tamper" as const, label: "改写", hint: "按证据生成可回滚的改写规则，再到规则工作台验证。" },
+const PX_MODE_KEYS = [
+  { id: "decode" as const, label: "advanced.px.decode" as const, hint: "advanced.px.decodeHint" as const },
+  { id: "compare" as const, label: "advanced.px.compare" as const, hint: "advanced.px.compareHint" as const },
+  { id: "tamper" as const, label: "advanced.px.tamper" as const, hint: "advanced.px.tamperHint" as const },
 ];
-type PxMode = (typeof PX_MODES)[number]["id"];
+type PxMode = (typeof PX_MODE_KEYS)[number]["id"];
 
 /** Short labels for the horizontal tab strip (full name stays in panel title). */
-const TAB_SHORT_LABEL: Record<ConsoleTabId, string> = {
-  overview: "总览",
-  capture: "捕获",
-  hooks: "Hook",
-  rules: "规则",
-  fingerprint: "指纹",
-  px: "PX 证据",
-  recaptcha: "reCAPTCHA",
-  config: "配置",
+const TAB_SHORT_LABEL_KEYS: Record<ConsoleTabId, "advanced.tab.overview" | "advanced.tab.capture" | "advanced.tab.rules" | "advanced.tab.fingerprint" | "advanced.tab.px" | "advanced.tab.config" | null> = {
+  overview: "advanced.tab.overview",
+  capture: "advanced.tab.capture",
+  hooks: null,
+  rules: "advanced.tab.rules",
+  fingerprint: "advanced.tab.fingerprint",
+  px: "advanced.tab.px",
+  recaptcha: null,
+  config: "advanced.tab.config",
 };
 
 interface AdvancedConsoleViewProps {
@@ -256,61 +257,61 @@ export function AdvancedConsoleView({
         <div className="advanced-console-hero-top">
           <div className="advanced-console-hero-main">
             <h2>
-              <Activity size={18} aria-hidden /> MITM 高级控制台
+              <Activity size={18} aria-hidden /> {t("advanced.title")}
             </h2>
             <p className="advanced-console-lead">
-              抓包配置与证据中枢 · 串联流量 / 浏览器 / 设置 / AI
+              {t("advanced.lead")}
             </p>
           </div>
           <div className="advanced-console-toggles">
             <label className={pxSettings.decryptEnabled ? "is-on" : ""}>
-              <span>PX 解密</span>
+              <span>{t("advanced.pxDecrypt")}</span>
               <input
                 type="checkbox"
                 checked={pxSettings.decryptEnabled}
                 disabled={saving}
                 onChange={(e) => void updatePx({ decryptEnabled: e.target.checked })}
               />
-              <em>{pxSettings.decryptEnabled ? "开" : "关"}</em>
+              <em>{pxSettings.decryptEnabled ? t("common.on") : t("common.off")}</em>
             </label>
             <label className={pxSettings.interceptEcData ? "is-on" : ""}>
-              <span>拦截 ecData</span>
+              <span>{t("advanced.interceptEc")}</span>
               <input
                 type="checkbox"
                 checked={pxSettings.interceptEcData}
                 disabled={saving}
                 onChange={(e) => void updatePx({ interceptEcData: e.target.checked })}
               />
-              <em>{pxSettings.interceptEcData ? "开" : "关"}</em>
+              <em>{pxSettings.interceptEcData ? t("common.on") : t("common.off")}</em>
             </label>
           </div>
         </div>
-        <div className="advanced-console-stats" aria-label="会话状态">
+        <div className="advanced-console-stats" aria-label={t("advanced.sessionState")}>
           <span>
-            端口 <strong>{proxyPort}</strong>
+            {t("advanced.port")} <strong>{proxyPort}</strong>
           </span>
           <span>
-            请求 <strong>{packetCount}</strong>
+            {t("advanced.requests")} <strong>{packetCount}</strong>
           </span>
           <span>
             Hook <strong>{activeHookCount}</strong>
           </span>
           <span>
-            指纹 <strong>{fingerprints.length}</strong>
+            {t("advanced.fingerprints")} <strong>{fingerprints.length}</strong>
           </span>
           <span>
             PX <strong>{pxEvidence.length}</strong>
           </span>
           <span>
-            预置{" "}
+            {t("advanced.preset")}{" "}
             <strong>
               <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "—"}</code>
             </strong>
           </span>
           <span>
-            JA3 对等{" "}
+            {t("advanced.ja3Parity")}{" "}
             <strong className={outboundTls?.ja3Parity ? "is-ok" : "is-warn"}>
-              {outboundTls?.ja3Parity ? "是" : "否"}
+              {outboundTls?.ja3Parity ? t("common.yes") : t("common.no")}
             </strong>
           </span>
         </div>
@@ -325,7 +326,7 @@ export function AdvancedConsoleView({
 
       {/* Compact step strip — titles only; long tips live under the strip / in panel guide */}
       <div className="advanced-workflow-block">
-        <nav className="advanced-workflow" aria-label="推荐工作流：抓包 → 证据 → 分析 → 导出">
+        <nav className="advanced-workflow" aria-label={t("advanced.workflowAria")}>
           {WORKFLOW_STAGES.map((stage, index) => (
             <button
               key={stage.id}
@@ -343,12 +344,12 @@ export function AdvancedConsoleView({
           ))}
         </nav>
         <p className="advanced-workflow-tip" role="status">
-          <span className="advanced-workflow-tip-label">建议 · {suggestedStage.label}</span>
+          <span className="advanced-workflow-tip-label">{t("advanced.suggest", { label: suggestedStage.label })}</span>
           {suggestedStage.beginnerTip}
         </p>
       </div>
 
-      <nav className="advanced-console-tabs" aria-label="高级控制台分区">
+      <nav className="advanced-console-tabs" aria-label={t("advanced.tabsAria")}>
         {TAB_ORDER.map((id) => {
           const meta = tabGuide(id);
           const Icon = TAB_ICONS[id];
@@ -374,7 +375,7 @@ export function AdvancedConsoleView({
               onClick={() => setTab(id)}
             >
               <Icon size={14} aria-hidden />
-              <span>{TAB_SHORT_LABEL[id]}</span>
+              <span>{TAB_SHORT_LABEL_KEYS[id] ? t(TAB_SHORT_LABEL_KEYS[id]!) : id === "hooks" ? "Hook" : "reCAPTCHA"}</span>
               {badge !== null && badge > 0 ? <span className="advanced-tab-badge">{badge}</span> : null}
             </button>
           );
@@ -390,18 +391,18 @@ export function AdvancedConsoleView({
             <h3>{guide.label}</h3>
           </div>
           <p className="advanced-panel-guide-next">
-            <strong>下一步</strong>
+            <strong>{t("advanced.next")}</strong>
             <span>{guide.nextStep}</span>
           </p>
           <details className="advanced-panel-guide-more">
-            <summary>何时用 · 最佳实践</summary>
+            <summary>{t("advanced.whenBest")}</summary>
             <dl className="advanced-guide-grid">
               <div>
-                <dt>何时用</dt>
+                <dt>{t("advanced.when")}</dt>
                 <dd>{guide.whenToUse}</dd>
               </div>
               <div>
-                <dt>最佳实践</dt>
+                <dt>{t("advanced.best")}</dt>
                 <dd>{guide.bestPractice}</dd>
               </div>
             </dl>
@@ -410,14 +411,14 @@ export function AdvancedConsoleView({
 
         {tab === "overview" && (
           <div className="advanced-panel-card">
-            <h4>能力分工：抓包过程 vs AI 分析过程</h4>
+            <h4>{t("advanced.splitTitle")}</h4>
             <p className="hint">
-              下列能力与真实 IPC / MCP 工具一致；AI 默认只读取证，改出站预置与 PX 开关在控制台人工操作。
+              {t("advanced.splitHint")}
             </p>
             <div className="advanced-capability-columns">
               <div>
                 <h5>
-                  <Network size={14} aria-hidden /> 抓包过程
+                  <Network size={14} aria-hidden /> {t("advanced.capturePhase")}
                 </h5>
                 <ul className="advanced-capability-list">
                   {CAPABILITY_CATALOG.filter((c) => c.phase === "capture" || c.phase === "both").map((c) => (
@@ -432,7 +433,7 @@ export function AdvancedConsoleView({
               </div>
               <div>
                 <h5>
-                  <Sparkles size={14} aria-hidden /> AI 分析过程
+                  <Sparkles size={14} aria-hidden /> {t("advanced.analysisPhase")}
                 </h5>
                 <ul className="advanced-capability-list">
                   {CAPABILITY_CATALOG.filter((c) => c.phase === "analysis" || c.phase === "both").map((c) => (
@@ -448,16 +449,16 @@ export function AdvancedConsoleView({
             </div>
             <div className="advanced-quick-actions">
               <button type="button" className="primary-button" onClick={onOpenBrowser}>
-                内嵌浏览器抓包
+                {t("advanced.openBrowserCapture")}
               </button>
               <button type="button" className="secondary-button" onClick={onOpenTraffic}>
-                打开流量
+                {t("advanced.openTraffic")}
               </button>
               <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
-                  进入 AI 分析
+                  {t("advanced.openAnalysis")}
                 </button>
               <button type="button" className="secondary-button" onClick={() => setTab("config")}>
-                出站 TLS 配置
+                {t("advanced.outboundTlsConfig")}
               </button>
             </div>
           </div>
@@ -466,14 +467,14 @@ export function AdvancedConsoleView({
         {tab === "capture" && (
           <div className="advanced-panel-card">
             <p>
-              当前会话请求 <strong>{packetCount}</strong> 条。完整列表与报文检视在「流量」工作台。
+              {t("advanced.sessionRequests", { count: packetCount })}
             </p>
             <div className="advanced-quick-actions">
               <button type="button" className="primary-button" onClick={onOpenTraffic}>
-                打开流量视图
+                {t("advanced.openTrafficView")}
               </button>
               <button type="button" className="secondary-button" onClick={onOpenBrowser}>
-                内嵌浏览器
+                {t("advanced.embeddedBrowser")}
               </button>
             </div>
             {packetCount === 0 ? (
@@ -494,14 +495,14 @@ export function AdvancedConsoleView({
         {tab === "hooks" && (
           <div className="advanced-panel-card">
             <p>
-              会话内浏览器 Hook 事件 <strong>{hooks.length}</strong> 条（列表计数 {activeHookCount}）。
+              {t("advanced.sessionHooks", { count: hooks.length, listed: activeHookCount })}
             </p>
             <div className="advanced-quick-actions">
               <button type="button" className="primary-button" onClick={onOpenBrowser}>
-                打开浏览器 Hook 面板
+                {t("advanced.openHookPanel")}
               </button>
               <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
-                  用 AI 读 Hook / 加密
+                  {t("advanced.readHooksAi")}
                 </button>
             </div>
             {hooks.length === 0 ? (
@@ -520,13 +521,13 @@ export function AdvancedConsoleView({
 
         {tab === "rules" && (
           <div className="advanced-panel-card">
-            <p>通用重写 / 断点 / 镜像规则在请求实验室的规则工作台中编辑。</p>
+            <p>{t("advanced.rulesHint")}</p>
             <p className="advanced-empty">{guide.emptyHint}</p>
             <button type="button" className="primary-button" onClick={onOpenRules}>
-              打开替换规则工作台
+              {t("advanced.openRules")}
             </button>
             {pxSettings.interceptEcData && (
-              <p className="hint">已开启「拦截 ecData」：含 ecData 的请求会在分析中标记；可配合断点规则改包。</p>
+              <p className="hint">{t("advanced.ecDataOn")}</p>
             )}
           </div>
         )}
@@ -535,19 +536,19 @@ export function AdvancedConsoleView({
           <div className="advanced-panel-card">
             <div className="advanced-tls-status">
               <div>
-                <span>引擎</span>
+                <span>{t("advanced.engine")}</span>
                 <strong>
                   <code>{outboundTls?.engine ?? "rustls"}</code>
                 </strong>
               </div>
               <div>
-                <span>预置</span>
+                <span>{t("advanced.preset")}</span>
                 <strong>
                   <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "default"}</code>
                 </strong>
               </div>
               <div>
-                <span>浏览器标签</span>
+                <span>{t("advanced.browserTag")}</span>
                 <strong>
                   {outboundTls?.browserFamily
                     ? `${outboundTls.browserFamily} ${outboundTls.browserMajorVersion ?? ""}`
@@ -561,13 +562,13 @@ export function AdvancedConsoleView({
                 </strong>
               </div>
               <div>
-                <span>实测对齐</span>
+                <span>{t("advanced.measuredAlign")}</span>
                 <strong className="is-warn">
                   <code>{outboundTls?.alignmentLevel ?? "recipe"}</code>
                 </strong>
               </div>
               <div>
-                <span>金标上限</span>
+                <span>{t("advanced.goldenCap")}</span>
                 <strong title={outboundTls?.goldenAuthorisedClaim}>
                   <code>{outboundTls?.goldenAuthorisedCeiling ?? "recipe"}</code>
                 </strong>
@@ -587,10 +588,10 @@ export function AdvancedConsoleView({
             </p>
             <div className="advanced-quick-actions">
               <button type="button" className="secondary-button" onClick={() => setTab("config")}>
-                修改出站预置
+                {t("advanced.changePreset")}
               </button>
               <button type="button" className="secondary-button" onClick={onOpenAnalysis}>
-                  AI 读取指纹（shownet_get_tls_fingerprints）
+                  {t("advanced.aiReadFp")}
                 </button>
             </div>
             {fingerprints.length === 0 ? (
@@ -599,9 +600,9 @@ export function AdvancedConsoleView({
               <ul className="advanced-mini-list">
                 {fingerprints.slice(0, 15).map((fp, index) => (
                   <li key={`${fp.inbound.ja3}-${index}`}>
-                    入站 JA3 <code>{fp.inbound.ja3.slice(0, 16)}…</code> · 出站 {fp.outbound.profile} /{" "}
+                    {t("advanced.inboundJa3")} <code>{fp.inbound.ja3.slice(0, 16)}…</code> · {t("advanced.outbound")} {fp.outbound.profile} /{" "}
                     {fp.outbound.applicationProtocol ?? fp.outbound.negotiatedAlpn ?? "—"} ·{" "}
-                    {fp.outbound.selectedFromInbound ? "入站映射" : fp.outbound.mode}
+                    {fp.outbound.selectedFromInbound ? t("advanced.inboundMap") : fp.outbound.mode}
                   </li>
                 ))}
               </ul>
@@ -614,8 +615,8 @@ export function AdvancedConsoleView({
             {/* One evidence list, three things you can do with it. These were
                 three sibling tabs rendering the same body and the same badge,
                 differing only by which per-row action they showed. */}
-            <div className="px-mode-switch" role="tablist" aria-label="PX 操作模式">
-              {PX_MODES.map((mode) => (
+            <div className="px-mode-switch" role="tablist" aria-label={t("advanced.px.modes")}>
+              {PX_MODE_KEYS.map((mode) => (
                 <button
                   key={mode.id}
                   type="button"
@@ -623,15 +624,15 @@ export function AdvancedConsoleView({
                   aria-selected={pxMode === mode.id}
                   className={pxMode === mode.id ? "is-active" : ""}
                   onClick={() => setPxMode(mode.id)}
-                  title={mode.hint}
+                  title={t(mode.hint)}
                 >
-                  {mode.label}
+                  {t(mode.label)}
                 </button>
               ))}
             </div>
             <p>
-              检测到 PX/HUMAN 相关请求 <strong>{pxEvidence.length}</strong> 条。
-              <span className="hint"> {PX_MODES.find((mode) => mode.id === pxMode)?.hint}</span>
+              PX/HUMAN <strong>{pxEvidence.length}</strong>
+              <span className="hint"> {t((PX_MODE_KEYS.find((mode) => mode.id === pxMode) ?? PX_MODE_KEYS[0]).hint)}</span>
             </p>
             {pxEvidence.length === 0 ? (
               <p className="advanced-empty">{guide.emptyHint}</p>
@@ -646,17 +647,17 @@ export function AdvancedConsoleView({
                     <small>{item.markers.join(", ")}</small>
                     {pxMode === "compare" && (
                       <span className="row-actions">
-                        <button type="button" className={compareA === item.requestId ? "is-active" : ""} onClick={() => setCompareA(item.requestId)} title="标记为基线 A">
+                        <button type="button" className={compareA === item.requestId ? "is-active" : ""} onClick={() => setCompareA(item.requestId)} title={t("advanced.markA")}>
                           A
                         </button>
-                        <button type="button" className={compareB === item.requestId ? "is-active" : ""} onClick={() => setCompareB(item.requestId)} title="标记为对比 B">
+                        <button type="button" className={compareB === item.requestId ? "is-active" : ""} onClick={() => setCompareB(item.requestId)} title={t("advanced.markB")}>
                           B
                         </button>
                       </span>
                     )}
                     {pxMode === "tamper" && (
                       <button type="button" onClick={onOpenRules}>
-                        生成改写规则
+                        {t("advanced.makeRewrite")}
                       </button>
                     )}
                   </li>
@@ -665,15 +666,15 @@ export function AdvancedConsoleView({
             )}
             {pxMode === "compare" && pxEvidence.length > 0 && (
               <p>
-                对比: A=<code>{compareA ?? "—"}</code> B=<code>{compareB ?? "—"}</code>
+                {t("advanced.compareAB", { a: compareA ?? "—", b: compareB ?? "—" })}
                 {compareA && compareB
-                  ? "（在流量/实验室中打开两条请求做字段 diff）"
-                  : "（标记 A 和 B 两条请求后再做字段 diff）"}
+                  ? t("advanced.compareReady")
+                  : t("advanced.compareNeed")}
               </p>
             )}
             {decode && selectedPx === decode.requestId && (
               <details className="advanced-details" open>
-                <summary>结构解码结果（可折叠）</summary>
+                <summary>{t("advanced.decodeResult")}</summary>
                 <pre className="advanced-json">{JSON.stringify(decode, null, 2)}</pre>
               </details>
             )}
@@ -683,8 +684,7 @@ export function AdvancedConsoleView({
         {tab === "recaptcha" && (
           <div className="advanced-panel-card">
             <p>
-              会话中疑似 reCAPTCHA 请求 <strong>{recaptchaHits.length}</strong> 条。完整解题走 Web 风控 Lab /
-              视觉验证码工具。
+              {t("advanced.recaptchaHits", { count: recaptchaHits.length })}
             </p>
             {recaptchaHits.length === 0 ? (
               <p className="advanced-empty">{guide.emptyHint}</p>
@@ -705,15 +705,15 @@ export function AdvancedConsoleView({
           <div className="advanced-panel-card">
             <div className="advanced-config-grid">
               <div>
-                <h4>出站 ClientHello 预置</h4>
+                <h4>{t("advanced.cap.outboundTls")}</h4>
                 <p className="hint" style={{ marginBottom: 8 }}>
-                  当前: <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "—"}</code>
+                  {t("advanced.current")}: <code>{outboundTls?.presetId ?? outboundTls?.profile ?? "—"}</code>
                   {outboundTls?.browserFamily
                     ? ` · ${outboundTls.browserFamily} ${outboundTls.browserMajorVersion ?? ""}`
                     : ""}
                 </p>
                 <label className="checkbox-row advanced-select-block">
-                  <span>版本化预置（family + major）</span>
+                  <span>{t("advanced.versionedPreset")}</span>
                   <select
                     disabled={saving}
                     value={outboundTls?.presetId ?? "chrome150"}
@@ -741,7 +741,7 @@ export function AdvancedConsoleView({
                     checked={Boolean(outboundTls?.autoFromInbound)}
                     onChange={(e) => void setAutoInbound(e.target.checked)}
                   />
-                  根据入站 JA3/JA4 自动选择出站预置（仅影响未链接 impersonate 的开发构建）
+                  {t("advanced.autoPresetDev")}
                 </label>
                 <p className="hint">
                   {outboundTls?.realImpersonateStackAvailable ? (
@@ -768,10 +768,10 @@ export function AdvancedConsoleView({
                 </p>
               </div>
               <div>
-                <h4>系统设置</h4>
-                <p className="hint">端口、Root CA 一键安装、HTTPS 拦截模式在设置页。</p>
+                <h4>{t("advanced.systemSettings")}</h4>
+                <p className="hint">{t("advanced.systemSettingsHint")}</p>
                 <button type="button" className="primary-button" onClick={onOpenSettings}>
-                  打开设置（端口 / CA / 拦截模式）
+                  {t("advanced.openSettings")}
                 </button>
               </div>
             </div>

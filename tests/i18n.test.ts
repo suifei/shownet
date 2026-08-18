@@ -7,16 +7,22 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 import {
+  createTranslator,
   EN_PACK,
   FALLBACK_PACK_ID,
+  localeMatchesRegisteredPack,
   lookupMessage,
   NAV_MESSAGE_KEYS,
+  readStoredUiLocale,
   REGISTERED_PACKS,
   resolveLanguagePack,
+  resolveUiLocale,
+  UI_LOCALE_STORAGE_KEY,
+  writeStoredUiLocale,
   ZH_PACK,
 } from "../src/i18n.ts";
 import { chromeLabel } from "../src/navChrome.ts";
-import type { LanguagePack } from "../src/i18nTypes.ts";
+import type { LanguagePack } from "../src/i18n.ts";
 
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 
@@ -92,14 +98,50 @@ describe("chrome lookup wiring", () => {
 
   it("App nav and palette titles call chrome lookup, not only Chinese literals", () => {
     assert.match(app, /chromeLabel\(t,/);
-    assert.match(app, /detectHostLocale/);
+    assert.match(app, /resolveUiLocale/);
     assert.match(app, /createTranslator/);
     assert.match(app, /t\("nav\.settings"\)/);
     assert.match(app, /id: "go-settings"/);
     assert.match(app, /id: "go-browser"/);
     assert.match(app, /title: chromeLabel\(t, "settings"\)/);
     assert.match(app, /title: chromeLabel\(t, "traffic"\)/);
+    assert.match(app, /t\("shell\.command"\)/);
+    assert.match(app, /t\("shell\.sessions"\)/);
     assert.doesNotMatch(app, /label: "流量"/);
     assert.doesNotMatch(app, /<span>设置<\/span>/);
+    assert.doesNotMatch(app, /<span>命令<\/span>/);
+    assert.match(app, /<LocaleSwitcher onChange=\{applyUiLocale\} \/>/);
+  });
+
+  it("lets a stored pack override the host locale", () => {
+    const storage = memoryStorage();
+    writeStoredUiLocale("en", storage);
+    assert.equal(readStoredUiLocale(storage), "en");
+    assert.equal(storage.getItem(UI_LOCALE_STORAGE_KEY), "en");
+    assert.equal(resolveUiLocale({ stored: "en", host: "zh-CN" }), "en");
+    assert.equal(resolveUiLocale({ stored: "zh", host: "en-US" }), "zh");
+    assert.equal(resolveUiLocale({ stored: "nope", host: "en-GB" }), "en-GB");
+    assert.ok(localeMatchesRegisteredPack("en-US"));
+    assert.ok(localeMatchesRegisteredPack("zh-CN"));
+    assert.equal(localeMatchesRegisteredPack("th"), false);
+  });
+
+  it("interpolates named placeholders", () => {
+    assert.equal(lookupMessage(ZH_PACK, "shell.reports").includes("{count}"), true);
+    const { t } = createTranslator("en-US");
+    assert.equal(t("shell.reports", { count: 2 }), "2 reports");
+    assert.equal(t("shell.sourcesCount", { count: 3 }), "3 sources");
   });
 });
+
+function memoryStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    get length() { return data.size; },
+    clear() { data.clear(); },
+    getItem(key) { return data.has(key) ? data.get(key)! : null; },
+    key(index) { return [...data.keys()][index] ?? null; },
+    removeItem(key) { data.delete(key); },
+    setItem(key, value) { data.set(key, String(value)); },
+  };
+}

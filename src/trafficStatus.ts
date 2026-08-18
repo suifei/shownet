@@ -3,6 +3,8 @@
  * ShowNet proxy failures (502 + 连接/出口…) from origin 4xx/5xx.
  */
 
+import { t } from "./i18n.ts";
+
 export type TrafficStatusKind =
   | "pending"
   | "proxy"
@@ -47,7 +49,7 @@ export function classifyTrafficStatus(
     return {
       kind: "pending",
       label: "…",
-      title: "进行中或无状态码",
+      title: t("traffic.status.pending"),
       cssClass: "0",
     };
   }
@@ -58,11 +60,11 @@ export function classifyTrafficStatus(
   if (status === 502 || status === 504) {
     const proxyLike = status === 502 && (looksLikeProxyErrorBody(body) || body == null || body === "");
     if (proxyLike || looksLikeProxyErrorBody(body)) {
-      const snippet = body?.trim().slice(0, 160) || "代理连接、出站 TLS 或上游失败";
+      const snippet = body?.trim().slice(0, 160) || t("traffic.status.proxyFallback");
       return {
         kind: "proxy",
-        label: `${status}·代理`,
-        title: `ShowNet 代理错误：${snippet}`,
+        label: t("traffic.status.proxyLabel", { status }),
+        title: t("traffic.status.proxyTitle", { snippet }),
         cssClass: "proxy",
       };
     }
@@ -73,8 +75,8 @@ export function classifyTrafficStatus(
       kind: "origin4xx",
       label: String(status),
       title: server
-        ? `源站 4xx（Server: ${server}）— 非代理超时；静态 CDN 可试解密绕行`
-        : "源站 4xx — 请求到达源站后被拒绝（如 CDN 400）；非本机连接超时",
+        ? t("traffic.status.origin4xxServer", { server })
+        : t("traffic.status.origin4xx"),
       cssClass: "4",
     };
   }
@@ -83,7 +85,7 @@ export function classifyTrafficStatus(
     return {
       kind: "origin5xx",
       label: String(status),
-      title: server ? `源站 5xx（Server: ${server}）` : "源站 5xx 或网关错误",
+      title: server ? t("traffic.status.origin5xxServer", { server }) : t("traffic.status.origin5xx"),
       cssClass: "5",
     };
   }
@@ -92,7 +94,7 @@ export function classifyTrafficStatus(
     return {
       kind: "redirect",
       label: String(status),
-      title: "重定向",
+      title: t("traffic.status.redirect"),
       cssClass: "3",
     };
   }
@@ -101,7 +103,7 @@ export function classifyTrafficStatus(
     return {
       kind: "success",
       label: String(status),
-      title: "成功",
+      title: t("traffic.status.success"),
       cssClass: "2",
     };
   }

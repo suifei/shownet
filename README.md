@@ -4,6 +4,15 @@
 
 <h1 align="center">ShowNet</h1>
 
+<p align="center">
+  <strong>简体中文</strong> · <a href="./README.en.md">English</a>
+</p>
+
+<blockquote>
+<p><strong>For international readers.</strong> Login works in a normal browser, then dies the moment you capture? Requests show up, but replay never lands? ShowNet keeps traffic, certificates, TLS fingerprints, and AI analysis on one local path so the protocol actually runs.</p>
+<p>This page is the Chinese homepage. Please read the <a href="./README.en.md"><strong>English README</strong></a> for the full product story, setup path, and honesty bounds.</p>
+</blockquote>
+
 <p align="center">系统浏览器能登、一开抓包就失败？请求看得见、重放发不出去？<br />ShowNet 把流量、证书、指纹和 AI 分析收进同一条本地链路，帮你把协议真正跑通。</p>
 
 <p align="center">
@@ -17,7 +26,7 @@
   <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet 实时流量" width="920" />
 </p>
 
-当前发布版：[v0.4.30](https://github.com/suifei/shownet/releases/tag/v0.4.30)。更细的能力边界见 [功能全景](docs/feature-map.md)。
+当前发布版：[v0.4.31](https://github.com/suifei/shownet/releases/tag/v0.4.31)。更细的能力边界见 [功能全景](docs/feature-map.md)。
 
 ## 它解决什么
 

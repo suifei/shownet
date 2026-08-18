@@ -47,6 +47,7 @@ import type { ReactNode } from "react";
 import { forgetAllStoredBrowserUrls } from "../browserSessionUrl";
 import { formatBytes } from "../format";
 import { sourceLabels } from "../data";
+import { t } from "../i18n.ts";
 import { formatReleaseNotes } from "../format";
 import { defaultMcpServerStatus, mcpEndpoint } from "../mcpDefaults";
 import {
@@ -60,6 +61,9 @@ import {
   searchSettings,
   SETTINGS_INDEX,
   SETTINGS_OPEN_SECTIONS_KEY,
+  SETTINGS_TAB_LABELS,
+  settingsSectionSummary,
+  settingsSectionTitle,
 } from "../settingsIndex";
 import {
   DEFAULT_AI_CONTEXT_TOKENS,
@@ -196,7 +200,7 @@ const defaultAgentRuntimeStatus: AgentRuntimeStatus = {
   updateAvailable: false,
   installSupported: true,
   platform: "--",
-  message: "正在探测系统 Grok",
+  message: "",
 };
 
 const defaultStorageStats: StorageStats = {
@@ -1693,30 +1697,30 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
           <input
             value={settingsQuery}
             onChange={(event) => setSettingsQuery(event.target.value)}
-            placeholder="搜索设置"
-            aria-label="搜索设置"
+            placeholder={t("settings.search")}
+            aria-label={t("settings.search")}
             spellCheck={false}
           />
-          {settingsQuery && <button type="button" onClick={() => setSettingsQuery("")} title="清除搜索"><X size={13} /></button>}
+          {settingsQuery && <button type="button" onClick={() => setSettingsQuery("")} title={t("settings.clearSearch")}><X size={13} /></button>}
         </label>
         {[
-          { id: "capture", label: "抓包与 HTTPS", icon: Network },
-          { id: "ai", label: "AI 模型", icon: Sparkles },
-          { id: "data", label: "数据与存储", icon: Database },
-          { id: "mcp", label: "MCP 服务", icon: RadioTower },
+          { id: "capture" as const, label: SETTINGS_TAB_LABELS.capture, icon: Network },
+          { id: "ai" as const, label: SETTINGS_TAB_LABELS.ai, icon: Sparkles },
+          { id: "data" as const, label: SETTINGS_TAB_LABELS.data, icon: Database },
+          { id: "mcp" as const, label: SETTINGS_TAB_LABELS.mcp, icon: RadioTower },
         ].map((item) => {
           const Icon = item.icon;
-          return <button key={item.id} className={tab === item.id && !settingsQuery ? "is-active" : ""} onClick={() => { setSettingsQuery(""); setTab(item.id as SettingsTab); }}><Icon size={16} />{item.label}</button>;
+          return <button key={item.id} data-settings-tab={item.id} className={tab === item.id && !settingsQuery ? "is-active" : ""} onClick={() => { setSettingsQuery(""); setTab(item.id as SettingsTab); }}><Icon size={16} />{item.label}</button>;
         })}
-        <div className="settings-version"><strong>ShowNet {runtime.appVersion}</strong><span>Tauri 2 · {runtime.platform}</span><button onClick={() => void checkForUpdates()} disabled={checkingForUpdates}><RefreshCw className={checkingForUpdates ? "spin" : ""} size={13} />{checkingForUpdates ? "检查中" : "检查更新"}</button></div>
+        <div className="settings-version"><strong>ShowNet {runtime.appVersion}</strong><span>Tauri 2 · {runtime.platform}</span><button onClick={() => void checkForUpdates()} disabled={checkingForUpdates}><RefreshCw className={checkingForUpdates ? "spin" : ""} size={13} />{checkingForUpdates ? t("common.checking") : t("common.checkUpdate")}</button></div>
       </aside>
 
       <div className="settings-content">
         {settingsQuery ? (
           <>
-            <SettingsHeader kicker="SEARCH" title={`「${settingsQuery}」的设置`} />
+            <SettingsHeader kicker="SEARCH" title={t("settings.searchTitle", { query: settingsQuery })} />
             {settingsHits.length === 0 ? (
-              <p className="settings-search-empty">没有匹配的设置项。试试「证书」「端口」「模型」「令牌」。</p>
+              <p className="settings-search-empty">{t("settings.searchEmpty")}</p>
             ) : (
               <div className="settings-search-results">
                 {settingsHits.map((hit) => (
@@ -1735,127 +1739,122 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         ) : null}
         {!settingsQuery && tab === "capture" && (
           <>
-            <SettingsHeader kicker="CAPTURE ENGINE" title="抓包与 HTTPS" />
-            <SettingsSection id="capture.https" title="HTTPS 解密">
+            <SettingsHeader kicker="CAPTURE ENGINE" title={t("settings.header.capture")} />
+            <SettingsSection id="capture.https" title={settingsSectionTitle("capture.https")}>
               <div className={`certificate-status ${runtime.caInstalled ? "is-installed" : ""}`}>
                 <span className="certificate-status__icon">{runtime.caInstalled ? <ShieldCheck size={22} /> : <KeyRound size={22} />}</span>
-                <div><strong>ShowNet Root CA</strong><small>{runtime.caInstalled ? "已安装并受系统信任" : "已生成，安装后可解密 HTTPS"}</small><code>SHA256 {caStatus?.fingerprint ?? "正在读取证书指纹"}</code></div>
-                <span className="certificate-status__actions"><button className="secondary-button" onClick={exportCertificate}><Download size={14} />手动导出</button><button className={runtime.caInstalled ? "secondary-button" : "primary-button"} onClick={installCertificate} disabled={installingCa}>{runtime.caInstalled ? <><RefreshCw size={14} />重新安装</> : <><ShieldCheck size={14} />{installingCa ? "安装中" : "一键安装"}</>}</button></span>
+                <div><strong>ShowNet Root CA</strong><small>{runtime.caInstalled ? t("settings.ca.installed") : t("settings.ca.generated")}</small><code>SHA256 {caStatus?.fingerprint ?? t("settings.ca.readingFp")}</code></div>
+                <span className="certificate-status__actions"><button className="secondary-button" onClick={exportCertificate}><Download size={14} />{t("settings.ca.exportManual")}</button><button className={runtime.caInstalled ? "secondary-button" : "primary-button"} onClick={installCertificate} disabled={installingCa}>{runtime.caInstalled ? <><RefreshCw size={14} />{t("settings.ca.reinstall")}</> : <><ShieldCheck size={14} />{installingCa ? t("common.installing") : t("settings.ca.install")}</>}</button></span>
               </div>
-              {certificateError && <div className="certificate-install-error"><CircleAlert size={14} /><span><strong>自动安装未完成</strong><small>{certificateError}</small></span><button className="secondary-button" onClick={exportCertificate}><Download size={13} />手动安装</button></div>}
+              {certificateError && <div className="certificate-install-error"><CircleAlert size={14} /><span><strong>{t("settings.ca.installFailed")}</strong><small>{certificateError}</small></span><button className="secondary-button" onClick={exportCertificate}><Download size={13} />{t("settings.ca.installManual")}</button></div>}
               <div className="tls-interception-policy">
                 <header>
-                  <div><strong>解密策略</strong><small>只影响新建立的 HTTPS 连接，保存后立即生效</small></div>
-                  <span className={tlsInterception.mode === "intercept_all" ? "is-active" : ""}><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "正在解密" : "绕行已开启"}</span>
+                  <div><strong>{t("settings.tls.policy")}</strong><small>{t("settings.tls.policyHint")}</small></div>
+                  <span className={tlsInterception.mode === "intercept_all" ? "is-active" : ""}><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? t("settings.tls.decrypting") : t("settings.tls.bypassOn")}</span>
                 </header>
-                <div className="tls-interception-modes" role="group" aria-label="HTTPS 解密策略">
-                  <button type="button" className={tlsInterception.mode === "intercept_all" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "intercept_all"} onClick={() => selectTlsInterceptionMode("intercept_all")} title="解密所有 HTTPS"><ShieldCheck size={14} />解密全部</button>
-                  <button type="button" className={tlsInterception.mode === "bypass_selected" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "bypass_selected"} onClick={() => selectTlsInterceptionMode("bypass_selected")} title="只绕行指定域名"><ListFilter size={14} />绕行指定</button>
-                  <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title="不解密任何 HTTPS"><ShieldOff size={14} />全部绕行</button>
+                <div className="tls-interception-modes" role="group" aria-label={t("settings.tls.policyGroup")}>
+                  <button type="button" className={tlsInterception.mode === "intercept_all" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "intercept_all"} onClick={() => selectTlsInterceptionMode("intercept_all")} title={t("settings.tls.decryptAllTitle")}><ShieldCheck size={14} />{t("settings.tls.decryptAll")}</button>
+                  <button type="button" className={tlsInterception.mode === "bypass_selected" ? "is-active" : ""} aria-pressed={tlsInterception.mode === "bypass_selected"} onClick={() => selectTlsInterceptionMode("bypass_selected")} title={t("settings.tls.bypassSelectedTitle")}><ListFilter size={14} />{t("settings.tls.bypassSelected")}</button>
+                  <button type="button" className={tlsInterception.mode === "bypass_all" ? "is-active is-danger" : "is-danger"} aria-pressed={tlsInterception.mode === "bypass_all"} onClick={() => selectTlsInterceptionMode("bypass_all")} title={t("settings.tls.bypassAllTitle")}><ShieldOff size={14} />{t("settings.tls.bypassAll")}</button>
                 </div>
-                <p>{tlsInterception.mode === "intercept_all" ? "适合已安装 CA 的浏览器和普通应用。" : tlsInterception.mode === "bypass_selected" ? "命中规则的连接保持原始 TLS，其余连接继续解密。新安装默认已包含常见静态 CDN 绕行。" : "所有 HTTPS 只保留连接信息，无法查看请求与响应正文。"}</p>
+                <p>{tlsInterception.mode === "intercept_all" ? t("settings.tls.hintAll") : tlsInterception.mode === "bypass_selected" ? t("settings.tls.hintSelected") : t("settings.tls.hintBypassAll")}</p>
                 <div className="tls-static-cdn-preset">
                   <button
                     type="button"
                     className={`secondary-button tls-static-cdn-preset__button ${staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected" ? "is-applied" : ""}`}
                     onClick={() => void applyStaticCdnBypassPreset()}
                     disabled={savingTlsInterception || tlsInterception.mode === "bypass_all"}
-                    aria-label="推荐：绕过常见静态 CDN"
-                    title="写入 *.bdstatic.com / *.bcebos.com 并切换为绕行指定；这些域名将不解密正文"
+                    aria-label={t("settings.tls.cdnPreset")}
+                    title={t("settings.tls.cdnWriteTitle")}
                   >
                     <ShieldCheck size={14} />
                     {staticCdnBypassRulesPresent(tlsBypassRules.split(/[\n,]+/)) && tlsInterception.mode === "bypass_selected"
-                      ? "已启用推荐静态 CDN 绕行"
-                      : "推荐：绕过常见静态 CDN（修复百度等站图裂/脚本）"}
+                      ? t("settings.tls.cdnApplied")
+                      : t("settings.tls.cdnPresetLong")}
                   </button>
-                  <small>命中域名保持浏览器端到端 TLS，ShowNet 只记隧道元数据，<strong>不解密正文</strong>。主站（如 www.baidu.com）仍解密。</small>
+                  <small>{t("settings.cdnSmall")}</small>
                 </div>
-                {tlsInterception.mode === "bypass_selected" && <label className="tls-bypass-editor"><span>保持原始 TLS 的域名</span><textarea aria-label="HTTPS 绕行域名" value={tlsBypassRules} onChange={(event) => setTlsBypassRules(event.target.value)} placeholder={"*.bank.example\napi.secure.example"} spellCheck={false} /><small>每行一个，支持 * 和 ?。也会匹配 ClientHello 中的 SNI。</small></label>}
-                {tlsInterception.mode === "bypass_all" && <div className="tls-bypass-warning"><CircleAlert size={14} /><span>这会关闭 HTTPS 正文分析；HTTP 抓包不受影响。</span></div>}
-                {tlsInterception.mode !== "intercept_all" && <label className="settings-switch-row tls-bypass-visibility"><span><strong>在流量列表显示绕行连接</strong><small>{tlsInterception.showBypassedConnections ? "连接会标记为“未解密”，正文不可见" : "只隐藏成功连接；连接失败仍会保留用于排查"}</small></span><input type="checkbox" checked={tlsInterception.showBypassedConnections} onChange={(event) => setTlsInterception((current) => ({ ...current, showBypassedConnections: event.target.checked }))} /><i /></label>}
-                <footer><span><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? "解密失败的连接仍会保留诊断信息" : tlsInterception.showBypassedConnections ? "绕行连接仍会显示，并标记为“未解密”" : "成功绕行连接将隐藏，失败仍保留"}</span><button className="save-settings-button" onClick={() => void saveTlsInterception()} disabled={savingTlsInterception}><Save size={14} />{savingTlsInterception ? "保存中" : "保存解密策略"}</button></footer>
+                {tlsInterception.mode === "bypass_selected" && <label className="tls-bypass-editor"><span>{t("settings.tls.keepRaw")}</span><textarea aria-label={t("settings.tls.bypassHostsAria")} value={tlsBypassRules} onChange={(event) => setTlsBypassRules(event.target.value)} placeholder={"*.bank.example\napi.secure.example"} spellCheck={false} /><small>{t("settings.tls.keepRawHint")}</small></label>}
+                {tlsInterception.mode === "bypass_all" && <div className="tls-bypass-warning"><CircleAlert size={14} /><span>{t("settings.tls.bypassAllWarn")}</span></div>}
+                {tlsInterception.mode !== "intercept_all" && <label className="settings-switch-row tls-bypass-visibility"><span><strong>{t("settings.tls.showBypass")}</strong><small>{tlsInterception.showBypassedConnections ? t("settings.tls.showBypassOn") : t("settings.tls.showBypassOff")}</small></span><input type="checkbox" checked={tlsInterception.showBypassedConnections} onChange={(event) => setTlsInterception((current) => ({ ...current, showBypassedConnections: event.target.checked }))} /><i /></label>}
+                <footer><span><LockKeyhole size={12} />{tlsInterception.mode === "intercept_all" ? t("settings.tls.failKeep") : tlsInterception.showBypassedConnections ? t("settings.tls.bypassVisible") : t("settings.tls.bypassHidden")}</span><button className="save-settings-button" onClick={() => void saveTlsInterception()} disabled={savingTlsInterception}><Save size={14} />{savingTlsInterception ? t("common.saving") : t("settings.tls.save")}</button></footer>
               </div>
               <div className="https-matrix">
-                <div><span><Globe2 size={16} /></span><strong>浏览器 / 桌面应用</strong><em className="is-good">可解密</em></div>
-                <div><span><Smartphone size={16} /></span><strong>手机 / 平板</strong><em className="is-good">安装 CA 后可解密</em></div>
-                <div><span><LockKeyhole size={16} /></span><strong>证书锁定应用</strong><em className="is-limited">绕行后可连接</em></div>
+                <div><span><Globe2 size={16} /></span><strong>{t("settings.tls.browserDesktop")}</strong><em className="is-good">{t("settings.tls.canDecrypt")}</em></div>
+                <div><span><Smartphone size={16} /></span><strong>{t("settings.tls.phoneTablet")}</strong><em className="is-good">{t("settings.tls.afterCa")}</em></div>
+                <div><span><LockKeyhole size={16} /></span><strong>{t("settings.tls.pinning")}</strong><em className="is-limited">{t("settings.tls.afterBypass")}</em></div>
               </div>
             </SettingsSection>
 
-            <SettingsSection id="capture.routing" title="流量路由">
+            <SettingsSection id="capture.routing" title={settingsSectionTitle("capture.routing")}>
               <div className={`routing-modes ${runtime.transparentModeAvailable ? "" : "is-single"}`}>
-                <button className={routingMode === "proxy" ? "is-active" : ""} onClick={() => setRoutingMode("proxy")}><span><PlugZap size={19} /></span><div><strong>标准代理</strong><small>系统代理 / 手动代理 / Wi-Fi 代理</small></div>{routingMode === "proxy" && <Check size={15} />}</button>
-                {runtime.transparentModeAvailable && <button className={routingMode === "transparent" ? "is-active" : ""} onClick={() => setRoutingMode("transparent")} title="透明导流"><span><Network size={19} /></span><div><strong>透明模式</strong><small>TUN 自动导流到本机代理</small></div>{routingMode === "transparent" && <Check size={15} />}</button>}
+                <button className={routingMode === "proxy" ? "is-active" : ""} onClick={() => setRoutingMode("proxy")}><span><PlugZap size={19} /></span><div><strong>{t("settings.route.standard")}</strong><small>{t("settings.route.standardHint")}</small></div>{routingMode === "proxy" && <Check size={15} />}</button>
+                {runtime.transparentModeAvailable && <button className={routingMode === "transparent" ? "is-active" : ""} onClick={() => setRoutingMode("transparent")} title={t("settings.route.transparentTitle")}><span><Network size={19} /></span><div><strong>{t("settings.route.transparent")}</strong><small>{t("settings.route.transparentHint")}</small></div>{routingMode === "transparent" && <Check size={15} />}</button>}
               </div>
-              {routingMode === "transparent" && <div className="settings-notice"><CircleAlert size={15} /><span>TUN 负责透明导流，HTTPS 内容仍由本地 CA 与 MITM 解密。</span></div>}
-              <label className="settings-switch-row"><span><strong>接管系统代理</strong><small>{systemProxy.active ? "已接管 · 停止抓包或退出时自动恢复" : systemProxyTakeoverUnsaved ? "尚未保存 · 保存路由设置后，下次启动抓包才会接管" : "启动抓包时生效 · 默认关闭"}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => { setSystemProxyTouched(true); setSystemProxy((current) => ({ ...current, enabled: event.target.checked })); }} /><i /></label>
-              {systemProxyTakeoverUnsaved && <div className="settings-notice"><CircleAlert size={15} /><span>接管开关改动尚未保存，点击下方「保存路由设置」后才会在启动抓包时生效。</span></div>}
-              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError ? `系统代理恢复未完成：${systemProxy.lastError}` : "检测到尚未完成的系统代理恢复记录"}</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>重试恢复</button></div>}
+              {routingMode === "transparent" && <div className="settings-notice"><CircleAlert size={15} /><span>{t("settings.route.tunNote")}</span></div>}
+              <label className="settings-switch-row"><span><strong>{t("settings.route.takeover")}</strong><small>{systemProxy.active ? t("settings.route.takeoverOn") : systemProxyTakeoverUnsaved ? t("settings.route.takeoverUnsaved") : t("settings.route.takeoverOff")}</small></span><input type="checkbox" checked={systemProxy.enabled} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => { setSystemProxyTouched(true); setSystemProxy((current) => ({ ...current, enabled: event.target.checked })); }} /><i /></label>
+              {systemProxyTakeoverUnsaved && <div className="settings-notice"><CircleAlert size={15} /><span>{t("settings.route.takeoverUnsavedNotice")}</span></div>}
+              {systemProxy.recoveryPending && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError ? t("settings.route.recoveryFailed", { error: systemProxy.lastError }) : t("settings.route.recoveryPending")}</span><button type="button" onClick={() => void retrySystemProxyRecovery()} disabled={savingSystemProxy}>{t("settings.route.retryRecovery")}</button></div>}
               {!systemProxy.recoveryPending && systemProxy.lastError && <div className="settings-notice settings-notice--recovery"><CircleAlert size={15} /><span>{systemProxy.lastError}</span></div>}
               {/* These were `readOnly` inputs, which read as "editable but
                   broken" — there is no command anywhere that changes the
                   listener address or port. Present them as the facts they are. */}
               <div className="settings-fact-row">
-                <div className="settings-fact"><span>监听地址</span><code>{runtime.listenHost}</code></div>
+                <div className="settings-fact"><span>{t("settings.route.listenHost")}</span><code>{runtime.listenHost}</code></div>
                 <div className="settings-fact">
-                  <span>代理端口</span>
+                  <span>{t("settings.route.proxyPort")}</span>
                   <code>{runtime.proxyPort}</code>
-                  <button type="button" onClick={() => void copyText(`${runtime.listenHost}:${runtime.proxyPort}`, "代理地址")} title="复制代理地址"><Copy size={13} /></button>
+                  <button type="button" onClick={() => void copyText(`${runtime.listenHost}:${runtime.proxyPort}`, t("settings.route.proxyAddress"))} title={t("settings.route.copyProxy")}><Copy size={13} /></button>
                 </div>
-                <p className="settings-fact__note">端口固定为 {runtime.proxyPort}。若被占用，请先停止占用该端口的程序；客户端一律指向上面这个地址。</p>
+                <p className="settings-fact__note">{t("settings.route.portFixed", { port: runtime.proxyPort })}</p>
               </div>
-              <label className="settings-text-field"><span>绕过域名</span><input value={systemProxyBypass} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxyBypass(event.target.value)} /></label>
-              <button className="save-settings-button" onClick={saveSystemProxy} disabled={runtime.proxyRunning || savingSystemProxy}><Save size={15} />{savingSystemProxy ? "保存中" : "保存路由设置"}</button>
+              <label className="settings-text-field"><span>{t("settings.route.bypassHosts")}</span><input value={systemProxyBypass} disabled={runtime.proxyRunning || savingSystemProxy} onChange={(event) => setSystemProxyBypass(event.target.value)} /></label>
+              <button className="save-settings-button" onClick={saveSystemProxy} disabled={runtime.proxyRunning || savingSystemProxy}><Save size={15} />{savingSystemProxy ? t("common.saving") : t("settings.route.save")}</button>
             </SettingsSection>
 
-            <SettingsSection id="capture.devices" title="设备接入">
-              <label className="settings-switch-row"><span><strong>允许局域网设备接入</strong><small>{lanEnabled ? `当前范围：${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "开启时会自动恢复当前抓包与运行入口"}</small></span><input type="checkbox" checked={lanEnabled} disabled={savingLanAccess} onChange={(event) => void saveLanAccess(event.target.checked)} /><i /></label>
+            <SettingsSection id="capture.devices" title={settingsSectionTitle("capture.devices")}>
+              <label className="settings-switch-row"><span><strong>{t("settings.device.allowLan")}</strong><small>{lanEnabled ? t("settings.device.currentScope", { scope: clientAccessModeLabel(effectiveRuntimeAccessMode) }) : t("settings.device.allowLanHint")}</small></span><input type="checkbox" checked={lanEnabled} disabled={savingLanAccess} onChange={(event) => void saveLanAccess(event.target.checked)} /><i /></label>
               <div className="client-access-policy">
-                <header><div><strong>设备访问范围</strong><small>代理、免代理入口与证书安装页共用</small></div><span className={lanEnabled ? "is-active" : ""}><ShieldCheck size={12} />{lanEnabled ? "已启用" : "未监听"}</span></header>
-                <div className="client-access-modes" role="radiogroup" aria-label="设备访问范围">
-                  <button type="button" role="radio" aria-checked={accessMode === "private"} className={accessMode === "private" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("private")}><Wifi size={14} />所有私网设备</button>
-                  <button type="button" role="radio" aria-checked={accessMode === "allow"} className={accessMode === "allow" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("allow")}><ShieldCheck size={14} />仅受信设备</button>
-                  <button type="button" role="radio" aria-checked={accessMode === "deny"} className={accessMode === "deny" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("deny")}><ShieldOff size={14} />除已阻止设备外</button>
+                <header><div><strong>{t("settings.device.scope")}</strong><small>{t("settings.device.scopeHint")}</small></div><span className={lanEnabled ? "is-active" : ""}><ShieldCheck size={12} />{lanEnabled ? t("settings.device.listening") : t("settings.device.notListening")}</span></header>
+                <div className="client-access-modes" role="radiogroup" aria-label={t("settings.device.scopeAria")}>
+                  <button type="button" role="radio" aria-checked={accessMode === "private"} className={accessMode === "private" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("private")}><Wifi size={14} />{t("settings.device.allPrivate")}</button>
+                  <button type="button" role="radio" aria-checked={accessMode === "allow"} className={accessMode === "allow" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("allow")}><ShieldCheck size={14} />{t("settings.device.allowOnly")}</button>
+                  <button type="button" role="radio" aria-checked={accessMode === "deny"} className={accessMode === "deny" ? "is-active" : ""} disabled={savingLanAccess} onClick={() => setAccessMode("deny")}><ShieldOff size={14} />{t("settings.device.denyListed")}</button>
                 </div>
-                <p>{accessMode === "private" ? "当前私网和链路本地设备可接入，公网来源始终拒绝。" : accessMode === "allow" ? "只有命中名单的设备可接入；本机始终可用。" : "命中名单的设备会被拒绝，其余私网设备可接入。"}</p>
-                {accessMode !== "private" && <label className="client-access-rules"><span>{accessMode === "allow" ? "受信设备" : "已阻止设备"}<em>{draftedAccessRules.length}/128</em></span><textarea aria-label={accessMode === "allow" ? "受信设备 IP 或 CIDR" : "已阻止设备 IP 或 CIDR"} value={accessRulesDraft} disabled={savingLanAccess} onChange={(event) => setAccessRulesDraft(event.target.value)} placeholder={accessMode === "allow" ? "192.168.1.23\n192.168.20.0/24" : "192.168.1.66\nfd12:3456::9"} spellCheck={false} /><small>每行一个私网 IPv4、IPv6 或 CIDR，最多 128 条。</small></label>}
-                <footer><span><LockKeyhole size={12} />规则会规范化、去重，并拒绝公网范围</span><button className="save-settings-button" onClick={() => void saveAccessPolicy()} disabled={savingLanAccess || !accessPolicyDirty}><Save size={14} />{savingLanAccess ? "应用中" : accessPolicyDirty ? "保存访问范围" : "已保存"}</button></footer>
+                <p>{accessMode === "private" ? t("settings.device.privateHint") : accessMode === "allow" ? t("settings.device.allowHint") : t("settings.device.denyHint")}</p>
+                {accessMode !== "private" && <label className="client-access-rules"><span>{accessMode === "allow" ? t("settings.device.trusted") : t("settings.device.blocked")}<em>{draftedAccessRules.length}/128</em></span><textarea aria-label={accessMode === "allow" ? t("settings.device.trustedAria") : t("settings.device.blockedAria")} value={accessRulesDraft} disabled={savingLanAccess} onChange={(event) => setAccessRulesDraft(event.target.value)} placeholder={accessMode === "allow" ? "192.168.1.23\n192.168.20.0/24" : "192.168.1.66\nfd12:3456::9"} spellCheck={false} /><small>{t("settings.device.cidrHint")}</small></label>}
+                <footer><span><LockKeyhole size={12} />{t("settings.device.rulesNormalize")}</span><button className="save-settings-button" onClick={() => void saveAccessPolicy()} disabled={savingLanAccess || !accessPolicyDirty}><Save size={14} />{savingLanAccess ? t("common.applying") : accessPolicyDirty ? t("settings.device.saveScope") : t("settings.upstream.saved")}</button></footer>
               </div>
               <div className="device-access-row">
                 <span><Wifi size={18} /></span>
                 <div>
-                  <strong>{lanEnabled ? (runtime.lanAddresses[0] ? `${runtime.lanAddresses[0]}:${runtime.proxyPort}` : "未检测到局域网地址") : `127.0.0.1:${runtime.proxyPort}`}</strong>
-                  <small>{lanEnabled ? (runtime.lanAddresses.length ? `${runtime.proxyRunning ? "正在监听" : "开始抓包后监听"} · ${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : "请检查 Wi-Fi 或有线网络连接") : `开启后可供${sourceLabels.mobile}与 ${sourceLabels.iot} 设备接入`}</small>
+                  <strong>{lanEnabled ? (runtime.lanAddresses[0] ? `${runtime.lanAddresses[0]}:${runtime.proxyPort}` : t("settings.device.noLan")) : `127.0.0.1:${runtime.proxyPort}`}</strong>
+                  <small>{lanEnabled ? (runtime.lanAddresses.length ? `${runtime.proxyRunning ? t("settings.device.listeningNow") : t("settings.device.listenAfterCapture")} · ${clientAccessModeLabel(effectiveRuntimeAccessMode)}` : t("settings.device.checkWifi")) : t("settings.device.openFor", { mobile: sourceLabels.mobile, iot: sourceLabels.iot })}</small>
                 </div>
                 <span className="device-access-actions">
-                  <button className="primary-button" onClick={() => setDeviceSetupOpen(true)}><Smartphone size={14} />一键接入</button>
-                  <button className="secondary-button" onClick={exportCertificate}><Download size={14} />导出 CA</button>
+                  <button className="primary-button" onClick={() => setDeviceSetupOpen(true)}><Smartphone size={14} />{t("settings.device.oneTap")}</button>
+                  <button className="secondary-button" onClick={exportCertificate}><Download size={14} />{t("settings.device.exportCa")}</button>
                 </span>
               </div>
             </SettingsSection>
 
-            <SettingsSection id="capture.upstream" title="出口代理与 TLS 指纹">
-              <p className="upstream-proxy-help">
-                ShowNet <strong>不会</strong>自动继承系统或环境变量里的 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>。
-                抓包后访问外网时，必须在此单独配置二级出口；端口填错（例如 8080 而非 1080）会导致 502 与「连接超时」。
-                不要把出口设成 ShowNet 自身监听端口（如 8888）。
-              </p>
+            <SettingsSection id="capture.upstream" title={settingsSectionTitle("capture.upstream")}>
+              <p className="upstream-proxy-help">{t("settings.upstream.help")}</p>
               {envProxyHint && upstream.mode === "direct" && (
                 <div className="settings-notice upstream-env-import" role="status">
                   <CircleAlert size={15} />
                   <span>
-                    检测到环境变量 <code>{envProxyHint.source}</code> = <code>{envProxyHint.raw}</code>
-                    （{envProxyHint.host}:{envProxyHint.port}）。当前为直连，可一键导入为出口代理。
+                    {t("settings.upstream.envImport", { source: envProxyHint.source, raw: envProxyHint.raw, host: envProxyHint.host, port: envProxyHint.port })}
                   </span>
                   <button type="button" className="secondary-button" onClick={importEnvUpstream}>
-                    一键导入
+                    {t("settings.upstream.importNow")}
                   </button>
                 </div>
               )}
               <div className="upstream-proxy-heading">
-                <div className="upstream-mode-control" aria-label="出口代理类型">
+                <div className="upstream-mode-control" aria-label={t("settings.upstream.type")}>
                   {([
-                    ["direct", "直连"],
+                    ["direct", t("settings.upstream.direct")],
                     ["http", "HTTP"],
                     ["https", "HTTPS"],
                     ["socks5", "SOCKS5"],
@@ -1881,13 +1880,13 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 </div>
                 <span className={`credential-state ${upstream.hasPassword ? "is-set" : ""}`}>
                   <LockKeyhole size={12} />
-                  {upstream.hasPassword ? "凭据已保存" : "无凭据"}
+                  {upstream.hasPassword ? t("settings.upstream.credsSaved") : t("settings.upstream.noCreds")}
                 </span>
               </div>
               <div className="upstream-proxy-heading" style={{ marginTop: 12 }}>
-                <div className="upstream-mode-control" aria-label="出站 TLS 粗档位">
+                <div className="upstream-mode-control" aria-label={t("settings.upstream.tlsProfile")}>
                   {([
-                    ["default", "默认 rustls"],
+                    ["default", t("settings.upstream.tlsDefault")],
                     ["chrome-like", "Chrome-like"],
                     ["firefox-like", "Firefox-like"],
                     ["safari-ios-like", "Safari/iOS-like"],
@@ -1919,7 +1918,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 </div>
               </div>
               <label className="settings-text-field" style={{ marginTop: 12 }}>
-                <span>ClientHello 版本预置（浏览器 · 大版本）</span>
+                <span>{t("settings.upstream.clientHello")}</span>
                 <select
                   disabled={savingOutboundTls}
                   value={outboundTls?.presetId ?? "chrome150"}
@@ -1961,17 +1960,16 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
               </label>
               {outboundTls && (
                 <small style={{ display: "block", marginTop: 8, opacity: 0.8 }}>
-                  当前: <code>{outboundTls.presetId ?? outboundTls.profile}</code>
+                  {t("settings.upstream.current")}: <code>{outboundTls.presetId ?? outboundTls.profile}</code>
                   {outboundTls.browserFamily
                     ? ` · ${outboundTls.browserFamily}${outboundTls.browserMajorVersion ? ` ${outboundTls.browserMajorVersion}` : ""}`
                     : ""}{" "}
-                  · {outboundTls.note} · engine={outboundTls.engine ?? "unknown"} · 浏览器 JA3
-                  全量对齐：
+                  · {outboundTls.note} · engine={outboundTls.engine ?? "unknown"} · {t("settings.upstream.ja3Full")}：
                   {outboundTls.supportsFullBrowserJa3 && outboundTls.ja3Parity
-                    ? "是（正式包固定 wreq Chrome 出站）"
+                    ? t("settings.upstream.ja3Yes")
                     : outboundTls.realImpersonateStackAvailable
-                      ? "否（栈已链接但尚未测到与金标一致的握手）"
-                      : "否（当前构建未链接 impersonate；正式包必须带 impersonate-boring）"}
+                      ? t("settings.upstream.ja3Linked")
+                      : t("settings.upstream.ja3NoStack")}
                 </small>
               )}
               <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 12 }}>
@@ -1993,17 +1991,17 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                     })();
                   }}
                 />
-                根据入站 JA3/JA4 自动选择出站 ClientHello 预置（改变 rustls 密码套件/ALPN 顺序）
+                {t("settings.upstream.autoFromInbound")}
               </label>
               <div className="settings-field-row">
-                <label><span>代理主机</span><input disabled={upstream.mode === "direct"} value={upstream.host} onChange={(event) => setUpstream((current) => ({ ...current, host: event.target.value }))} placeholder="proxy.example.com" /></label>
-                <label><span>端口</span><input disabled={upstream.mode === "direct"} type="number" min="1" max="65535" value={upstream.port} onChange={(event) => setUpstream((current) => ({ ...current, port: Number(event.target.value) || 0 }))} /></label>
+                <label><span>{t("settings.upstream.host")}</span><input disabled={upstream.mode === "direct"} value={upstream.host} onChange={(event) => setUpstream((current) => ({ ...current, host: event.target.value }))} placeholder="proxy.example.com" /></label>
+                <label><span>{t("settings.upstream.port")}</span><input disabled={upstream.mode === "direct"} type="number" min="1" max="65535" value={upstream.port} onChange={(event) => setUpstream((current) => ({ ...current, port: Number(event.target.value) || 0 }))} /></label>
               </div>
               <div className="settings-field-row">
-                <label><span>用户名</span><input disabled={upstream.mode === "direct"} value={upstream.username} onChange={(event) => setUpstream((current) => ({ ...current, username: event.target.value }))} /></label>
-                <label className="settings-text-field"><span>密码</span><div className="secret-input"><input disabled={upstream.mode === "direct"} type={showProxyPassword ? "text" : "password"} value={upstreamPassword} onChange={(event) => setUpstreamPassword(event.target.value)} placeholder={upstream.hasPassword ? "已保存" : "可选"} /><button disabled={upstream.mode === "direct"} onClick={() => setShowProxyPassword((show) => !show)} title={showProxyPassword ? "隐藏密码" : "显示密码"}>{showProxyPassword ? <EyeOff size={15} /> : <Eye size={15} />}</button>{upstream.hasPassword && <button onClick={clearUpstreamPassword} title="清除已保存密码"><Trash2 size={14} /></button>}</div></label>
+                <label><span>{t("settings.upstream.user")}</span><input disabled={upstream.mode === "direct"} value={upstream.username} onChange={(event) => setUpstream((current) => ({ ...current, username: event.target.value }))} /></label>
+                <label className="settings-text-field"><span>{t("settings.upstream.password")}</span><div className="secret-input"><input disabled={upstream.mode === "direct"} type={showProxyPassword ? "text" : "password"} value={upstreamPassword} onChange={(event) => setUpstreamPassword(event.target.value)} placeholder={upstream.hasPassword ? t("settings.upstream.saved") : t("settings.upstream.optional")} /><button disabled={upstream.mode === "direct"} onClick={() => setShowProxyPassword((show) => !show)} title={showProxyPassword ? t("settings.upstream.hidePassword") : t("settings.upstream.showPassword")}>{showProxyPassword ? <EyeOff size={15} /> : <Eye size={15} />}</button>{upstream.hasPassword && <button onClick={clearUpstreamPassword} title={t("settings.upstream.clearPassword")}><Trash2 size={14} /></button>}</div></label>
               </div>
-              <label className="settings-text-field"><span>直连域名</span><input value={upstream.bypass.join(", ")} onChange={(event) => setUpstream((current) => ({ ...current, bypass: event.target.value.split(",").map((item) => item.trim()) }))} /></label>
+              <label className="settings-text-field"><span>{t("settings.upstream.bypass")}</span><input value={upstream.bypass.join(", ")} onChange={(event) => setUpstream((current) => ({ ...current, bypass: event.target.value.split(",").map((item) => item.trim()) }))} /></label>
               <div className="upstream-actions">
                 <span><Database size={13} />SQLite · AES-256-GCM</span>
                 <div className="upstream-actions__buttons">
@@ -2012,15 +2010,15 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                     className="secondary-button"
                     onClick={() => void runUpstreamProbe(false)}
                     disabled={probingUpstream || savingUpstream}
-                    aria-label="探测出口连通性"
-                    title="经当前表单配置 CONNECT example.com:443"
+                    aria-label={t("settings.upstream.probeAria")}
+                    title={t("settings.upstream.probeTitle")}
                   >
                     <RadioTower size={14} />
-                    {probingUpstream ? "探测中" : "探测连通性"}
+                    {probingUpstream ? t("common.probing") : t("settings.upstream.probe")}
                   </button>
                   <button className="save-settings-button" onClick={() => void saveUpstream()} disabled={savingUpstream || probingUpstream}>
                     <Save size={15} />
-                    {savingUpstream ? "保存中" : "保存出口代理"}
+                    {savingUpstream ? t("common.saving") : t("settings.upstream.save")}
                   </button>
                 </div>
               </div>
@@ -2030,183 +2028,183 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 
         {!settingsQuery && tab === "ai" && (
           <>
-            <SettingsHeader kicker="AI ENGINE" title="AI 模型" />
-            <SettingsSection id="ai.runtime" title="Agent 运行时">
+            <SettingsHeader kicker="AI ENGINE" title={t("settings.header.ai")} />
+            <SettingsSection id="ai.runtime" title={settingsSectionTitle("ai.runtime")}>
               <div className={`agent-runtime-status ${agentRuntime.available ? "is-ready" : "is-missing"}`}>
                 <span className="agent-runtime-status__icon"><SquareTerminal size={19} /></span>
                 <div className="agent-runtime-status__main">
-                  <strong>{agentRuntime.available ? `Grok ${agentRuntime.version ?? ""}`.trim() : "未找到可用的 Grok"}</strong>
-                  <small>{agentRuntime.message}</small>
+                  <strong>{agentRuntime.available ? `Grok ${agentRuntime.version ?? ""}`.trim() : t("settings.grok.missing")}</strong>
+                  <small>{agentRuntime.message || t("settings.grok.probing")}</small>
                   {agentRuntime.executablePath && <code title={agentRuntime.executablePath}>{agentRuntime.executablePath}</code>}
                 </div>
                 <div className="agent-runtime-status__actions">
-                  <button type="button" className="icon-button" onClick={() => void refreshAgentRuntime(true)} disabled={agentRuntimeLoading || installingAgent} title="重新验证当前 Grok" aria-label="重新验证当前 Grok"><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={15} /></button>
-                  {agentRuntime.settings.executablePath && <button type="button" className="secondary-button" onClick={() => void saveAgentRuntime(null, agentRuntime.settings.useUpstreamProxy)} disabled={agentRuntimeLoading || installingAgent}><Search size={14} />改用自动探测</button>}
-                  <button type="button" className="secondary-button" onClick={() => void chooseAgentRuntime()} disabled={agentRuntimeLoading || installingAgent}><FolderOpen size={14} />选择文件</button>
+                  <button type="button" className="icon-button" onClick={() => void refreshAgentRuntime(true)} disabled={agentRuntimeLoading || installingAgent} title={t("settings.grok.reverify")} aria-label={t("settings.grok.reverify")}><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={15} /></button>
+                  {agentRuntime.settings.executablePath && <button type="button" className="secondary-button" onClick={() => void saveAgentRuntime(null, agentRuntime.settings.useUpstreamProxy)} disabled={agentRuntimeLoading || installingAgent}><Search size={14} />{t("settings.grok.autoDetect")}</button>}
+                  <button type="button" className="secondary-button" onClick={() => void chooseAgentRuntime()} disabled={agentRuntimeLoading || installingAgent}><FolderOpen size={14} />{t("settings.grok.chooseFile")}</button>
                 </div>
               </div>
               {(!agentRuntime.available || agentRuntime.updateAvailable) && (
                 <div className="agent-runtime-install">
-                  <div><strong>{agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? `官方 Grok ${agentRuntime.latestVersion ?? "stable"} 可用` : `更新到 Grok ${agentRuntime.latestVersion ?? "stable"}` : "安装官方 Grok"}</strong><small>{agentRuntime.updateAvailable && agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? "当前为手动选择的 Grok。安装官方 stable 后，ShowNet 会明确切换到 ~/.grok/bin/grok，原文件不会被修改。" : "运行 x.ai 官方 stable 安装器；它会安装到 ~/.grok/bin，并按官方规则更新用户 PATH 与安装元数据。部分网络环境可能需要海外代理，默认使用直连。"}</small></div>
-                  <button type="button" className="save-settings-button" onClick={() => void installOfficialAgent()} disabled={!agentRuntime.installSupported || installingAgent}><Download size={15} />{installingAgent ? "正在下载并验证" : agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? "安装并切换" : "更新" : "一键安装"}</button>
+                  <div><strong>{agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? t("settings.grok.officialAvailable", { version: agentRuntime.latestVersion ?? "stable" }) : t("settings.grok.updateTo", { version: agentRuntime.latestVersion ?? "stable" }) : t("settings.grok.install")}</strong><small>{agentRuntime.updateAvailable && agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? t("settings.grok.manualHint") : t("settings.grok.installHint")}</small></div>
+                  <button type="button" className="save-settings-button" onClick={() => void installOfficialAgent()} disabled={!agentRuntime.installSupported || installingAgent}><Download size={15} />{installingAgent ? t("settings.grok.downloading") : agentRuntime.updateAvailable ? agentRuntime.settings.executablePath && !agentRuntime.installedByShownet ? t("settings.grok.installSwitch") : t("settings.grok.update") : t("settings.grok.installNow")}</button>
                 </div>
               )}
-              {!agentRuntime.installSupported && <small className="agent-runtime-install__hint">当前平台暂不支持一键安装。请先按 x.ai 官方方式安装，再使用“选择文件”指定 Grok 可执行文件。</small>}
-              <label className="agent-runtime-install__proxy"><input type="checkbox" checked={installAgentWithProxy} disabled={savedUpstreamMode === "direct" || installingAgent || agentRuntimeLoading} onChange={(event) => setInstallAgentWithProxy(event.target.checked)} /><span>下载与检查更新时使用 ShowNet 出口代理</span></label>
-              {savedUpstreamMode === "direct" && <small className="agent-runtime-install__hint">ShowNet 尚未配置出口代理；直连下载失败时，可先到<button type="button" onClick={() => revealSection("capture.upstream")}>抓包与 HTTPS / 出口代理与 TLS 指纹</button>配置并保存，再选择使用。</small>}
-              {agentRuntime.available && !agentRuntime.updateAvailable && <button type="button" className="secondary-button agent-runtime-update-check" onClick={() => void checkAgentUpdate()} disabled={agentRuntimeLoading || installingAgent}><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={14} />检查官方更新</button>}
-              <label className="settings-switch-row"><span><strong>Agent 使用 ShowNet 出口代理</strong><small>仅覆盖 ShowNet 发起的 Agent 进程；默认关闭，不写入 Grok 全局代理配置</small></span><input type="checkbox" checked={agentRuntime.settings.useUpstreamProxy} disabled={agentRuntimeLoading || savedUpstreamMode === "direct"} onChange={(event) => void saveAgentRuntime(agentRuntime.settings.executablePath ?? null, event.target.checked)} /><i /></label>
-              {savedUpstreamMode === "direct" && <div className="settings-notice"><CircleAlert size={15} /><span>当前已保存的 ShowNet 出口为直连。配置并保存出口代理后，才可向 Agent 注入同一套代理。</span></div>}
-              <div className="agent-runtime-boundary"><ShieldCheck size={16} /><span><strong>ShowNet 配置仅在应用内生效</strong><small>分析时临时注入当前 AI 端点、凭据、ShowNet Skills、MCP 与可选代理；退出进程后不影响 Grok 的全局端点、工具和运行配置。</small></span></div>
+              {!agentRuntime.installSupported && <small className="agent-runtime-install__hint">{t("settings.grok.noInstall")}</small>}
+              <label className="agent-runtime-install__proxy"><input type="checkbox" checked={installAgentWithProxy} disabled={savedUpstreamMode === "direct" || installingAgent || agentRuntimeLoading} onChange={(event) => setInstallAgentWithProxy(event.target.checked)} /><span>{t("settings.grok.useProxy")}</span></label>
+              {savedUpstreamMode === "direct" && <small className="agent-runtime-install__hint">{t("settings.grok.needUpstream")}<button type="button" onClick={() => revealSection("capture.upstream")}>{t("settings.grok.needUpstreamLink")}</button>{t("settings.grok.needUpstreamThen")}</small>}
+              {agentRuntime.available && !agentRuntime.updateAvailable && <button type="button" className="secondary-button agent-runtime-update-check" onClick={() => void checkAgentUpdate()} disabled={agentRuntimeLoading || installingAgent}><RefreshCw className={agentRuntimeLoading ? "is-spinning" : ""} size={14} />{t("settings.grok.checkOfficial")}</button>}
+              <label className="settings-switch-row"><span><strong>{t("settings.grok.agentProxy")}</strong><small>{t("settings.grok.agentProxyHint")}</small></span><input type="checkbox" checked={agentRuntime.settings.useUpstreamProxy} disabled={agentRuntimeLoading || savedUpstreamMode === "direct"} onChange={(event) => void saveAgentRuntime(agentRuntime.settings.executablePath ?? null, event.target.checked)} /><i /></label>
+              {savedUpstreamMode === "direct" && <div className="settings-notice"><CircleAlert size={15} /><span>{t("settings.grok.directNotice")}</span></div>}
+              <div className="agent-runtime-boundary"><ShieldCheck size={16} /><span><strong>{t("settings.grok.inAppOnly")}</strong><small>{t("settings.grok.inAppOnlyHint")}</small></span></div>
             </SettingsSection>
-            <SettingsSection id="ai.provider" title="分析提供商">
+            <SettingsSection id="ai.provider" title={settingsSectionTitle("ai.provider")}>
               <div className="recommended-service">
                 <span className="recommended-service__mark"><Sparkles size={20} /></span>
-                <div className="recommended-service__body"><span>SHOWNET 首选 · 免费 AI 服务</span><strong>ClaudeGPT.org <em>一次性 $5 免费额度</em></strong><small>加入 QQ 群 553354813，联系管理员申请一次性 5 美金免费额度</small><code>默认模型 gpt-5.5 · https://claudegpt.org/v1</code></div>
-                <div className="recommended-service__actions"><button className="is-primary" onClick={() => setQrOpen(true)}><MessageCircle size={14} />申请 $5 免费额度</button><a href="https://claudegpt.org/" target="_blank" rel="noreferrer">访问服务站<ExternalLink size={14} /></a></div>
+                <div className="recommended-service__body"><span>{t("settings.ai.preferred")}</span><strong>ClaudeGPT.org <em>{t("settings.ai.freeCredit")}</em></strong><small>{t("settings.ai.joinQq")}</small><code>{t("settings.ai.defaultModel")}</code></div>
+                <div className="recommended-service__actions"><button className="is-primary" onClick={() => setQrOpen(true)}><MessageCircle size={14} />{t("settings.ai.applyCredit")}</button><a href="https://claudegpt.org/" target="_blank" rel="noreferrer">{t("settings.ai.visitSite")}<ExternalLink size={14} /></a></div>
               </div>
               <div className="provider-list">
                 {([
-                  { id: "claudegpt", name: "ClaudeGPT API", tag: "推荐", detail: "gpt-5.5 · 加群联系管理员申请 $5 免费额度" },
-                  { id: "compatible", name: "其他兼容厂商", tag: "API", detail: "OpenAI / Azure / 自定义服务" },
-                  { id: "local", name: "本地模型", tag: "LOCAL", detail: "Ollama / LM Studio" },
+                  { id: "claudegpt", name: "ClaudeGPT API", tag: t("settings.ai.recommended"), detail: t("settings.ai.claudegptDetail") },
+                  { id: "compatible", name: t("settings.ai.otherVendor"), tag: "API", detail: t("settings.ai.otherDetail") },
+                  { id: "local", name: t("settings.ai.local"), tag: "LOCAL", detail: "Ollama / LM Studio" },
                 ] as Array<{ id: AiProvider; name: string; tag: string; detail: string }>).map((item) => <button key={item.id} className={`${provider === item.id ? "is-active" : ""} ${item.id === "claudegpt" ? "is-featured" : ""}`} onClick={() => selectProvider(item.id)}><span className="provider-icon">{item.id === "local" ? <HardDrive size={18} /> : <Bot size={18} />}</span><span><strong>{item.name}<em>{item.tag}</em></strong><small>{item.detail}</small></span>{provider === item.id && <Check size={15} />}</button>)}
               </div>
               {provider === "claudegpt" && (
                 <div className="recommended-endpoint">
                   <span className="recommended-endpoint__icon"><Server size={19} /></span>
-                  <div><strong>ClaudeGPT OpenAI 兼容服务</strong><small>推荐接入 · 使用个人 API Key</small><code>https://claudegpt.org/v1</code></div>
-                  <span className="recommended-endpoint__actions"><button onClick={() => void copyText("https://claudegpt.org/v1", "API 端点")} title="复制端点"><Copy size={14} /></button><a href="https://claudegpt.org/" target="_blank" rel="noreferrer" title="访问服务站"><ExternalLink size={14} /></a></span>
+                  <div><strong>{t("settings.ai.compatibleService")}</strong><small>{t("settings.ai.recommendedAccess")}</small><code>https://claudegpt.org/v1</code></div>
+                  <span className="recommended-endpoint__actions"><button onClick={() => void copyText("https://claudegpt.org/v1", t("settings.ai.apiEndpoint"))} title={t("settings.ai.copyEndpoint")}><Copy size={14} /></button><a href="https://claudegpt.org/" target="_blank" rel="noreferrer" title={t("settings.ai.visitSite")}><ExternalLink size={14} /></a></span>
                 </div>
               )}
-              <label className="settings-text-field"><span>API Base URL</span><div className="secret-input"><input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setModel(""); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} placeholder="https://api.example.com/v1" /><button onClick={() => void copyText(endpoint, "API 端点")} title="复制端点"><Copy size={15} /></button></div></label>
-              <label className="settings-text-field"><span>API Key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} onBlur={(event) => { if (event.currentTarget.value.trim()) void refreshAiModels(false, { apiKey: event.currentTarget.value }); }} placeholder={hasSavedApiKey ? "已加密保存；留空表示不更改" : provider === "local" ? "本地服务通常无需填写" : provider === "claudegpt" ? "领取额度后粘贴 API Key" : "sk-..."} autoComplete="off" /><button onClick={() => setShowKey((show) => !show)} title={showKey ? "隐藏 API Key" : "显示 API Key"}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button>{hasSavedApiKey && <button onClick={clearAiKey} title="清除已保存 API Key"><Trash2 size={14} /></button>}</div></label>
+              <label className="settings-text-field"><span>API Base URL</span><div className="secret-input"><input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setModel(""); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} placeholder="https://api.example.com/v1" /><button onClick={() => void copyText(endpoint, t("settings.ai.apiEndpoint"))} title={t("settings.ai.copyEndpoint")}><Copy size={15} /></button></div></label>
+              <label className="settings-text-field"><span>API Key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setAvailableModels([]); setModelDiscoveryStatus("idle"); setModelDiscoveryError(""); }} onBlur={(event) => { if (event.currentTarget.value.trim()) void refreshAiModels(false, { apiKey: event.currentTarget.value }); }} placeholder={hasSavedApiKey ? t("settings.ai.keySaved") : provider === "local" ? t("settings.ai.keyLocal") : provider === "claudegpt" ? t("settings.ai.keyCredit") : "sk-..."} autoComplete="off" /><button onClick={() => setShowKey((show) => !show)} title={showKey ? t("settings.ai.hideKey") : t("settings.ai.showKey")}>{showKey ? <EyeOff size={15} /> : <Eye size={15} />}</button>{hasSavedApiKey && <button onClick={clearAiKey} title={t("settings.ai.clearKey")}><Trash2 size={14} /></button>}</div></label>
               <div className="settings-field-row">
                 <label className="model-discovery-field">
-                  <span>模型 <em className={`model-discovery-state is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined}>{modelDiscoveryStatus === "ready" ? `${availableModels.length} 个可用` : modelDiscoveryStatus === "loading" ? "读取中" : modelDiscoveryStatus === "fallback" ? "同步模型" : "待读取"}</em></span>
+                  <span>{t("settings.model")} <em className={`model-discovery-state is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined}>{modelDiscoveryStatus === "ready" ? t("settings.models.count", { count: availableModels.length }) : modelDiscoveryStatus === "loading" ? t("settings.models.reading") : modelDiscoveryStatus === "fallback" ? t("settings.models.sync") : t("settings.models.pending")}</em></span>
                   <div className="model-discovery-control">
                     <input list="ai-model-options" value={model} onChange={(event) => setModel(event.target.value)} placeholder={DEFAULT_AI_MODEL} autoComplete="off" spellCheck={false} />
                     <datalist id="ai-model-options">{availableModels.map((item) => <option key={item} value={item} />)}</datalist>
-                    <button type="button" onClick={() => void refreshAiModels(true)} disabled={modelDiscoveryStatus === "loading"} title="从 /models 读取模型列表" aria-label="读取模型列表"><RefreshCw className={modelDiscoveryStatus === "loading" ? "is-spinning" : ""} size={14} /></button>
+                    <button type="button" onClick={() => void refreshAiModels(true)} disabled={modelDiscoveryStatus === "loading"} title={t("settings.ai.syncModels")} aria-label={t("settings.ai.readModels")}><RefreshCw className={modelDiscoveryStatus === "loading" ? "is-spinning" : ""} size={14} /></button>
                   </div>
-                  <small className={`model-discovery-help is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined} aria-live="polite">{modelDiscoveryStatus === "ready" ? `已同步 ${availableModels.length} 个模型，也可直接输入端点未列出的模型名` : modelDiscoveryStatus === "loading" ? "正在读取 /models" : modelDiscoveryStatus === "fallback" ? "无法读取 /models，请手动输入模型名" : "等待自动读取 /models；可随时手动输入模型名"}</small>
+                  <small className={`model-discovery-help is-${modelDiscoveryStatus}`} title={modelDiscoveryError || undefined} aria-live="polite">{modelDiscoveryStatus === "ready" ? t("settings.models.ready", { count: availableModels.length }) : modelDiscoveryStatus === "loading" ? t("settings.models.loading") : modelDiscoveryStatus === "fallback" ? t("settings.models.fallback") : t("settings.models.idle")}</small>
                 </label>
                 <label className="context-tokens-field">
-                  <span>上下文上限</span>
+                  <span>{t("settings.context")}</span>
                   <input type="number" min={MIN_AI_CONTEXT_TOKENS} max={MAX_AI_CONTEXT_TOKENS} step="1024" value={contextTokens} onChange={(event) => setContextTokens(Math.trunc(Number(event.target.value)) || 0)} onBlur={() => setContextTokens((current) => clampContextTokens(current))} />
-                  <small>{formatContextTokens(contextTokens)} token · 提示预算约 {formatBytes(promptBudgetBytes(contextTokens))}。默认约 100 KiB；旧版 200K 会改到 51.2K。知道模型窗口时可提高。</small>
+                  <small>{t("settings.ai.contextTokens", { size: formatContextTokens(contextTokens), budget: formatBytes(promptBudgetBytes(contextTokens)), hint: t("settings.contextHint") })}</small>
                 </label>
               </div>
-              <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? "保存中" : "保存设置"}</button>
+              <button className="save-settings-button" onClick={saveAiSettings} disabled={savingAi}><Save size={15} />{savingAi ? t("common.saving") : t("settings.ai.save")}</button>
             </SettingsSection>
-            <SettingsSection id="ai.strategy" title="分析策略">
+            <SettingsSection id="ai.strategy" title={settingsSectionTitle("ai.strategy")}>
               <div className="settings-field-row agent-turn-limit-row">
-                <label><span>Agent 最大分析轮次</span><input type="number" min="1" step="1" value={aiAnalysisSettings.maxAgentTurns} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, maxAgentTurns: Math.max(1, Math.trunc(Number(event.target.value)) || 1) }))} /></label>
-                <div><strong>单次最多 {aiAnalysisSettings.maxAgentTurns} 轮</strong><small>不设固定上限；提高轮次可能增加分析时长与模型费用</small></div>
+                <label><span>{t("settings.ai.maxTurns")}</span><input type="number" min="1" step="1" value={aiAnalysisSettings.maxAgentTurns} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, maxAgentTurns: Math.max(1, Math.trunc(Number(event.target.value)) || 1) }))} /></label>
+                <div><strong>{t("settings.ai.maxTurnsValue", { count: aiAnalysisSettings.maxAgentTurns })}</strong><small>{t("settings.ai.maxTurnsHint")}</small></div>
               </div>
-              <label className="settings-switch-row"><span><strong>两阶段分析</strong><small>大于 20 条请求时先执行智能过滤</small></span><input type="checkbox" checked={aiAnalysisSettings.twoStageAnalysis} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, twoStageAnalysis: event.target.checked }))} /><i /></label>
-              <label className="settings-switch-row"><span><strong>允许 MCP 工具调用</strong><small>模型可按需回查请求详情与外部数据</small></span><input type="checkbox" checked={aiAnalysisSettings.allowMcpTools} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, allowMcpTools: event.target.checked }))} /><i /></label>
-              <label className="settings-switch-row"><span><strong>流式输出</strong><small>分析内容实时写入报告</small></span><input type="checkbox" checked={aiAnalysisSettings.streamingOutput} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, streamingOutput: event.target.checked }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>{t("settings.ai.twoStage")}</strong><small>{t("settings.ai.twoStageHint")}</small></span><input type="checkbox" checked={aiAnalysisSettings.twoStageAnalysis} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, twoStageAnalysis: event.target.checked }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>{t("settings.ai.allowMcp")}</strong><small>{t("settings.ai.allowMcpHint")}</small></span><input type="checkbox" checked={aiAnalysisSettings.allowMcpTools} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, allowMcpTools: event.target.checked }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>{t("settings.ai.streaming")}</strong><small>{t("settings.ai.streamingHint")}</small></span><input type="checkbox" checked={aiAnalysisSettings.streamingOutput} disabled={savingAi} onChange={(event) => setAiAnalysisSettings((current) => ({ ...current, streamingOutput: event.target.checked }))} /><i /></label>
             </SettingsSection>
-            <SettingsSection id="ai.support" title="服务与支持">
+            <SettingsSection id="ai.support" title={settingsSectionTitle("ai.support")}>
               <div className="support-channel">
-                <button className="support-channel__qr" onClick={() => setQrOpen(true)} title="查看QQ群二维码"><img src={qqGroupQr} alt="QQ群 553354813 二维码" /></button>
-                <div className="support-channel__body"><span className="support-channel__label"><MessageCircle size={13} />免费 AI 服务申请</span><strong>QQ 群 553354813</strong><small>加群后联系管理员，申请一次性 5 美金免费额度</small></div>
-                <span className="support-channel__actions"><button className="secondary-button" onClick={() => void copyText("553354813", "QQ群号")}><Copy size={14} />复制群号</button><button className="primary-button" onClick={() => setQrOpen(true)}><MessageCircle size={14} />查看二维码</button></span>
+                <button className="support-channel__qr" onClick={() => setQrOpen(true)} title={t("settings.ai.qqQrTitle")}><img src={qqGroupQr} alt={t("settings.ai.qqQrAlt")} /></button>
+                <div className="support-channel__body"><span className="support-channel__label"><MessageCircle size={13} />{t("settings.ai.freeApply")}</span><strong>{t("settings.ai.qqGroup")}</strong><small>{t("settings.ai.qqJoinHint")}</small></div>
+                <span className="support-channel__actions"><button className="secondary-button" onClick={() => void copyText("553354813", t("settings.ai.qqNumber"))}><Copy size={14} />{t("settings.ai.copyGroup")}</button><button className="primary-button" onClick={() => setQrOpen(true)}><MessageCircle size={14} />{t("settings.ai.viewQr")}</button></span>
               </div>
-              <div className="service-site-row"><span><Globe2 size={16} /></span><div><strong>claudegpt.org</strong><small>API 服务、余额与模型列表</small></div><a href="https://claudegpt.org/" target="_blank" rel="noreferrer">访问服务站<ExternalLink size={13} /></a></div>
+              <div className="service-site-row"><span><Globe2 size={16} /></span><div><strong>claudegpt.org</strong><small>{t("settings.ai.siteBalance")}</small></div><a href="https://claudegpt.org/" target="_blank" rel="noreferrer">{t("settings.ai.visitSite")}<ExternalLink size={13} /></a></div>
             </SettingsSection>
           </>
         )}
 
         {!settingsQuery && tab === "data" && (
           <>
-            <SettingsHeader kicker="DATA & STORAGE" title="数据与存储" />
-            <SettingsSection id="data.database" title="会话数据库">
-              <div className="storage-path"><span><Database size={19} /></span><div><strong>{storageFileName}</strong><code title={storageStats.dataDirectory}>{storageStats.dataDirectory}</code></div><button className="icon-button" onClick={openStorageDirectory} title="打开数据目录" aria-label="打开数据目录"><FolderOpen size={16} /></button></div>
-              <div className={`storage-metrics ${storageStatsLoading ? "is-loading" : ""}`}><div><strong>{storageStatsLoading ? "读取中" : formatBytes(storageStats.databaseBytes)}</strong><span>SQLite 总占用</span></div><div><strong>{storageStatsLoading ? "读取中" : formatBytes(storageStats.responseBodyBytes)}</strong><span>已存响应正文</span></div><div><strong>{storageStatsLoading ? "读取中" : storageStats.sessionCount}</strong><span>{storageStats.requestCount} 条请求</span></div></div>
-              <label className="settings-switch-row"><span><strong>自动清理</strong><small>按会话最后活动时间执行保留策略</small></span><input type="checkbox" checked={dataStorageSettings.autoCleanupEnabled} onChange={(event) => setDataStorageSettings((current) => ({ ...current, autoCleanupEnabled: event.target.checked }))} /><i /></label>
-              <div className="settings-field-row storage-retention-row"><label><span>会话保留天数</span><input type="number" min="1" max="3650" step="1" disabled={!dataStorageSettings.autoCleanupEnabled} value={dataStorageSettings.retentionDays} onChange={(event) => setDataStorageSettings((current) => ({ ...current, retentionDays: Number(event.target.value) || 0 }))} /></label><div><strong>保留最近 {dataStorageSettings.retentionDays || 0} 天</strong><small>启动、保存策略及后台维护时清理空闲会话</small></div></div>
-              <label className="settings-switch-row"><span><strong>保存二进制响应</strong><small>图片、字体与媒体正文；关闭后仍保留标头、大小与策略标记</small></span><input type="checkbox" checked={dataStorageSettings.saveBinaryResponses} onChange={(event) => setDataStorageSettings((current) => ({ ...current, saveBinaryResponses: event.target.checked }))} /><i /></label>
-              <button className="save-settings-button" onClick={saveDataStorage} disabled={savingDataStorage}><Save size={15} />{savingDataStorage ? "正在应用" : "保存存储策略"}</button>
+            <SettingsHeader kicker="DATA & STORAGE" title={t("settings.header.data")} />
+            <SettingsSection id="data.database" title={settingsSectionTitle("data.database")}>
+              <div className="storage-path"><span><Database size={19} /></span><div><strong>{storageFileName}</strong><code title={storageStats.dataDirectory}>{storageStats.dataDirectory}</code></div><button className="icon-button" onClick={openStorageDirectory} title={t("settings.data.openDir")} aria-label={t("settings.data.openDir")}><FolderOpen size={16} /></button></div>
+              <div className={`storage-metrics ${storageStatsLoading ? "is-loading" : ""}`}><div><strong>{storageStatsLoading ? t("settings.models.reading") : formatBytes(storageStats.databaseBytes)}</strong><span>{t("settings.data.sqlite")}</span></div><div><strong>{storageStatsLoading ? t("settings.models.reading") : formatBytes(storageStats.responseBodyBytes)}</strong><span>{t("settings.data.storedBodies")}</span></div><div><strong>{storageStatsLoading ? t("settings.models.reading") : storageStats.sessionCount}</strong><span>{t("settings.data.requestCount", { count: storageStats.requestCount })}</span></div></div>
+              <label className="settings-switch-row"><span><strong>{t("settings.data.autoCleanup")}</strong><small>{t("settings.data.autoCleanupHint")}</small></span><input type="checkbox" checked={dataStorageSettings.autoCleanupEnabled} onChange={(event) => setDataStorageSettings((current) => ({ ...current, autoCleanupEnabled: event.target.checked }))} /><i /></label>
+              <div className="settings-field-row storage-retention-row"><label><span>{t("settings.data.retention")}</span><input type="number" min="1" max="3650" step="1" disabled={!dataStorageSettings.autoCleanupEnabled} value={dataStorageSettings.retentionDays} onChange={(event) => setDataStorageSettings((current) => ({ ...current, retentionDays: Number(event.target.value) || 0 }))} /></label><div><strong>{t("settings.data.keepDays", { days: dataStorageSettings.retentionDays || 0 })}</strong><small>{t("settings.data.retentionHint")}</small></div></div>
+              <label className="settings-switch-row"><span><strong>{t("settings.data.saveBinary")}</strong><small>{t("settings.data.saveBinaryHint")}</small></span><input type="checkbox" checked={dataStorageSettings.saveBinaryResponses} onChange={(event) => setDataStorageSettings((current) => ({ ...current, saveBinaryResponses: event.target.checked }))} /><i /></label>
+              <button className="save-settings-button" onClick={saveDataStorage} disabled={savingDataStorage}><Save size={15} />{savingDataStorage ? t("common.applying") : t("settings.data.savePolicy")}</button>
             </SettingsSection>
-            <SettingsSection id="data.danger" title="危险操作">
-              <div className="danger-row"><span><Trash2 size={18} /></span><div><strong>清除所有会话数据</strong><small>删除请求、WebSocket 消息、SSE 事件、Hook 与分析报告；保留应用设置和凭据</small></div><button onClick={() => setClearDataOpen(true)} disabled={runtime.proxyRunning || clearingData} title={runtime.proxyRunning ? "停止抓包后才能清除" : "清除所有会话数据"}>{runtime.proxyRunning ? "抓包中" : "清除数据"}</button></div>
+            <SettingsSection id="data.danger" title={settingsSectionTitle("data.danger")}>
+              <div className="danger-row"><span><Trash2 size={18} /></span><div><strong>{t("settings.data.clearAll")}</strong><small>{t("settings.data.clearAllHint")}</small></div><button onClick={() => setClearDataOpen(true)} disabled={runtime.proxyRunning || clearingData} title={runtime.proxyRunning ? t("settings.data.stopFirst") : t("settings.data.clearAll")}>{runtime.proxyRunning ? t("settings.data.clearing") : t("settings.data.clear")}</button></div>
             </SettingsSection>
           </>
         )}
 
         {!settingsQuery && tab === "mcp" && (
           <>
-            <SettingsHeader kicker="MODEL CONTEXT PROTOCOL" title="MCP 服务" />
-            <SettingsSection id="mcp.server" title="ShowNet MCP Server">
-              <div className="mcp-settings-status"><span className="server-emblem"><RadioTower size={20} /></span><div><strong>Streamable HTTP</strong><small>{mcpStatus.toolCount} Tools · MCP {mcpStatus.protocolVersion}</small></div><span className={`server-running ${mcpStatus.running ? "" : "is-stopped"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? "启动中" : mcpStatus.running ? "运行中" : "已停止"}</span></div>
+            <SettingsHeader kicker="MODEL CONTEXT PROTOCOL" title={t("settings.header.mcp")} />
+            <SettingsSection id="mcp.server" title={settingsSectionTitle("mcp.server")}>
+              <div className="mcp-settings-status"><span className="server-emblem"><RadioTower size={20} /></span><div><strong>Streamable HTTP</strong><small>{mcpStatus.toolCount} Tools · MCP {mcpStatus.protocolVersion}</small></div><span className={`server-running ${mcpStatus.running ? "" : "is-stopped"}`}><span className={`live-dot ${mcpStatus.running ? "is-on" : ""}`} />{mcpStatus.starting ? t("settings.mcp.starting") : mcpStatus.running ? t("common.running") : t("settings.mcp.stopped")}</span></div>
               {mcpStatus.lastError && <div className="settings-notice"><CircleAlert size={15} /><span>{mcpStatus.lastError}</span></div>}
               {/* 监听地址 was a readOnly input, which reads as "editable but
                   broken" — McpServerSettingsInput carries no host field, so
                   nothing can change it. It is a fact, like the capture port. */}
               <div className="settings-fact-row">
-                <div className="settings-fact"><span>监听地址</span><code>{mcpStatus.host}</code></div>
-                <p className="settings-fact__note">MCP 服务固定只监听回环地址；端口可在下方修改。</p>
+                <div className="settings-fact"><span>{t("settings.route.listenHost")}</span><code>{mcpStatus.host}</code></div>
+                <p className="settings-fact__note">{t("settings.mcp.listenNote")}</p>
               </div>
-              <div className="settings-field-row"><label><span>端口</span><input type="number" min="1024" max="65535" value={mcpStatus.port} onChange={(event) => setMcpStatus((current) => ({ ...current, port: Number(event.target.value) || 0, endpoint: mcpEndpoint(current.host, Number(event.target.value) || 0) }))} /></label></div>
-              <label className="settings-text-field"><span>服务地址</span><div className="secret-input"><input value={mcpStatus.endpoint} readOnly /><button onClick={() => void copyText(mcpStatus.endpoint, "MCP 服务地址")} title="复制服务地址"><Copy size={14} /></button></div></label>
-              <label className="settings-switch-row"><span><strong>随应用启动</strong><small>本机服务仅监听回环地址</small></span><input type="checkbox" checked={mcpStatus.enabled} onChange={(event) => setMcpStatus((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
-              <label className="settings-switch-row"><span><strong>允许写入型工具</strong><small>开放创建、删除会话与运行 AI 分析</small></span><input type="checkbox" checked={mcpStatus.allowWrites} onChange={(event) => setMcpStatus((current) => ({ ...current, allowWrites: event.target.checked }))} /><i /></label>
-              <button className="save-settings-button" onClick={saveMcpSettings} disabled={savingMcp}><Save size={15} />{savingMcp ? "正在应用" : "保存并应用"}</button>
+              <div className="settings-field-row"><label><span>{t("settings.upstream.port")}</span><input type="number" min="1024" max="65535" value={mcpStatus.port} onChange={(event) => setMcpStatus((current) => ({ ...current, port: Number(event.target.value) || 0, endpoint: mcpEndpoint(current.host, Number(event.target.value) || 0) }))} /></label></div>
+              <label className="settings-text-field"><span>{t("settings.mcp.endpoint")}</span><div className="secret-input"><input value={mcpStatus.endpoint} readOnly /><button onClick={() => void copyText(mcpStatus.endpoint, t("settings.mcp.endpoint"))} title={t("settings.mcp.copyEndpoint")}><Copy size={14} /></button></div></label>
+              <label className="settings-switch-row"><span><strong>{t("settings.mcp.startWithApp")}</strong><small>{t("settings.mcp.startWithAppHint")}</small></span><input type="checkbox" checked={mcpStatus.enabled} onChange={(event) => setMcpStatus((current) => ({ ...current, enabled: event.target.checked }))} /><i /></label>
+              <label className="settings-switch-row"><span><strong>{t("settings.mcp.allowWrites")}</strong><small>{t("settings.mcp.allowWritesHint")}</small></span><input type="checkbox" checked={mcpStatus.allowWrites} onChange={(event) => setMcpStatus((current) => ({ ...current, allowWrites: event.target.checked }))} /><i /></label>
+              <button className="save-settings-button" onClick={saveMcpSettings} disabled={savingMcp}><Save size={15} />{savingMcp ? t("common.applying") : t("settings.mcp.saveApply")}</button>
             </SettingsSection>
-            <SettingsSection id="mcp.auth" title="认证">
-              <label className="settings-text-field"><span>访问令牌</span><div className="secret-input"><input type={showMcpToken ? "text" : "password"} value={showMcpToken ? mcpToken : mcpStatus.hasAccessToken ? "shownet_mcp_••••••••••" : ""} readOnly /><button onClick={showMcpToken ? () => setShowMcpToken(false) : revealMcpToken} title={showMcpToken ? "隐藏访问令牌" : "显示访问令牌"}>{showMcpToken ? <EyeOff size={15} /> : <Eye size={15} />}</button><button onClick={() => void copyMcpAccessToken()} title="复制访问令牌"><Copy size={14} /></button><button onClick={rotateMcpToken} title="轮换访问令牌"><RefreshCw size={15} /></button></div></label>
-              <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>Bearer 令牌使用 AES-256-GCM 加密保存在 SQLite；服务仅监听本机。</span></div>
+            <SettingsSection id="mcp.auth" title={settingsSectionTitle("mcp.auth")}>
+              <label className="settings-text-field"><span>{t("settings.mcp.accessToken")}</span><div className="secret-input"><input type={showMcpToken ? "text" : "password"} value={showMcpToken ? mcpToken : mcpStatus.hasAccessToken ? "shownet_mcp_••••••••••" : ""} readOnly /><button onClick={showMcpToken ? () => setShowMcpToken(false) : revealMcpToken} title={showMcpToken ? t("settings.mcp.hideToken") : t("settings.mcp.showToken")}>{showMcpToken ? <EyeOff size={15} /> : <Eye size={15} />}</button><button onClick={() => void copyMcpAccessToken()} title={t("settings.mcp.copyToken")}><Copy size={14} /></button><button onClick={rotateMcpToken} title={t("settings.mcp.rotateToken")}><RefreshCw size={15} /></button></div></label>
+              <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>{t("settings.mcp.tokenStored")}</span></div>
             </SettingsSection>
-            <SettingsSection id="mcp.clients" title="连接 AI 客户端">
-              <div className="mcp-guide-tabs" role="tablist" aria-label="选择 AI 客户端">
+            <SettingsSection id="mcp.clients" title={settingsSectionTitle("mcp.clients")}>
+              <div className="mcp-guide-tabs" role="tablist" aria-label={t("settings.mcp.chooseClient")}>
                 {MCP_GUIDE_CLIENTS.map((client) => <button key={client.id} role="tab" aria-selected={mcpGuideClient === client.id} className={mcpGuideClient === client.id ? "is-active" : ""} onClick={() => { setMcpGuideClient(client.id); setMcpGuideIncludeToken(false); }}><McpGuideClientIcon id={client.id} />{client.name}</button>)}
               </div>
               <div className="mcp-guide-service">
                 <span className={`mcp-guide-service__icon ${mcpStatus.running ? "is-ready" : ""}`}><RadioTower size={18} /></span>
-                <div><strong>{mcpStatus.running ? "ShowNet 服务已就绪" : mcpStatus.starting ? "ShowNet 服务启动中" : "ShowNet 服务尚未运行"}</strong><code>{mcpStatus.endpoint}</code></div>
-                <span className={`mcp-guide-service__scope ${mcpStatus.allowWrites ? "has-writes" : ""}`}>{mcpStatus.allowWrites ? "含写入工具" : "只读工具"}</span>
+                <div><strong>{mcpStatus.running ? t("settings.mcp.ready") : mcpStatus.starting ? t("settings.mcp.startingService") : t("settings.mcp.notRunning")}</strong><code>{mcpStatus.endpoint}</code></div>
+                <span className={`mcp-guide-service__scope ${mcpStatus.allowWrites ? "has-writes" : ""}`}>{mcpStatus.allowWrites ? t("settings.mcp.withWrites") : t("settings.mcp.readOnly")}</span>
               </div>
               <div className="mcp-guide-layout">
                 <ol className="mcp-guide-steps">
-                  <li><span>1</span><div><strong>保存配置</strong><code>{mcpGuide.configPath}</code></div></li>
-                  <li><span>2</span><div><strong>设置访问令牌</strong><small>{mcpGuide.authSummary}</small></div></li>
+                  <li><span>1</span><div><strong>{t("settings.mcp.saveConfig")}</strong><code>{mcpGuide.configPath}</code></div></li>
+                  <li><span>2</span><div><strong>{t("settings.mcp.setToken")}</strong><small>{mcpGuide.authSummary}</small></div></li>
                   <li><span>3</span><div><strong>{mcpGuide.reloadHint}</strong><small>{mcpGuide.verifyHint}</small></div></li>
                 </ol>
                 <div className="mcp-guide-code">
-                  <header><div><strong>{mcpGuide.configLabel}</strong><small>{mcpGuide.embedsToken ? "完整配置" : "安全配置"}</small></div><span><label className="mcp-guide-token-switch" title="将访问令牌直接写入生成的配置"><input type="checkbox" checked={mcpGuideIncludeToken} disabled={loadingMcpGuideToken || !mcpStatus.hasAccessToken} onChange={(event) => void setMcpGuideTokenMode(event.target.checked)} /><i /><b>{loadingMcpGuideToken ? "读取中" : "带入令牌"}</b></label><button className="icon-button" onClick={() => void copyText(mcpGuide.config, `${mcpGuide.name} 配置`)} title="复制配置"><Copy size={15} /></button></span></header>
+                  <header><div><strong>{mcpGuide.configLabel}</strong><small>{mcpGuide.embedsToken ? t("settings.mcp.fullConfig") : t("settings.mcp.safeConfig")}</small></div><span><label className="mcp-guide-token-switch" title={t("settings.mcp.embedToken")}><input type="checkbox" checked={mcpGuideIncludeToken} disabled={loadingMcpGuideToken || !mcpStatus.hasAccessToken} onChange={(event) => void setMcpGuideTokenMode(event.target.checked)} /><i /><b>{loadingMcpGuideToken ? t("settings.models.reading") : t("settings.mcp.includeToken")}</b></label><button className="icon-button" onClick={() => void copyText(mcpGuide.config, `${mcpGuide.name} ${t("settings.mcp.saveConfig")}`)} title={t("settings.mcp.copyConfig")}><Copy size={15} /></button></span></header>
                   <pre><code>{mcpGuide.config}</code></pre>
                 </div>
               </div>
               <div className={`mcp-guide-auth ${mcpGuide.embedsToken ? "has-secret" : ""}`}>
                 <span>{mcpGuide.embedsToken ? <CircleAlert size={16} /> : <LockKeyhole size={16} />}</span>
-                <div><strong>{mcpGuide.embedsToken ? "配置中包含访问令牌" : "默认不把令牌写入配置"}</strong><small>{mcpGuide.embedsToken ? "请使用个人配置并避免提交到 Git；轮换令牌后需要重新生成。" : "Codex、Claude Code、Cursor 使用环境变量；VS Code 首次启动时安全询问。"}</small></div>
-                <button className="secondary-button" onClick={() => void copyMcpAccessToken()}><Copy size={14} />复制令牌</button>
+                <div><strong>{mcpGuide.embedsToken ? t("settings.mcp.tokenInConfig") : t("settings.mcp.tokenNotInConfig")}</strong><small>{mcpGuide.embedsToken ? t("settings.mcp.tokenInConfigHint") : t("settings.mcp.tokenNotInConfigHint")}</small></div>
+                <button className="secondary-button" onClick={() => void copyMcpAccessToken()}><Copy size={14} />{t("settings.mcp.copyTokenShort")}</button>
               </div>
               <div className="mcp-guide-activity">
                 <span className={`live-dot ${latestMcpClient ? "is-on" : ""}`} />
-                {latestMcpClient ? <><strong>最近接入 {latestMcpClient.name}{latestMcpClient.version ? ` ${latestMcpClient.version}` : ""}</strong><small>{new Date(latestMcpClient.connectedAt).toLocaleString()}</small></> : <><strong>等待客户端首次连接</strong><small>合法握手后会在这里显示客户端与时间</small></>}
+                {latestMcpClient ? <><strong>{t("settings.mcp.recentClient", { name: `${latestMcpClient.name}${latestMcpClient.version ? ` ${latestMcpClient.version}` : ""}` })}</strong><small>{new Date(latestMcpClient.connectedAt).toLocaleString()}</small></> : <><strong>{t("settings.mcp.waitClient")}</strong><small>{t("settings.mcp.waitClientHint")}</small></>}
               </div>
             </SettingsSection>
-            <SettingsSection id="mcp.external" title="外部 MCP Servers">
-              <div className="mcp-clients-toolbar"><div><strong>{mcpClients.length} 个连接</strong><small>{mcpClients.filter((server) => server.enabled).length} 个供内置 Agent 使用</small></div><button className="secondary-button" onClick={() => setMcpClientDraft({ ...emptyMcpClientDraft })}><Plus size={14} />添加 Server</button></div>
-              {mcpClients.length === 0 && !mcpClientDraft && <div className="mcp-clients-empty"><PlugZap size={20} /><span>尚未连接外部 MCP Server</span></div>}
+            <SettingsSection id="mcp.external" title={settingsSectionTitle("mcp.external")}>
+              <div className="mcp-clients-toolbar"><div><strong>{t("settings.mcp.nConnections", { count: mcpClients.length })}</strong><small>{t("settings.mcp.forAgent", { count: mcpClients.filter((server) => server.enabled).length })}</small></div><button className="secondary-button" onClick={() => setMcpClientDraft({ ...emptyMcpClientDraft })}><Plus size={14} />{t("settings.mcp.addServer")}</button></div>
+              {mcpClients.length === 0 && !mcpClientDraft && <div className="mcp-clients-empty"><PlugZap size={20} /><span>{t("settings.mcp.noExternal")}</span></div>}
               {mcpClients.length > 0 && <div className="mcp-client-list">{mcpClients.map((server) => {
                 const tools = mcpClientTools[server.id] ?? [];
                 return <div className={`mcp-client-row ${server.lastError ? "has-error" : ""}`} key={server.id}>
                   <span className="mcp-client-row__icon"><Server size={17} /></span>
-                  <div className="mcp-client-row__main"><span><strong>{server.name}</strong><small>{server.toolCount} Tools</small></span><code title={server.endpoint}>{server.endpoint}</code>{server.lastError ? <em title={server.lastError}>{server.lastError}</em> : tools.length > 0 ? <small>{tools.slice(0, 4).join(" · ")}{tools.length > 4 ? ` · +${tools.length - 4}` : ""}</small> : server.lastConnectedAt ? <small>最近连接 {new Date(server.lastConnectedAt).toLocaleString()}</small> : null}</div>
-                  <div className="mcp-client-row__actions"><label className="compact-switch" title={server.enabled ? "停用 Agent 工具" : "启用 Agent 工具"}><input type="checkbox" checked={server.enabled} onChange={(event) => void toggleMcpClient(server, event.target.checked)} /><i /></label><button className="icon-button" onClick={() => void testMcpClient(server.id)} disabled={testingMcpClientId === server.id} title="测试连接"><RefreshCw className={testingMcpClientId === server.id ? "spin" : ""} size={15} /></button><button className="icon-button" onClick={() => editMcpClient(server)} title="编辑 Server"><PlugZap size={15} /></button><button className="icon-button is-danger" onClick={() => void deleteMcpClient(server)} title="删除 Server"><Trash2 size={15} /></button></div>
+                  <div className="mcp-client-row__main"><span><strong>{server.name}</strong><small>{server.toolCount} Tools</small></span><code title={server.endpoint}>{server.endpoint}</code>{server.lastError ? <em title={server.lastError}>{server.lastError}</em> : tools.length > 0 ? <small>{tools.slice(0, 4).join(" · ")}{tools.length > 4 ? ` · +${tools.length - 4}` : ""}</small> : server.lastConnectedAt ? <small>{t("settings.mcp.lastConnected", { time: new Date(server.lastConnectedAt).toLocaleString() })}</small> : null}</div>
+                  <div className="mcp-client-row__actions"><label className="compact-switch" title={server.enabled ? t("settings.mcp.disableAgent") : t("settings.mcp.enableAgent")}><input type="checkbox" checked={server.enabled} onChange={(event) => void toggleMcpClient(server, event.target.checked)} /><i /></label><button className="icon-button" onClick={() => void testMcpClient(server.id)} disabled={testingMcpClientId === server.id} title={t("settings.mcp.testConn")}><RefreshCw className={testingMcpClientId === server.id ? "spin" : ""} size={15} /></button><button className="icon-button" onClick={() => editMcpClient(server)} title={t("settings.mcp.editServer")}><PlugZap size={15} /></button><button className="icon-button is-danger" onClick={() => void deleteMcpClient(server)} title={t("settings.mcp.deleteServer")}><Trash2 size={15} /></button></div>
                 </div>;
               })}</div>}
               {mcpClientDraft && <div className="mcp-client-editor">
-                <div className="settings-field-row"><label><span>名称</span><input value={mcpClientDraft.name} maxLength={64} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, name: event.target.value }))} placeholder="例如：本地知识库" /></label><label><span>Streamable HTTP 地址</span><input value={mcpClientDraft.endpoint} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, endpoint: event.target.value }))} placeholder="http://127.0.0.1:9000/mcp" /></label></div>
-                <label className="settings-text-field"><span>Bearer Token</span><div className="secret-input"><input type="password" value={mcpClientDraft.accessToken} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, accessToken: event.target.value, clearAccessToken: false }))} placeholder={mcpClientDraft.id && mcpClients.find((server) => server.id === mcpClientDraft.id)?.hasAccessToken ? "已加密保存；留空表示不更改" : "可选"} />{mcpClientDraft.id && mcpClients.find((server) => server.id === mcpClientDraft.id)?.hasAccessToken && <button className={mcpClientDraft.clearAccessToken ? "is-active" : ""} onClick={() => setMcpClientDraft((current) => current && ({ ...current, accessToken: "", clearAccessToken: !current.clearAccessToken }))} title={mcpClientDraft.clearAccessToken ? "保留已保存 Token" : "清除已保存 Token"}><Trash2 size={14} /></button>}</div></label>
-                <label className="settings-switch-row"><span><strong>供内置 Agent 使用</strong><small>工具定义会加入允许的分析与追问流程</small></span><input type="checkbox" checked={mcpClientDraft.enabled} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, enabled: event.target.checked }))} /><i /></label>
-                <div className="mcp-client-editor__footer"><div><LockKeyhole size={14} /><span>Token 加密保存；远程地址必须使用 HTTPS</span></div><span><button className="secondary-button" onClick={() => setMcpClientDraft(null)} disabled={savingMcpClient}>取消</button><button className="save-settings-button" onClick={() => void saveMcpClient()} disabled={savingMcpClient}><PlugZap size={14} />{savingMcpClient ? "连接中" : "保存并测试"}</button></span></div>
+                <div className="settings-field-row"><label><span>{t("common.name")}</span><input value={mcpClientDraft.name} maxLength={64} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, name: event.target.value }))} placeholder={t("settings.mcp.namePlaceholder")} /></label><label><span>{t("settings.mcp.httpAddress")}</span><input value={mcpClientDraft.endpoint} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, endpoint: event.target.value }))} placeholder="http://127.0.0.1:9000/mcp" /></label></div>
+                <label className="settings-text-field"><span>Bearer Token</span><div className="secret-input"><input type="password" value={mcpClientDraft.accessToken} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, accessToken: event.target.value, clearAccessToken: false }))} placeholder={mcpClientDraft.id && mcpClients.find((server) => server.id === mcpClientDraft.id)?.hasAccessToken ? t("settings.ai.keySaved") : t("settings.upstream.optional")} />{mcpClientDraft.id && mcpClients.find((server) => server.id === mcpClientDraft.id)?.hasAccessToken && <button className={mcpClientDraft.clearAccessToken ? "is-active" : ""} onClick={() => setMcpClientDraft((current) => current && ({ ...current, accessToken: "", clearAccessToken: !current.clearAccessToken }))} title={mcpClientDraft.clearAccessToken ? t("settings.mcp.keepToken") : t("settings.mcp.clearToken")}><Trash2 size={14} /></button>}</div></label>
+                <label className="settings-switch-row"><span><strong>{t("settings.mcp.forBuiltin")}</strong><small>{t("settings.mcp.forBuiltinHint")}</small></span><input type="checkbox" checked={mcpClientDraft.enabled} onChange={(event) => setMcpClientDraft((current) => current && ({ ...current, enabled: event.target.checked }))} /><i /></label>
+                <div className="mcp-client-editor__footer"><div><LockKeyhole size={14} /><span>{t("settings.mcp.tokenHttps")}</span></div><span><button className="secondary-button" onClick={() => setMcpClientDraft(null)} disabled={savingMcpClient}>{t("common.cancel")}</button><button className="save-settings-button" onClick={() => void saveMcpClient()} disabled={savingMcpClient}><PlugZap size={14} />{savingMcpClient ? t("settings.mcp.connecting") : t("settings.mcp.saveTest")}</button></span></div>
               </div>}
-              <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>外部工具使用独立命名空间；调用参数与结果受大小限制并写入审计日志。</span></div>
+              <div className="settings-notice settings-notice--safe"><ShieldCheck size={15} /><span>{t("settings.mcp.externalNs")}</span></div>
             </SettingsSection>
           </>
         )}
@@ -2217,8 +2215,8 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         {dirtySections.length > 0 && (
           <div className="settings-unsaved" role="status">
             <CircleAlert size={15} />
-            <span><strong>{dirtySections.length} 处未保存的更改</strong><small>{dirtySections.map(sectionTitle).join("、")}</small></span>
-            <button className="secondary-button" onClick={() => revealSection(dirtySections[0])}>去查看</button>
+            <span><strong>{t("settings.unsavedN", { count: dirtySections.length })}</strong><small>{dirtySections.map(sectionTitle).join("、")}</small></span>
+            <button className="secondary-button" onClick={() => revealSection(dirtySections[0])}>{t("settings.goSee")}</button>
           </div>
         )}
       </div>
@@ -2253,9 +2251,9 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
     {qrOpen && (
       <div className="modal-backdrop" onMouseDown={() => setQrOpen(false)}>
         <section className="qr-dialog" role="dialog" aria-modal="true" aria-labelledby="qr-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
-          <header className="dialog-header"><div><span className="section-kicker">FREE AI CREDIT</span><h2 id="qr-dialog-title">申请一次性 5 美金免费额度</h2><p>加入 QQ 群 553354813 后联系管理员</p></div><button className="icon-button" onClick={() => setQrOpen(false)} title="关闭"><X size={18} /></button></header>
-          <div className="qr-dialog__image"><img src={qqGroupQr} alt="QQ群 553354813 完整二维码" /></div>
-          <footer className="dialog-footer"><div><MessageCircle size={15} /><span>扫码加群后联系管理员申请</span></div><span className="dialog-actions"><button className="secondary-button" onClick={() => void copyText("553354813", "QQ群号")}><Copy size={14} />复制群号</button><button className="primary-button" onClick={() => setQrOpen(false)}>完成</button></span></footer>
+          <header className="dialog-header"><div><span className="section-kicker">FREE AI CREDIT</span><h2 id="qr-dialog-title">{t("settings.ai.qrTitle")}</h2><p>{t("settings.ai.qrBody")}</p></div><button className="icon-button" onClick={() => setQrOpen(false)} title={t("common.close")}><X size={18} /></button></header>
+          <div className="qr-dialog__image"><img src={qqGroupQr} alt={t("settings.ai.qrFullAlt")} /></div>
+          <footer className="dialog-footer"><div><MessageCircle size={15} /><span>{t("settings.ai.qrScanHint")}</span></div><span className="dialog-actions"><button className="secondary-button" onClick={() => void copyText("553354813", t("settings.ai.qqNumber"))}><Copy size={14} />{t("settings.ai.copyGroup")}</button><button className="primary-button" onClick={() => setQrOpen(false)}>{t("common.done")}</button></span></footer>
         </section>
       </div>
     )}
@@ -2297,7 +2295,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
 }
 
 function sectionTitle(id: string) {
-  return SETTINGS_INDEX.find((entry) => entry.id === id)?.title ?? id;
+  return settingsSectionTitle(id);
 }
 
 function SettingsHeader({ kicker, title }: { kicker: string; title: string }) {
@@ -2337,9 +2335,9 @@ function SettingsSection({ id, title, children }: { id: string; title: string; c
             {title}
             {/* Most sections are collapsed, so an unsaved edit inside one is
                 otherwise completely invisible. */}
-            {isDirty && <em className="settings-section__dirty" title="有未保存的更改">未保存</em>}
+            {isDirty && <em className="settings-section__dirty" title={t("settings.unsavedEdits")}>{t("common.unsaved")}</em>}
           </h3>
-          {entry && <small>{entry.summary}</small>}
+          {entry && <small>{settingsSectionSummary(entry.id)}</small>}
         </span>
         <ChevronDown size={15} />
       </summary>

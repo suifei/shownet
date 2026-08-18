@@ -15,11 +15,11 @@ describe("traffic empty out-of-box path", () => {
 
     assert.match(traffic, /onOpenBrowser\?/);
     assert.match(traffic, /traffic-empty-oob/);
-    assert.match(traffic, /不必先装证书|零配置/);
+    assert.match(traffic, /traffic\.emptyHint|traffic\.emptyStep1/);
     assert.match(traffic, /empty-open-browser/);
-    assert.match(traffic, /内嵌浏览器开始抓包/);
-    assert.match(traffic, /安装 CA/);
-    assert.match(traffic, /AI 自动逆向/);
+    assert.match(traffic, /traffic\.emptyOpenBrowser/);
+    assert.match(traffic, /traffic\.emptyCa/);
+    assert.match(traffic, /traffic\.emptyStep3/);
 
     assert.match(app, /onOpenBrowser=\{\(\) => setActiveView\("browser"\)\}/);
     assert.match(app, /onOpenSettingsCapture/);

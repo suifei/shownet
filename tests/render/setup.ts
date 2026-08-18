@@ -2,7 +2,10 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  globalThis.localStorage?.removeItem("shownet.ui.locale");
+});
 
 // Same pin as playwright.config.ts `locale: "zh-CN"`. jsdom defaults to
 // en-US, and App now resolves the UI pack from navigator.language; existing

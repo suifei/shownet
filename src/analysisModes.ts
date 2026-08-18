@@ -8,6 +8,7 @@
  */
 import { Code2, FileCode2, Gauge, ShieldCheck, WandSparkles, type LucideIcon } from "lucide-react";
 
+import { t, type MessageKey } from "./i18n.ts";
 import type { AnalysisMode } from "./types";
 
 export interface AnalysisModeMeta {
@@ -23,18 +24,29 @@ export interface AnalysisModeMeta {
   icon: LucideIcon;
 }
 
-export const ANALYSIS_MODES: AnalysisModeMeta[] = [
-  { id: "auto", label: "自动识别", focus: "自动选择最合适的分析路径", icon: WandSparkles },
-  { id: "api", label: "API 逆向", focus: "接口、参数、鉴权与调用链", icon: Code2 },
-  { id: "security", label: "安全审计", focus: "敏感数据、越权与配置风险", icon: ShieldCheck },
-  { id: "performance", label: "性能分析", focus: "瀑布、重复请求与慢接口", icon: Gauge },
-  { id: "crypto", label: "JS 加密逆向", focus: "Hook、算法与动态签名", icon: FileCode2 },
-];
+const ANALYSIS_MODE_KEYS: Record<AnalysisMode, { label: MessageKey; focus: MessageKey; icon: LucideIcon }> = {
+  auto: { label: "analysis.mode.auto", focus: "analysis.mode.autoFocus", icon: WandSparkles },
+  api: { label: "analysis.mode.api", focus: "analysis.mode.apiFocus", icon: Code2 },
+  security: { label: "analysis.mode.security", focus: "analysis.mode.securityFocus", icon: ShieldCheck },
+  performance: { label: "analysis.mode.performance", focus: "analysis.mode.performanceFocus", icon: Gauge },
+  crypto: { label: "analysis.mode.crypto", focus: "analysis.mode.cryptoFocus", icon: FileCode2 },
+};
+
+export const ANALYSIS_MODES: AnalysisModeMeta[] = (["auto", "api", "security", "performance", "crypto"] as const).map((id) => ({
+  id,
+  get label() {
+    return t(ANALYSIS_MODE_KEYS[id].label);
+  },
+  get focus() {
+    return t(ANALYSIS_MODE_KEYS[id].focus);
+  },
+  icon: ANALYSIS_MODE_KEYS[id].icon,
+}));
 
 export function analysisModeLabel(mode: AnalysisMode): string {
-  return ANALYSIS_MODES.find((entry) => entry.id === mode)?.label ?? mode;
+  return ANALYSIS_MODE_KEYS[mode] ? t(ANALYSIS_MODE_KEYS[mode].label) : mode;
 }
 
 export function analysisModeFocus(mode: AnalysisMode): string {
-  return ANALYSIS_MODES.find((entry) => entry.id === mode)?.focus ?? "";
+  return ANALYSIS_MODE_KEYS[mode] ? t(ANALYSIS_MODE_KEYS[mode].focus) : "";
 }

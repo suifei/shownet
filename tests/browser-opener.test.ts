@@ -21,7 +21,7 @@ describe("system browser opener (P3)", () => {
     assert.match(browser, /openInSystemBrowser/);
     assert.match(browser, /await openUrl\(target\)/);
     assert.match(browser, /disabled=\{!currentUrl\.trim\(\)\}/);
-    assert.match(browser, /aria-label="在系统浏览器中打开"/);
+    assert.match(browser, /aria-label=\{t\("browser\.openSystem"\)\}/);
     // Desktop path must not rely on window.open as the only opener.
     assert.doesNotMatch(
       browser,

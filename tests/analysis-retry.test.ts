@@ -40,8 +40,8 @@ describe("failed analysis exposes retry with the last prompt", () => {
   it("wires the failed report UI to the stored prompt and start_ai_analysis overrides", async () => {
     const view = await read("components/AnalysisView.tsx");
     assert.match(view, /get_analysis_prompt/);
-    assert.match(view, /调整并重试/);
-    assert.match(view, /用本地模型继续/);
+    assert.match(view, /analysis\.retryAdjust/);
+    assert.match(view, /analysis\.continueLocal|用本地模型继续/);
     assert.match(view, /analysisRetryInvokeInput/);
     const rust = await readFile(new URL("../src-tauri/src/analysis.rs", import.meta.url), "utf8");
     assert.match(rust, /fn resolve_prompt_override/);

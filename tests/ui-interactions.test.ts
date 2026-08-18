@@ -22,7 +22,7 @@ describe("dismissible UI interactions", () => {
     assert.match(app, /useDismissibleLayer\(sessionToolsOpen, sessionToolsRef/);
     assert.match(traffic, /useDismissibleLayer\(Boolean\(menu\), toolbarRef/);
     assert.match(traffic, /useDismissibleLayer\(Boolean\(contextMenu\), contextMenuRef/);
-    assert.match(traffic, /role="menu" aria-label="请求操作"/);
+    assert.match(traffic, /role="menu" aria-label=\{t\("traffic\.requestActions"\)\}/);
     assert.match(browser, /useDismissibleLayer\(browserMenuOpen, browserMenuRef/);
   });
 

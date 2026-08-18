@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { ANALYSIS_MODES } from "../analysisModes";
+import { t } from "../i18n.ts";
 import { DEFAULT_AI_CONTEXT_TOKENS, promptBudgetBytes } from "../aiContextBudget";
 import { estimateAnalysisScope, formatContextSize } from "../analysisScope";
 import {
@@ -40,50 +41,52 @@ const fallbackAnalysisSettings: AiAnalysisSettings = {
   maxAgentTurns: 8,
 };
 
-const previewReports: AnalysisReport[] = [
-  {
-    id: "analysis-preview-login",
-    sessionId: "session-live",
-    mode: "api",
-    status: "complete",
-    requestCount: 247,
-    keyRequestCount: 18,
-    selectedRequestIds: [],
-    content: "# 登录链路分析\n\n已识别挑战码、客户端签名和 Token 换取三段调用链。\n\n## 关键结论\n\n- 登录接口使用 `HMAC-SHA256` 生成动态签名。\n- Access Token 由 `/v2/auth/token` 返回，刷新流程独立。\n- 3 条异常响应需要进一步检查设备指纹参数。",
-    provider: "claudegpt",
-    model: "gpt-5.5",
-    createdAt: Date.now() - 24 * 60 * 60 * 1000,
-    updatedAt: Date.now() - 2 * 60 * 60 * 1000,
-  },
-  {
-    id: "analysis-preview-security",
-    sessionId: "session-live",
-    mode: "security",
-    status: "complete",
-    requestCount: 219,
-    keyRequestCount: 12,
-    selectedRequestIds: [],
-    content: "# 登录安全审计\n\n历史审计发现登录失败响应中暴露了过细的账号状态。\n\n## 修复建议\n\n- 统一登录失败提示。\n- 缩短挑战码有效期并限制重复使用。",
-    provider: "claudegpt",
-    model: "gpt-5.5",
-    createdAt: Date.now() - 4 * 24 * 60 * 60 * 1000,
-    updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
-  },
-  {
-    id: "analysis-preview-oauth",
-    sessionId: "session-oauth",
-    mode: "security",
-    status: "complete",
-    requestCount: 132,
-    keyRequestCount: 9,
-    selectedRequestIds: [],
-    content: "# OAuth 回调安全审计\n\n回调链路已还原，授权码、state 校验和 Token 换取请求均已定位。\n\n## 关键结论\n\n- 回调入口正确校验了 `state`，但错误响应包含过多内部信息。\n- 授权码仅使用一次，Token 换取请求未发现明文凭据。\n- 建议统一失败响应，并缩短回调错误日志中的参数保留时间。",
-    provider: "claudegpt",
-    model: "gpt-5.5",
-    createdAt: Date.now() - 2 * 24 * 60 * 60 * 1000,
-    updatedAt: Date.now() - 26 * 60 * 60 * 1000,
-  },
-];
+function previewReports(): AnalysisReport[] {
+  return [
+    {
+      id: "analysis-preview-login",
+      sessionId: "session-live",
+      mode: "api",
+      status: "complete",
+      requestCount: 247,
+      keyRequestCount: 18,
+      selectedRequestIds: [],
+      content: t("analysis.preview.login"),
+      provider: "claudegpt",
+      model: "gpt-5.5",
+      createdAt: Date.now() - 24 * 60 * 60 * 1000,
+      updatedAt: Date.now() - 2 * 60 * 60 * 1000,
+    },
+    {
+      id: "analysis-preview-security",
+      sessionId: "session-live",
+      mode: "security",
+      status: "complete",
+      requestCount: 219,
+      keyRequestCount: 12,
+      selectedRequestIds: [],
+      content: t("analysis.preview.security"),
+      provider: "claudegpt",
+      model: "gpt-5.5",
+      createdAt: Date.now() - 4 * 24 * 60 * 60 * 1000,
+      updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
+    },
+    {
+      id: "analysis-preview-oauth",
+      sessionId: "session-oauth",
+      mode: "security",
+      status: "complete",
+      requestCount: 132,
+      keyRequestCount: 9,
+      selectedRequestIds: [],
+      content: t("analysis.preview.oauth"),
+      provider: "claudegpt",
+      model: "gpt-5.5",
+      createdAt: Date.now() - 2 * 24 * 60 * 60 * 1000,
+      updatedAt: Date.now() - 26 * 60 * 60 * 1000,
+    },
+  ];
+}
 
 function buildPreviewGraphRun(report: AnalysisReport, requests: RequestListItem[]): AnalysisGraphRun {
   const plan = buildPreviewSkillPlan(report.mode, requests);
@@ -141,9 +144,9 @@ function buildPreviewGraphRun(report: AnalysisReport, requests: RequestListItem[
       finishedAt: updatedAt - (definitions.length - index - 1) * 1_200,
     })),
     events: [
-      { sequence: 1, event: "graph-created", detail: "建议分析 Graph 已创建", createdAt: updatedAt - 8_000 },
-      { sequence: 2, nodeId: definitions[0]?.id, event: "agent-deviation", detail: "Agent 根据证据自主调整了 Skill 顺序", createdAt: updatedAt - 4_000 },
-      { sequence: 3, event: "graph-completed", detail: "建议轨迹与产物已归档", createdAt: updatedAt },
+      { sequence: 1, event: "graph-created", detail: t("analysis.preview.graphCreated"), createdAt: updatedAt - 8_000 },
+      { sequence: 2, nodeId: definitions[0]?.id, event: "agent-deviation", detail: t("analysis.preview.graphDeviated"), createdAt: updatedAt - 4_000 },
+      { sequence: 3, event: "graph-completed", detail: t("analysis.preview.graphDone"), createdAt: updatedAt },
     ],
     createdAt: updatedAt - 8_000,
     updatedAt,
@@ -348,7 +351,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     // so every terminal event after the snapshot has somewhere to land.
     if (isTauri() && !streamListenerReady) return;
     if (!isTauri()) {
-      const history = previewReports.filter((item) => item.sessionId === sessionId);
+      const history = previewReports().filter((item) => item.sessionId === sessionId);
       setReports(history);
       const latest = history[0];
       if (latest) {
@@ -627,12 +630,12 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     if (overrides?.includeStatic !== undefined) setIncludeStatic(overrides.includeStatic);
     setRetryOpen(false);
     if (!isTauri()) {
-      dispatchStream({ type: "fail", message: "真实 AI 分析需要在 ShowNet 桌面应用中运行" });
+      dispatchStream({ type: "fail", message: t("analysis.needDesktop") });
       return;
     }
     const retryUsesLocal = overrides?.retry?.provider === "local";
     if (requiresApiKey && !retryUsesLocal) {
-      dispatchStream({ type: "fail", message: "尚未配置 AI API Key。加入 QQ 群后可联系管理员申请一次性 5 美金免费额度。" });
+      dispatchStream({ type: "fail", message: t("analysis.needApiKey") });
       return;
     }
     const commandRequestId = ++analysisCommandRequestId.current;
@@ -656,7 +659,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
     dispatchStream({
       type: "start",
       filtering: smartFilteringEnabled,
-      message: smartFilteringEnabled ? "正在识别关键请求" : "准备直接进入深度分析",
+      message: smartFilteringEnabled ? t("analysis.identifying") : t("analysis.preparingDeep"),
     });
     try {
       const completed = await invoke<AnalysisReport>("start_ai_analysis", {
@@ -932,16 +935,16 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
 
   const scopeControls = (
     <>
-          <div className="analysis-section-heading"><div><span className="section-kicker">SCOPE</span><h2>分析范围</h2></div><span className="count-pill">{scopeEstimate.requestCount} / {requests.length}</span></div>
-          <label className="switch-row"><span><strong>手动聚焦</strong><small>仅分析已标记关键请求</small></span><input type="checkbox" checked={manualScope} onChange={(event) => setManualScope(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含静态资源</strong><small>JS 文件用于代码提取</small></span><input type="checkbox" checked={includeStatic} onChange={(event) => setIncludeStatic(event.target.checked)} disabled={running} /><i /></label>
-          <label className="switch-row"><span><strong>包含请求备注</strong><small>默认不发送用户备注</small></span><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={running} /><i /></label>
+          <div className="analysis-section-heading"><div><span className="section-kicker">SCOPE</span><h2>{t("analysis.scope")}</h2></div><span className="count-pill">{scopeEstimate.requestCount} / {requests.length}</span></div>
+          <label className="switch-row"><span><strong>{t("analysis.manualFocus")}</strong><small>{t("analysis.manualFocusHint")}</small></span><input type="checkbox" checked={manualScope} onChange={(event) => setManualScope(event.target.checked)} disabled={running} /><i /></label>
+          <label className="switch-row"><span><strong>{t("analysis.includeStatic")}</strong><small>{t("analysis.includeStaticHint")}</small></span><input type="checkbox" checked={includeStatic} onChange={(event) => setIncludeStatic(event.target.checked)} disabled={running} /><i /></label>
+          <label className="switch-row"><span><strong>{t("analysis.includeNotes")}</strong><small>{t("analysis.includeNotesHint")}</small></span><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={running} /><i /></label>
           <div className="key-request-list">
             {manualRequests.slice(0, 4).map((request) => (
               <div key={request.id}><span className={`status-code status-${Math.floor((request.status ?? 0) / 100)}`}>{request.method}</span><span><strong>{request.path}</strong><small>{request.host}</small></span></div>
             ))}
           </div>
-          <div className="analysis-context-summary"><header><span>首轮上下文</span><strong>约 {formatContextSize(scopeEstimate.estimatedBytes)}</strong></header><div><span>正文<em>完整值包含</em></span><span>Hook<em>{scopeEstimate.hookCount} 条请求</em></span><span>代码<em>{scopeEstimate.codeCount} 段</em></span><span>备注<em>{includeAnnotations ? `${scopeEstimate.annotationCount} 条` : "不包含"}</em></span></div><footer><ShieldCheck size={11} />正文单项最多 16 KiB，总提示受 {formatContextSize(promptBudgetBytes(aiSettings.contextTokens))} 上限保护</footer></div>
+          <div className="analysis-context-summary"><header><span>{t("analysis.firstContext")}</span><strong>{t("analysis.aboutSize", { size: formatContextSize(scopeEstimate.estimatedBytes) })}</strong></header><div><span>{t("analysis.body")}<em>{t("analysis.fullValues")}</em></span><span>Hook<em>{t("analysis.nRequests", { count: scopeEstimate.hookCount })}</em></span><span>{t("traffic.tab.code")}<em>{t("analysis.nSnippets", { count: scopeEstimate.codeCount })}</em></span><span>{t("traffic.tab.annotation")}<em>{includeAnnotations ? t("analysis.nNotes", { count: scopeEstimate.annotationCount }) : t("analysis.notIncluded")}</em></span></div><footer><ShieldCheck size={11} />{t("analysis.contextCap", { size: formatContextSize(promptBudgetBytes(aiSettings.contextTokens)) })}</footer></div>
     </>
   );
 
@@ -950,7 +953,7 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
       <aside className="analysis-config">
         <div className="analysis-config__section">
           <span className="section-kicker">ANALYSIS MODE</span>
-          <h2>分析模式</h2>
+          <h2>{t("analysis.mode")}</h2>
           <div className="analysis-mode-list">
             {modes.map((item) => {
               const Icon = item.icon;
@@ -968,31 +971,31 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
         <div className="analysis-config__section analysis-scope">{scopeControls}</div>
 
         <div className="analysis-config__section agent-skill-plan">
-          <div className="analysis-section-heading"><div><span className="section-kicker">AGENT PLAN</span><h2>内置 Agent 编排</h2></div><span className="count-pill">{skillPlan?.selectedSkillIds.length ?? 0}</span></div>
+          <div className="analysis-section-heading"><div><span className="section-kicker">AGENT PLAN</span><h2>{t("analysis.agentPlan")}</h2></div><span className="count-pill">{skillPlan?.selectedSkillIds.length ?? 0}</span></div>
           <div className="agent-skill-chips">
             {(skillPlan?.selectedSkillIds ?? []).map((skillId) => <span key={skillId}><Sparkles size={11} />{skillLabel(skillId)}</span>)}
           </div>
-          <small className="agent-tool-count">{analysisSettings.allowMcpTools ? `${skillPlan?.toolNames.length ?? 0} 个本地工具按需取证` : "MCP 工具调用已关闭"}</small>
+          <small className="agent-tool-count">{analysisSettings.allowMcpTools ? t("analysis.toolsOnDemand", { count: skillPlan?.toolNames.length ?? 0 }) : t("analysis.mcpOff")}</small>
         </div>
 
         <div className="analysis-launch">
-          <button className="model-select" onClick={onConfigureAi} title="配置 AI 服务">
-            <Bot size={16} /><span><small>{providerLabel(aiSettings.provider)} · 内置 Agent</small><strong>{aiSettings.model}</strong></span><Settings2 size={14} />
+          <button className="model-select" onClick={onConfigureAi} title={t("analysis.configAi")}>
+            <Bot size={16} /><span><small>{providerLabel(aiSettings.provider)} · {t("analysis.builtinAgent")}</small><strong>{aiSettings.model}</strong></span><Settings2 size={14} />
           </button>
           <button className={`analysis-start-button ${running ? "is-running" : ""}`} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (!running && !streamListenerReady) || (running && !activeAnalysisId.current)}>
             {running ? (cancelling ? <LoaderCircle className="spin" size={17} /> : <Square size={14} fill="currentColor" />) : <Play size={15} fill="currentColor" />}
-            {requests.length === 0 ? "暂无可分析请求" : cancelling ? "正在停止" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}
+            {requests.length === 0 ? t("analysis.noRequests") : cancelling ? t("analysis.stopping") : running ? t("analysis.stop") : status === "complete" ? t("analysis.rerun") : t("analysis.start")}
           </button>
           <button
             className="analysis-quick-scan"
             onClick={() => void runQuickScan()}
             disabled={requests.length === 0 || running || quickScanning}
-            title="不调用 AI：规划技能并汇总防护证据，无需配置 API key"
+            title={t("analysis.quickTitle")}
           >
-            <Zap size={13} />{quickScanning ? "正在快速分析" : "免 AI 快速分析"}
+            <Zap size={13} />{quickScanning ? t("analysis.quickRunning") : t("analysis.quick")}
           </button>
           {quickScan && <div className="analysis-quick-scan__result">
-            <strong>已完成 {quickScan.stages.length} 个阶段</strong>
+            <strong>{t("analysis.quickDone", { count: quickScan.stages.length })}</strong>
             <span>{quickScan.stages.join(" → ")}</span>
             {quickScan.notes.slice(0, 4).map((note, index) => <small key={index}>{note}</small>)}
           </div>}
@@ -1004,12 +1007,12 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
           {/* A displayed report describes its own mode. The picker below is
               what the next run will use, and the two can legitimately differ
               once the user starts setting up a different analysis. */}
-          <div><span className="section-kicker">AI REPORT</span><h2>{modeLabel(report?.mode ?? mode)}报告</h2></div>
+          <div><span className="section-kicker">AI REPORT</span><h2>{t("analysis.reportTitle", { mode: modeLabel(report?.mode ?? mode) })}</h2></div>
           <div className="report-header__actions">
             {reports.length > 0 && (
-              <label className="report-history-select" title="切换历史分析报告">
+              <label className="report-history-select" title={t("analysis.switchHistory")}>
                 <History size={14} />
-                <span><small>历史报告</small><strong>{reports.length} 份</strong></span>
+                <span><small>{t("analysis.history")}</small><strong>{t("analysis.nReports", { count: reports.length })}</strong></span>
                 <select
                   value={report?.id ?? ""}
                   onChange={(event) => {
@@ -1017,9 +1020,9 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                     if (selected) void restoreReport(selected);
                   }}
                   disabled={running}
-                  aria-label="选择历史分析报告"
+                  aria-label={t("analysis.pickHistory")}
                 >
-                  {!report && <option value="">当前分析</option>}
+                  {!report && <option value="">{t("analysis.currentRun")}</option>}
                   {reports.map((item) => (
                     <option key={item.id} value={item.id}>
                       {formatReportTime(item.updatedAt)} · {modeLabel(item.mode)} · {statusLabel(item.status)} · {item.model}
@@ -1029,40 +1032,40 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 <ChevronDown size={13} />
               </label>
             )}
-            {status === "complete" && <><span className="complete-pill"><Check size={13} />已完成</span><button className="icon-button" title="复制报告" onClick={copyReport}><Copy size={16} /></button></>}
+            {status === "complete" && <><span className="complete-pill"><Check size={13} />{t("analysis.complete")}</span><button className="icon-button" title={t("analysis.copy")} onClick={copyReport}><Copy size={16} /></button></>}
           </div>
         </header>
 
         <div className="analysis-mobile-launch">
-          <label><span>模式</span><select value={mode} onChange={(event) => setMode(event.target.value as AnalysisMode)} disabled={running}>{modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><ChevronDown size={13} /></label>
+          <label><span>{t("analysis.mode")}</span><select value={mode} onChange={(event) => setMode(event.target.value as AnalysisMode)} disabled={running}>{modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><ChevronDown size={13} /></label>
           <button
             className={`analysis-mobile-scope-toggle ${mobileScopeOpen ? "is-active" : ""}`}
             onClick={() => setMobileScopeOpen((open) => !open)}
-            aria-label="调整分析范围"
+            aria-label={t("analysis.adjustScope")}
             aria-expanded={mobileScopeOpen}
-            title="调整分析范围"
+            title={t("analysis.adjustScope")}
           >
             <Settings2 size={15} />
           </button>
-          <button className={running ? "is-running" : ""} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (!running && !streamListenerReady) || (running && !activeAnalysisId.current)}>{running ? (cancelling ? <LoaderCircle className="spin" size={15} /> : <Square size={12} fill="currentColor" />) : <Play size={14} fill="currentColor" />}{cancelling ? "停止中" : running ? "停止分析" : status === "complete" ? "重新分析" : "开始分析"}</button>
+          <button className={running ? "is-running" : ""} onClick={() => running ? void cancelAnalysis() : void startAnalysis()} disabled={requests.length === 0 || cancelling || (!running && !streamListenerReady) || (running && !activeAnalysisId.current)}>{running ? (cancelling ? <LoaderCircle className="spin" size={15} /> : <Square size={12} fill="currentColor" />) : <Play size={14} fill="currentColor" />}{cancelling ? t("analysis.stopShort") : running ? t("analysis.stop") : status === "complete" ? t("analysis.rerun") : t("analysis.start")}</button>
         </div>
 
-        <section className={`analysis-mobile-scope ${mobileScopeOpen ? "is-open" : ""}`} aria-label="移动端分析范围">{scopeControls}</section>
+        <section className={`analysis-mobile-scope ${mobileScopeOpen ? "is-open" : ""}`} aria-label={t("analysis.mobileScope")}>{scopeControls}</section>
 
         {status === "idle" ? (
           <div className="analysis-idle">
             <div className="analysis-idle__mark"><Sparkles size={26} /></div>
             <div className="analysis-preview-flow">
-              <div><span>01</span><SearchCheck size={19} /><strong>{smartFilteringEnabled ? "智能过滤" : "直接分析"}</strong><small>{smartFilteringEnabled ? `${requests.length} 条请求` : "已跳过 Phase 1"}</small></div>
+              <div><span>01</span><SearchCheck size={19} /><strong>{smartFilteringEnabled ? t("analysis.idleFilter") : t("analysis.idleDirect")}</strong><small>{smartFilteringEnabled ? t("analysis.nRequests", { count: requests.length }) : t("analysis.skippedPhase1")}</small></div>
               <ArrowRight size={16} />
-              <div><span>02</span><Activity size={19} /><strong>Skill 与工具编排</strong><small>{skillPlan?.selectedSkillIds.length ?? 0} Skills{analysisSettings.allowMcpTools ? "" : " · 工具关闭"}</small></div>
+              <div><span>02</span><Activity size={19} /><strong>{t("analysis.skillPlan")}</strong><small>{skillPlan?.selectedSkillIds.length ?? 0} Skills{analysisSettings.allowMcpTools ? "" : t("analysis.toolsOff")}</small></div>
               <ArrowRight size={16} />
-              <div><span>03</span><MessageSquareText size={19} /><strong>可追问报告</strong><small>保留会话上下文</small></div>
+              <div><span>03</span><MessageSquareText size={19} /><strong>{t("analysis.askableReport")}</strong><small>{t("analysis.keepContext")}</small></div>
             </div>
             <div className="analysis-idle__stats">
-              <span><strong>{apiRequests.length}</strong> API 请求</span>
-              <span><strong>{hookCount}</strong> Hook 调用</span>
-              <span><strong>{keyRequests.length}</strong> 关键项</span>
+              <span><strong>{apiRequests.length}</strong> {t("analysis.apiRequests")}</span>
+              <span><strong>{hookCount}</strong> {t("analysis.hookCalls")}</span>
+              <span><strong>{keyRequests.length}</strong> {t("analysis.keyItems")}</span>
             </div>
           </div>
         ) : (
@@ -1075,14 +1078,14 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 <div className="analysis-error__head">
                 <span><CircleAlert size={20} /></span>
                 <div>
-                  <strong>{failureKind === "cancelled" ? "分析已停止" : analysisFailure.headline}</strong>
+                  <strong>{failureKind === "cancelled" ? t("analysis.stopped") : analysisFailure.headline}</strong>
                   {failureKind !== "cancelled" && analysisFailureMeta ? <p className="analysis-error__meta">{analysisFailureMeta}</p> : null}
                   <p>{failureKind === "cancelled" ? error : analysisFailure.detail}</p>
                 </div>
                 <div className="analysis-error__actions">
-                  {(requiresApiKey || error.includes("API Key")) && <button type="button" onClick={onConfigureAi}><KeyRound size={14} />配置 AI</button>}
+                  {(requiresApiKey || error.includes("API Key")) && <button type="button" onClick={onConfigureAi}><KeyRound size={14} />{t("analysis.configAiBtn")}</button>}
                   {failureKind !== "cancelled" && (
-                    <button type="button" onClick={() => void openAnalysisRetry()}><RefreshCw size={14} />调整并重试</button>
+                    <button type="button" onClick={() => void openAnalysisRetry()}><RefreshCw size={14} />{t("analysis.retryAdjust")}</button>
                   )}
                 </div>
                 </div>
@@ -1095,18 +1098,18 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                     }}
                   >
                     <label>
-                      <span>上次任务提示词</span>
+                      <span>{t("analysis.lastPrompt")}</span>
                       <textarea
                         value={retryDraft.prompt}
                         onChange={(event) => setRetryDraft((current) => ({ ...current, prompt: event.target.value }))}
                         rows={10}
-                        placeholder={retryLoading ? "正在读取上次提示词…" : "可删减证据、改写任务要求后再重试"}
+                        placeholder={retryLoading ? t("analysis.retryLoading") : t("analysis.retryPlaceholder")}
                         disabled={retryLoading}
                       />
                     </label>
                     <div className="analysis-retry__row">
                       <label>
-                        <span>提供方</span>
+                        <span>{t("analysis.provider")}</span>
                         <select
                           value={retryDraft.provider}
                           onChange={(event) => {
@@ -1117,22 +1120,22 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                           }}
                         >
                           <option value="claudegpt">ClaudeGPT</option>
-                          <option value="compatible">兼容接口</option>
-                          <option value="local">本地模型</option>
+                          <option value="compatible">{t("analysis.compatibleApi")}</option>
+                          <option value="local">{t("analysis.localModel")}</option>
                         </select>
                       </label>
                       <label>
-                        <span>模型</span>
+                        <span>{t("analysis.model")}</span>
                         <input
                           value={retryDraft.model}
                           onChange={(event) => setRetryDraft((current) => ({ ...current, model: event.target.value }))}
-                          placeholder={retryDraft.provider === "local" ? "本地模型名" : "模型"}
+                          placeholder={retryDraft.provider === "local" ? t("analysis.localModelName") : t("analysis.model")}
                         />
                       </label>
                     </div>
                     {retryDraft.provider !== "claudegpt" && (
                       <label>
-                        <span>接口地址</span>
+                        <span>{t("analysis.endpoint")}</span>
                         <input
                           value={retryDraft.baseUrl}
                           onChange={(event) => setRetryDraft((current) => ({ ...current, baseUrl: event.target.value }))}
@@ -1141,13 +1144,13 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                       </label>
                     )}
                     <div className="analysis-retry__actions">
-                      <button type="submit" disabled={running || retryLoading}><RefreshCw size={14} />重试</button>
+                      <button type="submit" disabled={running || retryLoading}><RefreshCw size={14} />{t("analysis.retry")}</button>
                       <button
                         type="button"
                         disabled={running || retryLoading}
                         onClick={() => void submitAnalysisRetry(continueOnLocalModel(retryDraft))}
                       >
-                        <HardDrive size={14} />用本地模型继续
+                        <HardDrive size={14} />{t("analysis.continueLocal")}
                       </button>
                     </div>
                   </form>
@@ -1156,8 +1159,8 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
             )}
             {content && (
               <article className="generated-report">
-                <div className="report-meta"><Clock3 size={13} />{report?.keyRequestCount ?? selectedRequestCount} 条关键请求 · {report?.model ?? aiSettings.model} · 内置 Agent{planDescribesReport && skillPlan ? ` · ${skillPlan.selectedSkillIds.length} Skills` : ""}</div>
-                {report?.selectedRequestIds.length ? <div className="report-evidence-links"><span>证据请求</span>{report.selectedRequestIds.slice(0, 24).map((requestId) => { const request = requests.find((candidate) => candidate.id === requestId); return <button key={requestId} onClick={() => onOpenEvidenceRequest(requestId)}>{request ? `#${request.order} ${request.method} ${request.host}${request.path}` : requestId}</button>; })}{report.selectedRequestIds.length > 24 && <small>另有 {report.selectedRequestIds.length - 24} 条</small>}</div> : null}
+                <div className="report-meta"><Clock3 size={13} />{t("analysis.keyMeta", { count: report?.keyRequestCount ?? selectedRequestCount, model: report?.model ?? aiSettings.model })}{planDescribesReport && skillPlan ? ` · ${skillPlan.selectedSkillIds.length} Skills` : ""}</div>
+                {report?.selectedRequestIds.length ? <div className="report-evidence-links"><span>{t("analysis.evidenceRequests")}</span>{report.selectedRequestIds.slice(0, 24).map((requestId) => { const request = requests.find((candidate) => candidate.id === requestId); return <button key={requestId} onClick={() => onOpenEvidenceRequest(requestId)}>{request ? `#${request.order} ${request.method} ${request.host}${request.path}` : requestId}</button>; })}{report.selectedRequestIds.length > 24 && <small>{t("analysis.moreItems", { count: report.selectedRequestIds.length - 24 })}</small>}</div> : null}
                 <MarkdownReport content={content} />
                 {status === "analyzing" && analysisSettings.streamingOutput && <span className="stream-caret" />}
                 <div ref={reportEndRef} />
@@ -1170,17 +1173,17 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 </span>
                 <div className="replay-export-toolbar__body">
                   <div className="replay-export-toolbar__heading">
-                    <strong>算法还原与重播</strong>
-                    <span className="replay-export-pill">{replayExport ? "已写入所选目录" : "先选目录"}</span>
+                    <strong>{t("analysis.replayTitle")}</strong>
+                    <span className="replay-export-pill">{replayExport ? t("analysis.wroteDir") : t("analysis.pickDir")}</span>
                   </div>
                   <small title={replayExport?.directory}>
                     {replayExport
                       ? `${replayLanguages.find((item) => item.id === replayExport.language)?.label ?? replayExport.language} · 验证门 ${verificationVerdictLabel(replayExport.gateVerdict)} · ${replayExport.files.length} 个文件 · ${replayExport.directory}`
-                      : "点击导出将打开系统目录选择；取消不会写入任何文件。包内含报告、算法规格、协议证据与可校验重播实现。"}
+                      : t("analysis.replayHint")}
                   </small>
                 </div>
                 <label className="replay-language-select">
-                  <select value={replayLanguage} disabled={exportingReplay} onChange={(event) => setReplayLanguage(event.target.value as ReplayLanguage)} aria-label="选择算法重播语言">
+                  <select value={replayLanguage} disabled={exportingReplay} onChange={(event) => setReplayLanguage(event.target.value as ReplayLanguage)} aria-label={t("analysis.replayLang")}>
                     {replayLanguages.map((language) => <option key={language.id} value={language.id}>{language.label}</option>)}
                   </select>
                   <ChevronDown size={13} />
@@ -1189,10 +1192,10 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                   className="replay-export-button"
                   onClick={() => void exportReplayPackage()}
                   disabled={exportingReplay}
-                  title="先选择保存目录，再写入算法重播包；取消则不写入"
+                  title={t("analysis.replayTitleAttr")}
                 >
                   {exportingReplay ? <LoaderCircle className="spin" size={14} /> : <FolderOpen size={14} />}
-                  {exportingReplay ? "正在导出" : "选择目录并导出"}
+                  {exportingReplay ? t("analysis.exporting") : t("analysis.chooseDirExport")}
                 </button>
               </div>
             )}
@@ -1208,23 +1211,23 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                       ? sdkExport.readiness.gapCount > 0
                         ? `${sdkExport.readiness.gapCount} 处未证实`
                         : "无未证实项"
-                      : "curl_cffi + 指纹自检"}
+                      : t("analysis.sdkFingerprint")}
                   </span>
                 </div>
                 <small title={sdkExport?.directory}>
                   {sdkExport
                     ? `${sdkExport.readiness.endpointsTotal} 个端点（${sdkExport.readiness.endpointsConfirmed} 个路径参数已互证）· 加解密已验证 ${sdkExport.readiness.cryptoVerified} 个 · 验证门 ${verificationVerdictLabel(sdkExport.gateVerdict)} · ${sdkExport.directory}`
-                    : "把这次抓包归纳成端点，生成可直接调用的 Python 客户端：凭据由调用方传入，指纹目标可实测比对，未经证实的部分写在 GAPS.md 并标在对应方法上。"}
+                    : t("analysis.sdkHint")}
                 </small>
               </div>
               <button
                 className="replay-export-button"
                 onClick={() => void exportSdkPackage()}
                 disabled={exportingSdk}
-                title="选择目录并生成 Python SDK"
+                title={t("analysis.sdkTitleAttr")}
               >
                 {exportingSdk ? <LoaderCircle className="spin" size={14} /> : <Package size={14} />}
-                {exportingSdk ? "正在生成" : "生成 SDK"}
+                {exportingSdk ? t("analysis.generating") : t("analysis.genSdk")}
               </button>
             </div>
             {status === "complete" && report && (
@@ -1234,23 +1237,23 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 </span>
                 <div className="replay-export-toolbar__body">
                   <div className="replay-export-toolbar__heading">
-                    <strong>评估包（一键导出）</strong>
+                    <strong>{t("analysis.evalTitle")}</strong>
                     <span className="replay-export-pill">{evalExport ? "已写入所选目录" : "scorecard + schema"}</span>
                   </div>
                   <small title={evalExport?.directory}>
                     {evalExport
                       ? `${evalExport.files.length} 个文件 · L0 ${evalExport.scorecardComposite ?? "—"} · ${evalExport.directory}`
-                      : "导出 evidenceHeader、protocolSchemas、fidelity、scorecard L0/L1/L2 与当前分析报告，便于对照与归档。"}
+                      : t("analysis.evalHint")}
                   </small>
                 </div>
                 <button
                   className="replay-export-button"
                   onClick={() => void exportEvaluationPackage()}
                   disabled={exportingEval}
-                  title="选择目录并导出评估包"
+                  title={t("analysis.evalTitleAttr")}
                 >
                   {exportingEval ? <LoaderCircle className="spin" size={14} /> : <Package size={14} />}
-                  {exportingEval ? "正在导出" : "导出评估包"}
+                  {exportingEval ? t("analysis.exporting") : t("analysis.evalExport")}
                 </button>
               </div>
             )}
@@ -1265,8 +1268,8 @@ export function AnalysisView({ sessionId, requests, onConfigureAi, onNotify, aut
                 {phaseMessage.startsWith("追问失败") && <div className="followup-error"><CircleAlert size={14} />{phaseMessage}</div>}
                 <div className="followup-input">
                   <MessageSquareText size={17} />
-                  <input value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void ask(); }} placeholder="继续追问报告细节" />
-                  <button onClick={ask} disabled={!question.trim() || sending} title="发送"><Send size={16} /></button>
+                  <input value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void ask(); }} placeholder={t("analysis.followup")} />
+                  <button onClick={ask} disabled={!question.trim() || sending} title={t("analysis.send")}><Send size={16} /></button>
                 </div>
               </div>
             )}
@@ -1289,23 +1292,23 @@ function AnalysisGraphPanel({ run }: { run: AnalysisGraphRun }) {
       : "running";
 
   return (
-    <section className={`analysis-graph-runtime is-${tone}`} aria-label="Agent Graph 轨迹">
+    <section className={`analysis-graph-runtime is-${tone}`} aria-label={t("analysis.graphAria")}>
       <header>
         <span className="analysis-graph-runtime__mark"><GitBranch size={15} /></span>
         <div>
           <span className="section-kicker">ADVISORY GRAPH</span>
-          <strong>{current ? `当前建议：${current.label}` : graphRunLabel(run.status)}</strong>
+          <strong>{current ? t("analysis.currentSuggest", { label: current.label }) : graphRunLabel(run.status)}</strong>
         </div>
         <div className="analysis-graph-runtime__metrics">
-          <span>完整能力</span>
-          <span>用户上限 {run.maxModelTurns} 轮</span>
-          {deviations.length > 0 && <span>{deviations.length} 次动态切换</span>}
+          <span>{t("analysis.fullCaps")}</span>
+          <span>{t("analysis.userCap", { count: run.maxModelTurns })}</span>
+          {deviations.length > 0 && <span>{t("analysis.deviations", { count: deviations.length })}</span>}
         </div>
       </header>
       <details>
         <summary>
-          <span>实际轨迹</span>
-          <small>{finished} / {run.nodes.length} 节点</small>
+          <span>{t("analysis.actualPath")}</span>
+          <small>{finished} / {t("analysis.nNodes", { count: run.nodes.length })}</small>
           <ChevronDown size={13} />
         </summary>
         <ol className="analysis-graph-runtime__nodes">
@@ -1326,7 +1329,7 @@ function AnalysisGraphPanel({ run }: { run: AnalysisGraphRun }) {
                   <strong>{definition?.label ?? node.nodeId}</strong>
                   <small>{node.error || definition?.detail || graphNodeStatusLabel(node.status)}</small>
                 </div>
-                <span>{node.toolCallCount > 0 ? `${node.toolCallCount} 次工具` : graphNodeStatusLabel(node.status)}{node.attempt > 1 ? ` · ${node.attempt} 次尝试` : ""}</span>
+                <span>{node.toolCallCount > 0 ? t("analysis.nTools", { count: node.toolCallCount }) : graphNodeStatusLabel(node.status)}{node.attempt > 1 ? ` · ${t("analysis.nAttempts", { count: node.attempt })}` : ""}</span>
               </li>
             );
           })}
@@ -1342,20 +1345,20 @@ function AnalysisGraphPanel({ run }: { run: AnalysisGraphRun }) {
 }
 
 function graphRunLabel(status: AnalysisGraphRun["status"]) {
-  if (status === "completed") return "建议路径已完成";
-  if (status === "completedWithGaps") return "建议路径已完成，存在证据缺口";
-  if (status === "failed") return "建议路径未完成";
-  if (status === "cancelled") return "分析已停止";
-  return "GrokBuild 正在自主推进";
+  if (status === "completed") return t("analysis.pathDone");
+  if (status === "completedWithGaps") return t("analysis.pathGaps");
+  if (status === "failed") return t("analysis.pathFailed");
+  if (status === "cancelled") return t("analysis.pathCancelled");
+  return t("analysis.pathRunning");
 }
 
 function graphNodeStatusLabel(status: AnalysisGraphRun["nodes"][number]["status"]) {
   return ({
-    pending: "等待",
-    running: "进行中",
-    succeeded: "完成",
-    failed: "存在缺口",
-    skipped: "已跳过",
+    pending: t("analysis.nodePending"),
+    running: t("analysis.nodeRunning"),
+    succeeded: t("common.done"),
+    failed: t("analysis.nodeGap"),
+    skipped: t("analysis.nodeSkipped"),
   })[status];
 }
 
@@ -1471,14 +1474,14 @@ function AnalysisProgress({ status, requestCount, keyCount, message, filteringEn
     <div className="analysis-progress">
       <div className={`progress-step ${filteringDone ? "is-done" : "is-running"}`}>
         <span>{filteringDone ? <Check size={14} /> : <LoaderCircle className="spin" size={14} />}</span>
-        <div><strong>Phase 1 · 智能过滤</strong><small>{filteringDone ? filteringSkipped ? `本次直接分析，保留 ${keyCount} 条` : `${requestCount} 条中选出 ${keyCount} 条关键请求` : message || `正在评估 ${requestCount} 条请求`}</small></div>
-        {filteringDone && <em>{filteringSkipped ? "跳过" : "完成"}</em>}
+        <div><strong>{t("analysis.phase1")}</strong><small>{filteringDone ? filteringSkipped ? t("analysis.directKeep", { count: keyCount }) : t("analysis.pickedKey", { total: requestCount, key: keyCount }) : message || t("analysis.nRequests", { count: requestCount })}</small></div>
+        {filteringDone && <em>{filteringSkipped ? t("analysis.skip") : t("analysis.complete")}</em>}
       </div>
       <div className={`progress-line ${filteringDone ? "is-done" : ""}`} />
       <div className={`progress-step ${status === "analyzing" ? "is-running" : analysisDone ? "is-done" : "is-pending"}`}>
         <span>{analysisDone ? <Check size={14} /> : status === "analyzing" ? <LoaderCircle className="spin" size={14} /> : <Circle size={11} />}</span>
-        <div><strong>Phase 2 · 深度分析</strong><small>{status === "analyzing" ? message || "正在生成报告" : analysisDone ? "协议与风险结论已生成" : "等待过滤结果"}</small></div>
-        {analysisDone && <em>完成</em>}
+        <div><strong>{t("analysis.phase2")}</strong><small>{status === "analyzing" ? message || t("analysis.writingReport") : analysisDone ? t("analysis.reportReady") : t("analysis.waitFilter")}</small></div>
+        {analysisDone && <em>{t("analysis.complete")}</em>}
       </div>
     </div>
   );

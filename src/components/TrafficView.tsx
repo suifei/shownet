@@ -81,11 +81,12 @@ import { initialRequestSelection, requestSelectionReducer } from "../requestSele
 import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
 import { nextRequestListWindowOffset, shouldChangeRequestListWindow } from "../requestList";
 import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
-import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
+import { t } from "../i18n.ts";
+import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestColumnLabel, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
 import { classifyTrafficStatus, looksLikeProxyErrorBody } from "../trafficStatus";
 import { filterAndOrderSseEvents, isSseTerminal, prettySseData, sseEventLabel, type SseOrder } from "../sseInspector";
 import type { CaptureRuleRun, CryptoCodeSnippet, FilterExpression, RequestAnnotation, RequestAnnotationInput, RequestAnnotationSummary, RequestFacets, RequestField, RequestListItem, RequestRecord, RequestSort, RiskLevel, SavedRequestView, SourceType, SseEvent, WebSocketFrameEvent } from "../types";
-import { formatBytes, formatClock, formatListBytes, isSlowRequest } from "../format";
+import { formatBytes, formatClock, formatListBytes, getClockLocale, isSlowRequest } from "../format";
 import { QUICK_FILTER_METHODS } from "../httpMethods";
 import { ruleTraceResultLabel } from "../ruleTrace";
 import { useDismissibleLayer, useEscapeDismiss } from "../useDismissibleLayer";
@@ -459,7 +460,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
       try {
         await invoke("save_request_view", { input });
         await loadSavedViews();
-      } catch (reason) { setActionError(`保存视图失败：${String(reason)}`); return; }
+      } catch (reason) { setActionError(t("traffic.saveViewFailed", { error: String(reason) })); return; }
     } else {
       const next = [...savedViews, { ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now }];
       setSavedViews(next);
@@ -473,7 +474,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
       try {
         await invoke("delete_request_view", { viewId: view.id });
         await loadSavedViews();
-      } catch (reason) { setActionError(`删除视图失败：${String(reason)}`); return; }
+      } catch (reason) { setActionError(t("traffic.deleteViewFailed", { error: String(reason) })); return; }
     } else {
       const next = savedViews.filter((candidate) => candidate.id !== view.id);
       setSavedViews(next);
@@ -533,7 +534,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
     } catch (reason) {
       // A bookmark is how the user marks evidence; a silent no-op means they
       // believe it is marked when it is not.
-      setActionError(`书签保存失败：${String(reason)}`);
+      setActionError(t("traffic.bookmarkFailed", { error: String(reason) }));
     }
   };
 
@@ -543,32 +544,32 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         <div className="summary-metric">
           <span className={`live-pulse ${capturing ? "is-live" : ""}`} />
           <div>
-            <strong>{capturing ? "正在捕获" : captureElsewhere ? "浏览其他会话" : "捕获暂停"}</strong>
-            <span>{liveDisplay.syncing ? "正在追平" : liveDisplay.paused ? "界面已暂停" : captureElsewhere ? `写入 ${captureSessionName ?? "其他会话"}` : "当前会话"}</span>
+            <strong>{capturing ? t("traffic.capturing") : captureElsewhere ? t("traffic.browsingOther") : t("traffic.capturePaused")}</strong>
+            <span>{liveDisplay.syncing ? t("traffic.syncingLive") : liveDisplay.paused ? t("traffic.uiPaused") : captureElsewhere ? t("traffic.writingOther", { name: captureSessionName ?? t("traffic.otherSession") }) : t("traffic.currentSession")}</span>
           </div>
         </div>
-        <div className="summary-metric"><strong>{totalCount}</strong><span>{loading ? "正在读取窗口" : "全部请求"}</span></div>
+        <div className="summary-metric"><strong>{totalCount}</strong><span>{loading ? t("traffic.readingWindow") : t("traffic.allRequests")}</span></div>
         <div className="summary-metric"><strong>{apiCount}</strong><span>API</span></div>
-        <div className={`summary-metric ${errorCount ? "has-error" : ""}`}><strong>{errorCount}</strong><span>异常响应</span></div>
-        <div className="summary-metric"><strong>{hookCount}</strong><span>加密调用</span></div>
+        <div className={`summary-metric ${errorCount ? "has-error" : ""}`}><strong>{errorCount}</strong><span>{t("traffic.errors")}</span></div>
+        <div className="summary-metric"><strong>{hookCount}</strong><span>{t("traffic.cryptoCalls")}</span></div>
         <button
           className="analyze-compact-button"
           onClick={onOpenAnalysis}
           disabled={requests.length === 0}
-          title={requests.length === 0 ? "先抓到请求再分析" : "分析整个会话，范围可在分析页调整"}
+          title={requests.length === 0 ? t("traffic.analyzeNeedRequests") : t("traffic.analyzeSessionHint")}
         >
           <Sparkles size={15} />
-          分析整个会话
+          {t("traffic.analyzeSession")}
         </button>
       </div>
 
       <div className="traffic-toolbar" ref={toolbarRef}>
         <div className="search-field">
           <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 URL、域名、状态码" />
-          {query && <button onClick={() => setQuery("")} title="清除搜索"><X size={14} /></button>}
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("traffic.searchPlaceholder")} />
+          {query && <button onClick={() => setQuery("")} title={t("traffic.clearSearch")}><X size={14} /></button>}
         </div>
-        <div className="method-filter" aria-label="请求方法">
+        <div className="method-filter" aria-label={t("traffic.methods")}>
           {QUICK_FILTER_METHODS.map((item) => (
             <button key={item} className={quickFilter.methods.includes(item) ? "is-active" : ""} onClick={() => toggleQuickValue("methods", item)}>
               {item}
@@ -583,15 +584,15 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
             className={`toolbar-command-button ${menu === "filter" ? "is-active" : ""} ${activeFilterChips.length ? "has-filters" : ""}`}
             onClick={() => setMenu(menu === "filter" ? undefined : "filter")}
             aria-expanded={menu === "filter"}
-            title="筛选、条件与保存的视图"
+            title={t("traffic.filterTitle")}
           >
-            <Filter size={15} /><span>筛选</span>
+            <Filter size={15} /><span>{t("traffic.filter")}</span>
             {activeFilterChips.length > 0 && <em className="toolbar-filter-count">{activeFilterChips.length}</em>}
           </button>
           {menu === "filter" && (
             <div className="traffic-popover filter-panel">
-              <div className="filter-panel__tabs" role="tablist" aria-label="筛选方式">
-                {([["quick", "快捷"], ["advanced", "条件"], ["views", "视图"]] as const).map(([id, label]) => (
+              <div className="filter-panel__tabs" role="tablist" aria-label={t("traffic.filterMode")}>
+                {([["quick", t("traffic.filterQuick")], ["advanced", t("traffic.filterAdvanced")], ["views", t("traffic.filterViews")]] as const).map(([id, label]) => (
                   <button
                     key={id}
                     role="tab"
@@ -611,48 +612,48 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
               )}
               {filterTab === "views" && (
                 <div className="saved-views-pane">
-                  <p className="saved-views-pane__hint">保存当前的搜索、快捷筛选、条件与排序，之后一键复用。</p>
-                  <div className="saved-view-create"><input value={savedViewName} onChange={(event) => setSavedViewName(event.target.value)} placeholder="视图名称" /><button onClick={() => void saveCurrentView()} disabled={!savedViewName.trim()} title="保存当前筛选为视图"><Plus size={14} /></button></div>
+                  <p className="saved-views-pane__hint">{t("traffic.viewsHint")}</p>
+                  <div className="saved-view-create"><input value={savedViewName} onChange={(event) => setSavedViewName(event.target.value)} placeholder={t("traffic.viewName")} /><button onClick={() => void saveCurrentView()} disabled={!savedViewName.trim()} title={t("traffic.saveView")}><Plus size={14} /></button></div>
                   <div className="saved-view-list">
-                    {savedViews.map((view) => <div key={view.id}><button onClick={() => applySavedView(view)}><span>{view.name}</span><small>{view.sort.length} 个排序条件</small></button><button onClick={() => void deleteSavedView(view)} title="删除视图"><Trash2 size={13} /></button></div>)}
-                    {savedViews.length === 0 && <span className="popover-empty">还没有保存视图</span>}
+                    {savedViews.map((view) => <div key={view.id}><button onClick={() => applySavedView(view)}><span>{view.name}</span><small>{t("traffic.sortCount", { count: view.sort.length })}</small></button><button onClick={() => void deleteSavedView(view)} title={t("traffic.deleteView")}><Trash2 size={13} /></button></div>)}
+                    {savedViews.length === 0 && <span className="popover-empty">{t("traffic.noViews")}</span>}
                   </div>
                 </div>
               )}
               {/* Always present, so resetting is not a button that appears and
                   disappears from the toolbar depending on filter state. */}
               <footer className="filter-panel__footer">
-                <span>{activeFilterChips.length ? `${activeFilterChips.length} 项筛选生效` : "当前没有筛选"}</span>
-                <button onClick={clearFilters} disabled={!activeFilterChips.length}><RotateCcw size={13} />重置全部</button>
+                <span>{activeFilterChips.length ? t("traffic.filtersActive", { count: activeFilterChips.length }) : t("traffic.noFilters")}</span>
+                <button onClick={clearFilters} disabled={!activeFilterChips.length}><RotateCcw size={13} />{t("traffic.resetAll")}</button>
               </footer>
             </div>
           )}
         </div>
-        <button className={`toolbar-icon-button ${facetsOpen ? "is-active" : ""}`} onClick={() => setFacetsOpen((open) => !open)} title={facetsOpen ? "收起统计侧栏" : "展开统计侧栏"}><ListFilter size={15} /></button>
+        <button className={`toolbar-icon-button ${facetsOpen ? "is-active" : ""}`} onClick={() => setFacetsOpen((open) => !open)} title={facetsOpen ? t("traffic.hideFacets") : t("traffic.showFacets")}><ListFilter size={15} /></button>
         <div className="traffic-menu-anchor">
-          <button className={`toolbar-icon-button ${menu === "columns" ? "is-active" : ""}`} onClick={() => setMenu(menu === "columns" ? undefined : "columns")} title="配置列"><Columns3 size={15} /></button>
+          <button className={`toolbar-icon-button ${menu === "columns" ? "is-active" : ""}`} onClick={() => setMenu(menu === "columns" ? undefined : "columns")} title={t("traffic.columns")}><Columns3 size={15} /></button>
           {menu === "columns" && (
             <div className="traffic-popover column-menu">
-              <div className="popover-title"><strong>显示列</strong><button onClick={() => setPreferences(defaultRequestGridPreferences())}>恢复默认</button></div>
-              {requestColumnDefinitions.map((column) => <label key={column.id}><input type="checkbox" checked={preferences.visible.includes(column.id)} disabled={column.locked} onChange={() => setPreferences((current) => toggleRequestColumn(current, column.id))} /><span>{column.label}</span></label>)}
+              <div className="popover-title"><strong>{t("traffic.showColumns")}</strong><button onClick={() => setPreferences(defaultRequestGridPreferences())}>{t("traffic.resetColumns")}</button></div>
+              {requestColumnDefinitions.map((column) => <label key={column.id}><input type="checkbox" checked={preferences.visible.includes(column.id)} disabled={column.locked} onChange={() => setPreferences((current) => toggleRequestColumn(current, column.id))} /><span>{requestColumnLabel(column.id)}</span></label>)}
             </div>
           )}
         </div>
         <button className="toolbar-command-button" onClick={() => onOpenWorkbench("lab", selectedRequests, { createFromSelection: selectedRequests.length === 1 })}><FlaskConical size={15} /><span>Request Lab</span></button>
-        <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("collections", selectedRequests)} title="请求集合"><FolderTree size={15} /></button>
-        <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("rules", selectedRequests)} title="规则工作台"><SlidersHorizontal size={15} /></button>
+        <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("collections", selectedRequests)} title={t("traffic.collections")}><FolderTree size={15} /></button>
+        <button className="toolbar-icon-button" onClick={() => onOpenWorkbench("rules", selectedRequests)} title={t("traffic.rules")}><SlidersHorizontal size={15} /></button>
         <div className="traffic-menu-anchor live-display-anchor">
           <div className={`live-display-control ${liveDisplay.paused ? "is-paused" : ""}`}>
-            <button className="live-display-control__main" onClick={onToggleLiveDisplay} disabled={liveDisplay.syncing} aria-pressed={liveDisplay.paused} title={liveDisplay.paused ? "同步最新流量并恢复界面刷新" : "暂停界面刷新，抓包和规则继续运行"}>
+            <button className="live-display-control__main" onClick={onToggleLiveDisplay} disabled={liveDisplay.syncing} aria-pressed={liveDisplay.paused} title={liveDisplay.paused ? t("traffic.resumeLive") : t("traffic.pauseLive")}>
               {liveDisplay.syncing ? <LoaderCircle className="spin" size={14} /> : liveDisplay.paused ? <Play size={14} /> : <Pause size={14} />}
-              <span>{liveDisplay.syncing ? "同步中" : liveDisplay.paused ? `${liveDisplay.pendingChanges.toLocaleString()} 待同步` : `${liveDisplay.ratePerSecond.toLocaleString()}/s`}</span>
+              <span>{liveDisplay.syncing ? t("traffic.syncing") : liveDisplay.paused ? t("traffic.pendingSync", { count: liveDisplay.pendingChanges.toLocaleString() }) : `${liveDisplay.ratePerSecond.toLocaleString()}/s`}</span>
             </button>
-            <button className={`live-display-control__menu ${menu === "live" ? "is-active" : ""}`} onClick={() => setMenu(menu === "live" ? undefined : "live")} title="实时刷新设置"><ChevronDown size={12} /></button>
+            <button className={`live-display-control__menu ${menu === "live" ? "is-active" : ""}`} onClick={() => setMenu(menu === "live" ? undefined : "live")} title={t("traffic.liveSettings")}><ChevronDown size={12} /></button>
           </div>
           {menu === "live" && <div className="traffic-popover live-display-popover">
-            <header><div><strong>专注捕获</strong><span>{liveDisplay.paused ? "界面暂停" : "实时刷新"}</span></div><em>{liveDisplay.ratePerSecond.toLocaleString()} req/s</em></header>
-            <label className="live-display-setting"><input type="checkbox" checked={liveDisplay.autoProtection} onChange={(event) => onLiveDisplayAutoProtectionChange(event.target.checked)} /><span><strong>高流量自动保护</strong><small>{liveDisplay.rateThreshold.toLocaleString()} req/s 持续 2 秒</small></span></label>
-            <div className="live-display-metrics"><span><small>峰值</small><strong>{liveDisplay.peakRatePerSecond.toLocaleString()}/s</strong></span><span><small>新请求</small><strong>{liveDisplay.pendingCreated.toLocaleString()}</strong></span><span><small>状态更新</small><strong>{liveDisplay.pendingUpdated.toLocaleString()}</strong></span></div>
+            <header><div><strong>{t("traffic.focusCapture")}</strong><span>{liveDisplay.paused ? t("traffic.livePaused") : t("traffic.liveRefreshing")}</span></div><em>{liveDisplay.ratePerSecond.toLocaleString()} req/s</em></header>
+            <label className="live-display-setting"><input type="checkbox" checked={liveDisplay.autoProtection} onChange={(event) => onLiveDisplayAutoProtectionChange(event.target.checked)} /><span><strong>{t("traffic.autoProtect")}</strong><small>{t("traffic.autoProtectHint", { rate: liveDisplay.rateThreshold.toLocaleString() })}</small></span></label>
+            <div className="live-display-metrics"><span><small>{t("traffic.peak")}</small><strong>{liveDisplay.peakRatePerSecond.toLocaleString()}/s</strong></span><span><small>{t("traffic.newRequests")}</small><strong>{liveDisplay.pendingCreated.toLocaleString()}</strong></span><span><small>{t("traffic.statusUpdates")}</small><strong>{liveDisplay.pendingUpdated.toLocaleString()}</strong></span></div>
           </div>}
         </div>
         <span className="toolbar-result-count">{filteredCount.toLocaleString()} / {totalCount.toLocaleString()}</span>
@@ -664,59 +665,58 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
         <div className="traffic-action-error" role="alert">
           <CircleAlert size={14} />
           <span>{actionError}</span>
-          <button onClick={() => setActionError("")} title="关闭"><X size={13} /></button>
+          <button onClick={() => setActionError("")} title={t("common.close")}><X size={13} /></button>
         </div>
       )}
 
       {activeFilterChips.length > 0 && (
-        <div className="active-filters" role="region" aria-label="生效中的筛选">
+        <div className="active-filters" role="region" aria-label={t("traffic.activeFilters")}>
           {activeFilterChips.map((chip) => (
             <button
               key={chip.id}
               className="active-filter-chip"
               onClick={() => removeFilterChip(chip)}
-              title={`移除筛选：${chip.groupLabel} ${chip.label}`}
+              title={t("traffic.removeFilter", { group: chip.groupLabel, label: chip.label })}
             >
               <em>{chip.groupLabel}</em>
               <span>{chip.label}</span>
               <X size={12} />
             </button>
           ))}
-          <button className="active-filters__clear" onClick={clearFilters}>清除全部</button>
+          <button className="active-filters__clear" onClick={clearFilters}>{t("traffic.clearAll")}</button>
         </div>
       )}
 
       {totalCount === 0 && loading ? (
         <div className="traffic-empty traffic-empty--loading" role="status">
           <LoaderCircle className="spin" size={25} />
-          <h2>正在读取请求</h2>
-          <button className="secondary-button" data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={13} /> : <X size={13} />}{cancelling ? "正在停止" : "取消当前查询"}</button>
+          <h2>{t("traffic.readingRequests")}</h2>
+          <button className="secondary-button" data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={13} /> : <X size={13} />}{cancelling ? t("traffic.stopping") : t("traffic.cancelQuery")}</button>
         </div>
       ) : totalCount === 0 ? (
         <div className="traffic-empty" data-testid="traffic-empty-oob">
           <div className="traffic-empty__icon"><CircleDot size={25} /></div>
-          <h2>等待第一条请求</h2>
+          <h2>{t("traffic.waitFirst")}</h2>
           <p className="traffic-empty__hint">
-            <strong>开箱最快路径：</strong>内嵌浏览器点「开始抓包」，不必先装证书。
-            要解密 App / 系统 HTTPS 时再安装 Root CA。抓到请求后可自动进入 AI 分析与代码导出。
+            <strong>{t("traffic.emptyHintLead")}</strong>{t("traffic.emptyHint")}
           </p>
           <ol className="traffic-empty__steps">
-            <li>内嵌浏览器开始抓包（零配置）</li>
-            <li>需要明文 HTTPS 时：设置里一键装 CA</li>
-            <li>有请求后：AI 自动逆向 → 导出重放 / 客户端代码</li>
+            <li>{t("traffic.emptyStep1")}</li>
+            <li>{t("traffic.emptyStep2")}</li>
+            <li>{t("traffic.emptyStep3")}</li>
           </ol>
           <div className="empty-actions">
             {onOpenBrowser ? (
               <button type="button" className="primary-button" onClick={onOpenBrowser} data-testid="empty-open-browser">
-                <Browser size={14} /> 内嵌浏览器开始抓包
+                <Browser size={14} /> {t("traffic.emptyOpenBrowser")}
               </button>
             ) : null}
-            <button type="button" className="secondary-button" onClick={onConnect}>连接其他流量来源</button>
+            <button type="button" className="secondary-button" onClick={onConnect}>{t("traffic.emptyConnect")}</button>
             {onOpenSettingsCapture ? (
-              <button type="button" className="secondary-button" onClick={onOpenSettingsCapture}>安装 CA / 代理设置</button>
+              <button type="button" className="secondary-button" onClick={onOpenSettingsCapture}>{t("traffic.emptyCa")}</button>
             ) : null}
-            <button type="button" className="secondary-button" onClick={onOpenAnalysis} disabled title="先抓到请求再分析">
-              AI 分析
+            <button type="button" className="secondary-button" onClick={onOpenAnalysis} disabled title={t("traffic.analyzeNeedRequests")}>
+              {t("nav.analysis")}
             </button>
           </div>
         </div>
@@ -732,7 +732,7 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
               onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
               onKeyDown={handleGridKeyDown}
               role="grid"
-              aria-label="请求数据网格"
+              aria-label={t("traffic.grid")}
               aria-rowcount={filteredCount + 1}
               aria-colcount={columns.length}
             >
@@ -742,9 +742,9 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
                   const sorting = sortIndex >= 0 ? sort[sortIndex] : undefined;
                   const ariaSort = sorting ? (sorting.direction === "asc" ? "ascending" : "descending") : "none";
                   return <div key={column.id} className="request-grid-header-cell" role="columnheader" aria-colindex={columnIndex + 1} aria-sort={ariaSort} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu("columns"); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => setPreferences((current) => reorderRequestColumn(current, event.dataTransfer.getData("text/request-column") as RequestColumnId, column.id))}>
-                    {!column.locked && <span className="column-drag-handle" draggable onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/request-column", column.id); }} title={`拖动“${column.label}”列`}><GripVertical size={12} /></span>}
-                    <button type="button" className="request-grid-sort-button" data-sort-field={column.field} onClick={(event) => setSort((current) => nextRequestSort(current, column.field, event.shiftKey))} title={`${column.label}：${sorting ? (sorting.direction === "asc" ? "升序，点击切换降序" : "降序，点击取消排序") : "点击升序排列"}`}>
-                      <span>{column.label}</span>
+                    {!column.locked && <span className="column-drag-handle" draggable onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/request-column", column.id); }} title={t("traffic.dragColumn", { label: requestColumnLabel(column.id) })}><GripVertical size={12} /></span>}
+                    <button type="button" className="request-grid-sort-button" data-sort-field={column.field} onClick={(event) => setSort((current) => nextRequestSort(current, column.field, event.shiftKey))} title={t("traffic.sortTitle", { label: requestColumnLabel(column.id), hint: sorting ? (sorting.direction === "asc" ? t("traffic.sortDesc") : t("traffic.sortOff")) : t("traffic.sortAsc") })}>
+                      <span>{requestColumnLabel(column.id)}</span>
                       {sorting && <span className="sort-indicator">{sorting.direction === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />}{sort.length > 1 && <small>{sortIndex + 1}</small>}</span>}
                     </button>
                     <span className="column-resize-handle" onPointerDown={(event) => { event.stopPropagation(); setResizing({ id: column.id, startX: event.clientX, startWidth: preferences.widths[column.id] ?? column.width }); }} onDoubleClick={(event) => { event.stopPropagation(); setPreferences((current) => resizeRequestColumn(current, column.id, estimateRequestColumnWidth(column.id, requests))); }} />
@@ -776,63 +776,63 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
             </div>
             {liveDisplay.paused && <div className={`live-display-banner ${liveDisplay.pauseReason === "automatic" ? "is-automatic" : ""}`} role="status">
               <span className="live-display-banner__icon">{liveDisplay.syncing ? <LoaderCircle className="spin" size={15} /> : <Pause size={15} />}</span>
-              <span className="live-display-banner__body"><strong>{liveDisplay.syncing ? "正在同步最新流量" : liveDisplay.pauseReason === "automatic" ? "高流量保护已开启" : "界面刷新已暂停"}</strong><small>{liveDisplay.pendingChanges > 0 ? `${liveDisplay.pendingCreated.toLocaleString()} 条新请求 · ${liveDisplay.pendingUpdated.toLocaleString()} 次状态更新` : "后台捕获正常"}</small></span>
-              <button onClick={onToggleLiveDisplay} disabled={liveDisplay.syncing}>{liveDisplay.syncing ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />}<span>{liveDisplay.syncing ? "同步中" : "同步列表"}</span></button>
+              <span className="live-display-banner__body"><strong>{liveDisplay.syncing ? t("traffic.syncingBanner") : liveDisplay.pauseReason === "automatic" ? t("traffic.autoProtectOn") : t("traffic.uiRefreshPaused")}</strong><small>{liveDisplay.pendingChanges > 0 ? t("traffic.pendingBanner", { created: liveDisplay.pendingCreated.toLocaleString(), updated: liveDisplay.pendingUpdated.toLocaleString() }) : t("traffic.captureOk")}</small></span>
+              <button onClick={onToggleLiveDisplay} disabled={liveDisplay.syncing}>{liveDisplay.syncing ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />}<span>{liveDisplay.syncing ? t("traffic.syncing") : t("traffic.syncList")}</span></button>
             </div>}
             {requests.length === 0 && filteredCount === 0 && (
-              <div className="filter-empty"><ListFilter size={20} /><span>没有符合条件的请求</span><button onClick={clearFilters}>重置筛选</button></div>
+              <div className="filter-empty"><ListFilter size={20} /><span>{t("traffic.noMatch")}</span><button onClick={clearFilters}>{t("traffic.resetFilters")}</button></div>
             )}
             <div className={`request-grid-statusbar ${selection.selectedIds.length ? "has-selection" : ""}`}>
-              <span>总数 {totalCount.toLocaleString()}</span>
-              <span>筛选 {filteredCount.toLocaleString()}</span>
-              <strong className="request-selection-count">已选择 {selection.selectedIds.length.toLocaleString()}{selectedCurrentWindow && <><span className="selection-window-label"> · 当前窗口</span><span className="selection-window-compact">/{requests.length.toLocaleString()}</span></>}</strong>
-              {loading ? <span className="request-query-progress" role="status"><LoaderCircle className="spin" size={11} /><span>{cancelling ? "正在停止" : "正在载入"}</span><button data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling} title={cancelling ? "正在等待查询停止" : "取消当前查询"} aria-label={cancelling ? "正在等待查询停止" : "取消当前查询"}>{cancelling ? <LoaderCircle className="spin" size={11} /> : <X size={11} />}</button></span> : <span>{requests.length ? `${(requestWindowOffset + 1).toLocaleString()}–${(requestWindowOffset + requests.length).toLocaleString()}` : "0 条"}</span>}
+              <span>{t("traffic.total", { count: totalCount.toLocaleString() })}</span>
+              <span>{t("traffic.filtered", { count: filteredCount.toLocaleString() })}</span>
+              <strong className="request-selection-count">{t("traffic.selectedCount", { count: selection.selectedIds.length.toLocaleString() })}{selectedCurrentWindow && <><span className="selection-window-label"> · {t("traffic.currentWindow")}</span><span className="selection-window-compact">/{requests.length.toLocaleString()}</span></>}</strong>
+              {loading ? <span className="request-query-progress" role="status"><LoaderCircle className="spin" size={11} /><span>{cancelling ? t("traffic.stopping") : t("traffic.loadingMore")}</span><button data-testid="cancel-request-query" onClick={onCancelRequestQuery} disabled={cancelling} title={cancelling ? t("traffic.waitStop") : t("traffic.cancelQuery")} aria-label={cancelling ? t("traffic.waitStop") : t("traffic.cancelQuery")}>{cancelling ? <LoaderCircle className="spin" size={11} /> : <X size={11} />}</button></span> : <span>{requests.length ? `${(requestWindowOffset + 1).toLocaleString()}–${(requestWindowOffset + requests.length).toLocaleString()}` : t("traffic.zeroRows")}</span>}
             </div>
             {/* Contextual bar over the grid. The same actions used to be eight
                 unlabelled icons wedged into the status bar, where a first-time
                 user had to hover each one to find out what it did. */}
             {selectionFromUser && selection.selectedIds.length > 0 && (
-              <div className="selection-bar" role="toolbar" aria-label="选中请求操作">
-                <span className="selection-bar__count"><strong>{selection.selectedIds.length.toLocaleString()}</strong> 条已选</span>
+              <div className="selection-bar" role="toolbar" aria-label={t("traffic.selectionActions")}>
+                <span className="selection-bar__count"><strong>{t("traffic.selectedN", { count: selection.selectedIds.length.toLocaleString() })}</strong></span>
                 <span className="selection-bar__divider" aria-hidden="true" />
                 {/* The summary strip's button analyses the whole session; this
                     one is scoped to the selection. Both used to read "AI 分析". */}
-                <button className="selection-bar__action is-primary" onClick={() => onAnalyzeSelection(selection.selectedIds)} title={`只分析选中的 ${selection.selectedIds.length} 条请求`}>
-                  <Sparkles size={14} />分析选中
+                <button className="selection-bar__action is-primary" onClick={() => onAnalyzeSelection(selection.selectedIds)} title={t("traffic.analyzeSelectedHint", { count: selection.selectedIds.length })}>
+                  <Sparkles size={14} />{t("traffic.analyzeSelected")}
                 </button>
-                <button className="selection-bar__action" onClick={() => onOpenWorkbench("replay", selectedRequests)} title="按原样重新发送这些请求">
-                  <ListRestart size={14} />重放
+                <button className="selection-bar__action" onClick={() => onOpenWorkbench("replay", selectedRequests)} title={t("traffic.replayHint")}>
+                  <ListRestart size={14} />{t("traffic.replay")}
                 </button>
                 <button
                   className="selection-bar__action"
                   onClick={() => onOpenWorkbench("lab", selectedRequests, { createFromSelection: true })}
                   disabled={selection.selectedIds.length !== 1}
-                  title={selection.selectedIds.length === 1 ? "在请求实验室里改参数、改 Header 并生成代码" : "请只选择一条请求"}
+                  title={selection.selectedIds.length === 1 ? t("traffic.rewriteHint") : t("traffic.rewriteNeedOne")}
                 >
-                  <FlaskConical size={14} />改写与生成代码
+                  <FlaskConical size={14} />{t("traffic.rewrite")}
                 </button>
                 <button
                   className="selection-bar__action"
                   onClick={() => onOpenWorkbench("diff", selectedRequests)}
                   disabled={selection.selectedIds.length !== 2}
-                  title={selection.selectedIds.length === 2 ? "逐字段对比两条请求" : "请选择两条请求"}
+                  title={selection.selectedIds.length === 2 ? t("traffic.diffHint") : t("traffic.diffNeedTwo")}
                 >
-                  <GitCompareArrows size={14} />对比
+                  <GitCompareArrows size={14} />{t("traffic.diff")}
                 </button>
                 <div className="selection-bar__more" ref={selectionMoreRef}>
-                  <button className="selection-bar__action" onClick={() => setSelectionMoreOpen((open) => !open)} aria-expanded={selectionMoreOpen} title="更多操作">
-                    <MoreHorizontal size={14} />更多
+                  <button className="selection-bar__action" onClick={() => setSelectionMoreOpen((open) => !open)} aria-expanded={selectionMoreOpen} title={t("traffic.moreActions")}>
+                    <MoreHorizontal size={14} />{t("traffic.more")}
                   </button>
                   {selectionMoreOpen && (
-                    <div className="selection-more-menu" role="menu" aria-label="更多选中操作">
-                      <button role="menuitem" onClick={() => { void copySelectedUrls(); setSelectionMoreOpen(false); }}><Copy size={14} />复制 URL</button>
-                      <button role="menuitem" onClick={() => { onOpenWorkbench("collections", selectedRequests); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><FolderTree size={14} />归档到请求集合</button>
-                      <button role="menuitem" onClick={() => { void toggleSelectedBookmark(); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><Bookmark size={14} />{selectedRequests[0] && (annotationOverrides[selectedRequests[0].id] ?? selectedRequests[0].annotation)?.bookmarked ? "取消书签" : "添加书签"}</button>
-                      <button role="menuitem" onClick={() => { exportSelectedSummary(); setSelectionMoreOpen(false); }}><Download size={14} />导出证据摘要</button>
+                    <div className="selection-more-menu" role="menu" aria-label={t("traffic.moreSelected")}>
+                      <button role="menuitem" onClick={() => { void copySelectedUrls(); setSelectionMoreOpen(false); }}><Copy size={14} />{t("traffic.copyUrl")}</button>
+                      <button role="menuitem" onClick={() => { onOpenWorkbench("collections", selectedRequests); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><FolderTree size={14} />{t("traffic.archive")}</button>
+                      <button role="menuitem" onClick={() => { void toggleSelectedBookmark(); setSelectionMoreOpen(false); }} disabled={selection.selectedIds.length !== 1}><Bookmark size={14} />{selectedRequests[0] && (annotationOverrides[selectedRequests[0].id] ?? selectedRequests[0].annotation)?.bookmarked ? t("traffic.unbookmark") : t("traffic.bookmark")}</button>
+                      <button role="menuitem" onClick={() => { exportSelectedSummary(); setSelectionMoreOpen(false); }}><Download size={14} />{t("traffic.exportEvidence")}</button>
                     </div>
                   )}
                 </div>
-                <button className="selection-bar__clear" onClick={() => { dispatchSelection({ type: "clear" }); setSelectionFromUser(false); }} title="清除选择" aria-label="清除选择"><X size={14} /></button>
+                <button className="selection-bar__clear" onClick={() => { dispatchSelection({ type: "clear" }); setSelectionFromUser(false); }} title={t("traffic.clearSelection")} aria-label={t("traffic.clearSelection")}><X size={14} /></button>
               </div>
             )}
           </div>
@@ -842,18 +842,18 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
           </div>
         </div>
       )}
-      {contextMenu && <div ref={contextMenuRef} className="request-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="请求操作">
-        <span>{selectedRequests.length} 条请求</span>
-        <button role="menuitem" onClick={() => { void copySelectedUrls(); setContextMenu(undefined); }}><Copy size={14} />复制 URL</button>
-        <button role="menuitem" onClick={() => { setDetailOpen(true); setContextMenu(undefined); }}><PanelRight size={14} />打开详情</button>
-        <button role="menuitem" onClick={() => { setInspectorLayout("maximized"); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><Maximize2 size={14} />最大化详情</button>
-        <button role="menuitem" onClick={() => { onAnalyzeSelection(selection.selectedIds); setContextMenu(undefined); }}><Sparkles size={14} />分析选中的 {selectedRequests.length} 条请求</button>
-        <button role="menuitem" onClick={() => { onOpenWorkbench("replay", selectedRequests); setContextMenu(undefined); }}><ListRestart size={14} />重放选中请求</button>
-        <button role="menuitem" onClick={() => { onOpenWorkbench("diff", selectedRequests); setContextMenu(undefined); }} disabled={selectedRequests.length !== 2}><GitCompareArrows size={14} />对比两条请求</button>
-        <button role="menuitem" onClick={() => { onOpenWorkbench("lab", selectedRequests, { createFromSelection: true }); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><FlaskConical size={14} />转为 Request Lab 草稿</button>
-        <button role="menuitem" onClick={() => { onOpenWorkbench("collections", selectedRequests); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><FolderTree size={14} />归档到请求集合</button>
-        <button role="menuitem" onClick={() => { void toggleSelectedBookmark(); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><Bookmark size={14} />{selectedRequests[0] && (annotationOverrides[selectedRequests[0].id] ?? selectedRequests[0].annotation)?.bookmarked ? "取消书签" : "添加书签"}</button>
-        <button role="menuitem" onClick={() => { exportSelectedSummary(); setContextMenu(undefined); }}><Download size={14} />导出证据摘要</button>
+      {contextMenu && <div ref={contextMenuRef} className="request-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label={t("traffic.requestActions")}>
+        <span>{t("traffic.nRequests", { count: selectedRequests.length })}</span>
+        <button role="menuitem" onClick={() => { void copySelectedUrls(); setContextMenu(undefined); }}><Copy size={14} />{t("traffic.copyUrl")}</button>
+        <button role="menuitem" onClick={() => { setDetailOpen(true); setContextMenu(undefined); }}><PanelRight size={14} />{t("traffic.openDetail")}</button>
+        <button role="menuitem" onClick={() => { setInspectorLayout("maximized"); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><Maximize2 size={14} />{t("traffic.maxDetail")}</button>
+        <button role="menuitem" onClick={() => { onAnalyzeSelection(selection.selectedIds); setContextMenu(undefined); }}><Sparkles size={14} />{t("traffic.analyzeSelectedN", { count: selectedRequests.length })}</button>
+        <button role="menuitem" onClick={() => { onOpenWorkbench("replay", selectedRequests); setContextMenu(undefined); }}><ListRestart size={14} />{t("traffic.replaySelected")}</button>
+        <button role="menuitem" onClick={() => { onOpenWorkbench("diff", selectedRequests); setContextMenu(undefined); }} disabled={selectedRequests.length !== 2}><GitCompareArrows size={14} />{t("traffic.diffTwo")}</button>
+        <button role="menuitem" onClick={() => { onOpenWorkbench("lab", selectedRequests, { createFromSelection: true }); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><FlaskConical size={14} />{t("traffic.toLab")}</button>
+        <button role="menuitem" onClick={() => { onOpenWorkbench("collections", selectedRequests); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><FolderTree size={14} />{t("traffic.archive")}</button>
+        <button role="menuitem" onClick={() => { void toggleSelectedBookmark(); setContextMenu(undefined); }} disabled={selectedRequests.length !== 1}><Bookmark size={14} />{selectedRequests[0] && (annotationOverrides[selectedRequests[0].id] ?? selectedRequests[0].annotation)?.bookmarked ? t("traffic.unbookmark") : t("traffic.bookmark")}</button>
+        <button role="menuitem" onClick={() => { exportSelectedSummary(); setContextMenu(undefined); }}><Download size={14} />{t("traffic.exportEvidence")}</button>
       </div>}
     </section>
   );
@@ -861,30 +861,30 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
 
 function QuickFilterMenu({ state, facets, onToggle }: { state: QuickFilterState; facets: RequestFacets; onToggle: <K extends "hosts" | "methods" | "protocols" | "types" | "statuses" | "exactStatuses" | "sources" | "risks" | "shownet">(key: K, value: QuickFilterState[K][number]) => void }) {
   return <div className="traffic-popover quick-filter-popover">
-    <FilterOptions title="方法" values={METHOD_VALUES} selected={state.methods} count={(value) => facetCount(facets.methods, value)} onToggle={(value) => onToggle("methods", value)} />
-    <FilterOptions title="协议" values={PROTOCOL_VALUES} labels={PROTOCOL_LABELS} selected={state.protocols} count={(value) => facetCount(facets.protocols, value)} onToggle={(value) => onToggle("protocols", value)} />
-    <FilterOptions title="类型" values={TYPE_VALUES} labels={TYPE_LABELS} selected={state.types} count={(value) => value === "api" ? sumFacet(facets.types, ["fetch", "xhr"]) : facetCount(facets.types, value)} onToggle={(value) => onToggle("types", value)} />
-    <FilterOptions<QuickStatus> title="状态" values={STATUS_VALUES} labels={STATUS_LABELS} selected={state.statuses} count={() => undefined} onToggle={(value) => onToggle("statuses", value)} />
-    <FilterOptions<SourceType> title="来源" values={["browser", "desktop", "terminal", "script", "mobile", "iot", "reverse"]} labels={sourceLabels} selected={state.sources} count={(value) => facetCount(facets.sources, value)} onToggle={(value) => onToggle("sources", value)} />
-    <FilterOptions<QuickShownet> title="标记" values={SHOWNET_VALUES} labels={SHOWNET_LABELS} selected={state.shownet} count={() => undefined} onToggle={(value) => onToggle("shownet", value)} />
+    <FilterOptions title={t("traffic.method")} values={METHOD_VALUES} selected={state.methods} count={(value) => facetCount(facets.methods, value)} onToggle={(value) => onToggle("methods", value)} />
+    <FilterOptions title={t("traffic.protocol")} values={PROTOCOL_VALUES} labels={PROTOCOL_LABELS} selected={state.protocols} count={(value) => facetCount(facets.protocols, value)} onToggle={(value) => onToggle("protocols", value)} />
+    <FilterOptions title={t("traffic.type")} values={TYPE_VALUES} labels={TYPE_LABELS} selected={state.types} count={(value) => value === "api" ? sumFacet(facets.types, ["fetch", "xhr"]) : facetCount(facets.types, value)} onToggle={(value) => onToggle("types", value)} />
+    <FilterOptions<QuickStatus> title={t("traffic.status")} values={STATUS_VALUES} labels={STATUS_LABELS} selected={state.statuses} count={() => undefined} onToggle={(value) => onToggle("statuses", value)} />
+    <FilterOptions<SourceType> title={t("traffic.source")} values={["browser", "desktop", "terminal", "script", "mobile", "iot", "reverse"]} labels={sourceLabels} selected={state.sources} count={(value) => facetCount(facets.sources, value)} onToggle={(value) => onToggle("sources", value)} />
+    <FilterOptions<QuickShownet> title={t("traffic.mark")} values={SHOWNET_VALUES} labels={SHOWNET_LABELS} selected={state.shownet} count={() => undefined} onToggle={(value) => onToggle("shownet", value)} />
   </div>;
 }
 
 function FacetSidebar({ facets, state, savedViews, bookmarkCount, onToggle, onApplyView, onClose }: { facets: RequestFacets; state: QuickFilterState; savedViews: SavedRequestView[]; bookmarkCount: number; onToggle: <K extends "hosts" | "methods" | "protocols" | "types" | "statuses" | "exactStatuses" | "sources" | "risks" | "shownet">(key: K, value: QuickFilterState[K][number]) => void; onApplyView: (view: SavedRequestView) => void; onClose: () => void }) {
-  return <aside className="facet-sidebar" aria-label="筛选统计">
-    <header><div><strong>筛选统计</strong><span>基于当前查询结果</span></div><button onClick={onClose} title="收起统计侧栏"><X size={14} /></button></header>
-    <FacetSection title="域名" facets={facets.hosts} selected={state.hosts} onToggle={(value) => onToggle("hosts", value)} limit={10} />
-    <FacetSection title="来源" facets={facets.sources} selected={state.sources} labels={sourceLabels} onToggle={(value) => onToggle("sources", value as SourceType)} />
-    <FacetSection title="协议" facets={facets.protocols} selected={state.protocols} labels={PROTOCOL_LABELS} onToggle={(value) => onToggle("protocols", value)} />
-    <FacetSection title="类型" facets={facets.types} selected={state.types} labels={TYPE_LABELS} onToggle={(value) => onToggle("types", value)} />
-    <FacetSection title="状态" facets={facets.statuses} selected={state.exactStatuses} onToggle={(value) => onToggle("exactStatuses", value)} />
-    <FacetSection title="风险" facets={facets.risks} selected={state.risks} labels={RISK_LABELS} onToggle={(value) => onToggle("risks", value as RiskLevel)} />
-    <section className="facet-section facet-organization"><div className="facet-section__title"><strong>组织</strong><span>{savedViews.length + bookmarkCount}</span></div><div className="facet-bookmark-summary"><Bookmark size={12} /><span>已加载书签</span><small>{bookmarkCount}</small></div>{savedViews.slice(0, 5).map((view) => <button key={view.id} onClick={() => onApplyView(view)}><Save size={12} /><span>{view.name}</span></button>)}</section>
+  return <aside className="facet-sidebar" aria-label={t("traffic.facets")}>
+    <header><div><strong>{t("traffic.facets")}</strong><span>{t("traffic.facetsHint")}</span></div><button onClick={onClose} title={t("traffic.hideFacets")}><X size={14} /></button></header>
+    <FacetSection title={t("traffic.host")} facets={facets.hosts} selected={state.hosts} onToggle={(value) => onToggle("hosts", value)} limit={10} />
+    <FacetSection title={t("traffic.source")} facets={facets.sources} selected={state.sources} labels={sourceLabels} onToggle={(value) => onToggle("sources", value as SourceType)} />
+    <FacetSection title={t("traffic.protocol")} facets={facets.protocols} selected={state.protocols} labels={PROTOCOL_LABELS} onToggle={(value) => onToggle("protocols", value)} />
+    <FacetSection title={t("traffic.type")} facets={facets.types} selected={state.types} labels={TYPE_LABELS} onToggle={(value) => onToggle("types", value)} />
+    <FacetSection title={t("traffic.status")} facets={facets.statuses} selected={state.exactStatuses} onToggle={(value) => onToggle("exactStatuses", value)} />
+    <FacetSection title={t("traffic.risk")} facets={facets.risks} selected={state.risks} labels={RISK_LABELS} onToggle={(value) => onToggle("risks", value as RiskLevel)} />
+    <section className="facet-section facet-organization"><div className="facet-section__title"><strong>{t("traffic.org")}</strong><span>{savedViews.length + bookmarkCount}</span></div><div className="facet-bookmark-summary"><Bookmark size={12} /><span>{t("traffic.loadedBookmarks")}</span><small>{bookmarkCount}</small></div>{savedViews.slice(0, 5).map((view) => <button key={view.id} onClick={() => onApplyView(view)}><Save size={12} /><span>{view.name}</span></button>)}</section>
   </aside>;
 }
 
 function FacetSection({ title, facets, selected, labels, onToggle, limit = 8 }: { title: string; facets: Array<{ value: string; count: number }>; selected: readonly string[]; labels?: Record<string, string>; onToggle: (value: string) => void; limit?: number }) {
-  return <section className="facet-section"><div className="facet-section__title"><strong>{title}</strong><span>{facets.length}</span></div><div>{facets.slice(0, limit).map((facet) => <button key={facet.value} className={selected.includes(facet.value) ? "is-active" : ""} onClick={() => onToggle(facet.value)} title={facet.value}><span>{selected.includes(facet.value) && <Check size={10} />}{labels?.[facet.value] ?? facet.value}</span><small>{facet.count.toLocaleString()}</small></button>)}</div>{facets.length === 0 && <small className="facet-empty">暂无数据</small>}</section>;
+  return <section className="facet-section"><div className="facet-section__title"><strong>{title}</strong><span>{facets.length}</span></div><div>{facets.slice(0, limit).map((facet) => <button key={facet.value} className={selected.includes(facet.value) ? "is-active" : ""} onClick={() => onToggle(facet.value)} title={facet.value}><span>{selected.includes(facet.value) && <Check size={10} />}{labels?.[facet.value] ?? facet.value}</span><small>{facet.count.toLocaleString()}</small></button>)}</div>{facets.length === 0 && <small className="facet-empty">{t("traffic.noData")}</small>}</section>;
 }
 
 function FilterOptions<T extends string>({ title, values, labels, selected, count, onToggle }: { title: string; values: readonly T[]; labels?: Partial<Record<T, string>>; selected: T[]; count: (value: T) => number | undefined; onToggle: (value: T) => void }) {
@@ -893,7 +893,7 @@ function FilterOptions<T extends string>({ title, values, labels, selected, coun
 
 function FilterBuilder({ value, onChange }: { value: FilterExpression; onChange: (value: FilterExpression | undefined) => void }) {
   return <div className="filter-builder">
-    <div className="popover-title"><strong>条件构建器</strong><button onClick={() => onChange(undefined)}>清空</button></div>
+    <div className="popover-title"><strong>{t("traffic.builder")}</strong><button onClick={() => onChange(undefined)}>{t("traffic.clear")}</button></div>
     <FilterBuilderNode value={value} depth={0} onChange={onChange} />
   </div>;
 }
@@ -901,22 +901,58 @@ function FilterBuilder({ value, onChange }: { value: FilterExpression; onChange:
 function FilterBuilderNode({ value, depth, onChange, onRemove }: { value: FilterExpression; depth: number; onChange: (value: FilterExpression) => void; onRemove?: () => void }) {
   if (value.kind === "predicate") {
     return <div className="filter-predicate-row">
-      <select value={value.field} onChange={(event) => onChange({ ...value, field: event.target.value as RequestField })}>{filterFields.map(([field, label]) => <option key={field} value={field}>{label}</option>)}</select>
-      <select value={value.operator} onChange={(event) => onChange({ ...value, operator: event.target.value as typeof value.operator })}>{filterOperators.map(([operator, label]) => <option key={operator} value={operator}>{label}</option>)}</select>
-      {value.operator !== "exists" && <input value={String(value.value ?? "")} onChange={(event) => onChange({ ...value, value: numericFilterFields.has(value.field) && event.target.value !== "" ? Number(event.target.value) : event.target.value })} placeholder="值" />}
-      {onRemove && <button onClick={onRemove} title="删除条件"><X size={13} /></button>}
+      <select value={value.field} onChange={(event) => onChange({ ...value, field: event.target.value as RequestField })}>{filterFields().map(([field, label]) => <option key={field} value={field}>{label}</option>)}</select>
+      <select value={value.operator} onChange={(event) => onChange({ ...value, operator: event.target.value as typeof value.operator })}>{filterOperators().map(([operator, label]) => <option key={operator} value={operator}>{label}</option>)}</select>
+      {value.operator !== "exists" && <input value={String(value.value ?? "")} onChange={(event) => onChange({ ...value, value: numericFilterFields.has(value.field) && event.target.value !== "" ? Number(event.target.value) : event.target.value })} placeholder={t("traffic.value")} />}
+      {onRemove && <button onClick={onRemove} title={t("traffic.deletePredicate")}><X size={13} /></button>}
     </div>;
   }
   return <div className={`filter-group-node depth-${depth}`}>
-    <div className="filter-group-head"><select value={value.operator} onChange={(event) => onChange({ ...value, operator: event.target.value as "and" | "or" })}><option value="and">全部满足 AND</option><option value="or">任一满足 OR</option></select>{onRemove && <button onClick={onRemove}><Trash2 size={13} /></button>}</div>
+    <div className="filter-group-head"><select value={value.operator} onChange={(event) => onChange({ ...value, operator: event.target.value as "and" | "or" })}><option value="and">{t("traffic.allAnd")}</option><option value="or">{t("traffic.anyOr")}</option></select>{onRemove && <button onClick={onRemove}><Trash2 size={13} /></button>}</div>
     {value.children.map((child, index) => <FilterBuilderNode key={index} value={child} depth={depth + 1} onChange={(next) => onChange({ ...value, children: value.children.map((candidate, candidateIndex) => candidateIndex === index ? next : candidate) })} onRemove={() => onChange({ ...value, children: value.children.filter((_, candidateIndex) => candidateIndex !== index) })} />)}
-    <div className="filter-builder-actions"><button onClick={() => onChange({ ...value, children: [...value.children, createPredicate()] })}><Plus size={12} />条件</button>{depth < 1 && <button onClick={() => onChange({ ...value, children: [...value.children, { kind: "group", operator: "or", children: [createPredicate(), createPredicate()] }] })}><Plus size={12} />条件组</button>}</div>
+    <div className="filter-builder-actions"><button onClick={() => onChange({ ...value, children: [...value.children, createPredicate()] })}><Plus size={12} />{t("traffic.predicate")}</button>{depth < 1 && <button onClick={() => onChange({ ...value, children: [...value.children, { kind: "group", operator: "or", children: [createPredicate(), createPredicate()] }] })}><Plus size={12} />{t("traffic.predicateGroup")}</button>}</div>
   </div>;
 }
 
-const filterFields: Array<[RequestField, string]> = [["all", "全部"], ["url", "完整 URL"], ["host", "域名"], ["path", "路径"], ["method", "方法"], ["status", "状态码"], ["type", "类型"], ["source", "来源"], ["protocol", "协议"], ["durationMs", "耗时"], ["sizeBytes", "大小"], ["risk", "风险"], ["requestHeader", "请求 Header"], ["responseHeader", "响应 Header"], ["requestBody", "请求正文"], ["responseBody", "响应正文"], ["hook", "Hook"]];
+function filterFields(): Array<[RequestField, string]> {
+  return [
+    ["all", t("traffic.field.all")],
+    ["url", t("traffic.field.url")],
+    ["host", t("traffic.field.host")],
+    ["path", t("traffic.field.path")],
+    ["method", t("traffic.field.method")],
+    ["status", t("traffic.field.status")],
+    ["type", t("traffic.field.type")],
+    ["source", t("traffic.field.source")],
+    ["protocol", t("traffic.field.protocol")],
+    ["durationMs", t("traffic.field.durationMs")],
+    ["sizeBytes", t("traffic.field.sizeBytes")],
+    ["risk", t("traffic.field.risk")],
+    ["requestHeader", t("traffic.field.requestHeader")],
+    ["responseHeader", t("traffic.field.responseHeader")],
+    ["requestBody", t("traffic.field.requestBody")],
+    ["responseBody", t("traffic.field.responseBody")],
+    ["hook", t("traffic.field.hook")],
+  ];
+}
 type PredicateOperator = Extract<FilterExpression, { kind: "predicate" }>["operator"];
-const filterOperators: Array<[PredicateOperator, string]> = [["contains", "包含"], ["not_contains", "不包含"], ["equals", "等于"], ["not_equals", "不等于"], ["starts_with", "开头是"], ["ends_with", "结尾是"], ["wildcard", "通配符"], ["regex", "正则"], ["gt", "大于"], ["gte", "大于等于"], ["lt", "小于"], ["lte", "小于等于"], ["exists", "存在"]];
+function filterOperators(): Array<[PredicateOperator, string]> {
+  return [
+    ["contains", t("traffic.op.contains")],
+    ["not_contains", t("traffic.op.not_contains")],
+    ["equals", t("traffic.op.equals")],
+    ["not_equals", t("traffic.op.not_equals")],
+    ["starts_with", t("traffic.op.starts_with")],
+    ["ends_with", t("traffic.op.ends_with")],
+    ["wildcard", t("traffic.op.wildcard")],
+    ["regex", t("traffic.op.regex")],
+    ["gt", t("traffic.op.gt")],
+    ["gte", t("traffic.op.gte")],
+    ["lt", t("traffic.op.lt")],
+    ["lte", t("traffic.op.lte")],
+    ["exists", t("traffic.op.exists")],
+  ];
+}
 const numericFilterFields = new Set<RequestField>(["order", "startedAt", "status", "sizeBytes", "durationMs", "cryptoSnippetCount"]);
 
 function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
@@ -933,7 +969,7 @@ function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
       return <span className="status-code status-0">…</span>;
     }
     if (request.status == null) {
-      return <span className="status-code status-0">失败</span>;
+      return <span className="status-code status-0">{t("traffic.failed")}</span>;
     }
     return (
       <span className={`status-code status-${presentation.cssClass}`} title={presentation.title}>
@@ -944,11 +980,11 @@ function renderRequestCell(request: RequestListItem, column: RequestColumnId) {
   if (column === "source") { const SourceIcon = sourceIcons[request.source]; return <span className="source-cell"><SourceIcon size={13} />{sourceLabels[request.source]}</span>; }
   if (column === "sizeBytes") return formatListBytes(request.sizeBytes);
   if (column === "durationMs") return <span className={isSlowRequest(request.durationMs) ? "is-slow" : ""}>{request.durationMs == null ? "--" : `${request.durationMs} ms`}</span>;
-  if (column === "startedAt") return new Date(request.startedAt).toLocaleTimeString("zh-CN", { hour12: false });
+  if (column === "startedAt") return new Date(request.startedAt).toLocaleTimeString(undefined, { hour12: false });
   if (column === "risk") return request.risk === "none" ? "--" : request.risk;
   if (column === "hasHook") return request.hasHook ? <Braces size={13} /> : "--";
   if (column === "cryptoSnippetCount") return request.cryptoSnippetCount || "--";
-  if (column === "tlsIntercepted") return request.tlsIntercepted ? request.tlsVersion ?? "TLS" : "未解密";
+  if (column === "tlsIntercepted") return request.tlsIntercepted ? request.tlsVersion ?? "TLS" : t("traffic.notDecrypted");
   return String(request[column] ?? "--");
 }
 
@@ -987,7 +1023,7 @@ function RequestDetailLoader({ item, layout, onAnnotationSaved, onAnalyze, onLay
     loaded
       .then((detail) => {
         if (disposed) return;
-        if (!detail) throw new Error("请求详情不存在");
+        if (!detail) throw new Error(t("traffic.detailMissing"));
         setRequest(detail);
       })
       .catch((loadError) => { if (!disposed) setError(String(loadError)); });
@@ -999,9 +1035,9 @@ function RequestDetailLoader({ item, layout, onAnnotationSaved, onAnalyze, onLay
     <aside className="request-detail request-detail--loading">
       <div className="request-detail__head">
         <div className="request-detail__title"><span className={`method method-${item.method.toLowerCase()}`}>{item.method}</span><div><h2>{item.path}</h2><span>{item.host}</span></div></div>
-        <button className="icon-button" onClick={onClose} title="关闭详情"><X size={16} /></button>
+        <button className="icon-button" onClick={onClose} title={t("traffic.closeDetail")}><X size={16} /></button>
       </div>
-      <div className="detail-empty">{error ? <><CircleAlert size={20} /><span>{error}</span></> : <><Clock3 size={20} /><span>正在读取请求详情</span></>}</div>
+      <div className="detail-empty">{error ? <><CircleAlert size={20} /><span>{error}</span></> : <><Clock3 size={20} /><span>{t("traffic.readingDetail")}</span></>}</div>
     </aside>
   );
 }
@@ -1146,21 +1182,21 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
   };
 
   const tabs: Array<{ id: DetailTab; label: string; count?: number }> = [
-    { id: "overview", label: "总览" },
-    { id: "query", label: "参数", count: parseQueryEntries(request.query).length },
-    { id: "requestHeaders", label: "请求头", count: request.requestHeaders.length },
-    { id: "responseHeaders", label: "响应头", count: request.responseHeaders.length },
+    { id: "overview", label: t("traffic.tab.overview") },
+    { id: "query", label: t("traffic.tab.query"), count: parseQueryEntries(request.query).length },
+    { id: "requestHeaders", label: t("traffic.reqHeaders"), count: request.requestHeaders.length },
+    { id: "responseHeaders", label: t("traffic.resHeaders"), count: request.responseHeaders.length },
     { id: "cookies", label: "Cookie", count: parseCookies([...request.requestHeaders, ...request.responseHeaders]).length },
-    { id: "requestBody", label: "请求体" },
-    { id: "responseBody", label: "响应体" },
-    ...(request.type === "websocket" ? [{ id: "messages" as const, label: "消息", count: websocketFrames.length }] : []),
+    { id: "requestBody", label: t("traffic.tab.reqBody") },
+    { id: "responseBody", label: t("traffic.tab.resBody") },
+    ...(request.type === "websocket" ? [{ id: "messages" as const, label: t("traffic.tab.messages"), count: websocketFrames.length }] : []),
     ...(request.type === "sse" ? [{ id: "sse" as const, label: "SSE", count: sseEvents.length }] : []),
-    ...(request.cryptoSnippetCount > 0 ? [{ id: "code" as const, label: "代码", count: request.cryptoSnippetCount }] : []),
-    ...(request.tlsFingerprint ? [{ id: "fingerprint" as const, label: "连接指纹" }] : []),
+    ...(request.cryptoSnippetCount > 0 ? [{ id: "code" as const, label: t("traffic.tab.code"), count: request.cryptoSnippetCount }] : []),
+    ...(request.tlsFingerprint ? [{ id: "fingerprint" as const, label: t("traffic.tab.fingerprint") }] : []),
     { id: "hook", label: "Hook", count: request.hook ? 1 : 0 },
-    { id: "rules", label: "规则轨迹", count: ruleTraces.length },
-    { id: "timing", label: "计时" },
-    { id: "annotation", label: "备注", count: annotationSummary?.tags.length },
+    { id: "rules", label: t("traffic.tab.rules"), count: ruleTraces.length },
+    { id: "timing", label: t("traffic.tab.timing") },
+    { id: "annotation", label: t("traffic.tab.annotation"), count: annotationSummary?.tags.length },
   ];
 
   return (
@@ -1172,12 +1208,12 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
           <div><h2>{request.path}</h2><span>{request.host}</span></div>
         </div>
         <div className="request-detail__actions">
-          <button className={`icon-button ${layout === "right" ? "is-active" : ""}`} onClick={() => onLayoutChange("right")} title="详情置于右侧"><PanelRight size={15} /></button>
-          <button className={`icon-button ${layout === "bottom" ? "is-active" : ""}`} onClick={() => onLayoutChange("bottom")} title="详情置于底部"><PanelBottom size={15} /></button>
-          <button className="icon-button" onClick={() => onLayoutChange(layout === "maximized" ? "right" : "maximized")} title={layout === "maximized" ? "退出最大化" : "最大化详情"}>{layout === "maximized" ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
-          <button className="icon-button" onClick={() => setCodeOpen(true)} title="生成请求代码"><Code2 size={15} /></button>
-          <button className="icon-button" onClick={copyUrl} title="复制 URL">{copied ? <span className="copied-check">✓</span> : <Copy size={15} />}</button>
-          <button className="icon-button" onClick={onClose} title="关闭详情"><X size={16} /></button>
+          <button className={`icon-button ${layout === "right" ? "is-active" : ""}`} onClick={() => onLayoutChange("right")} title={t("traffic.detailRight")}><PanelRight size={15} /></button>
+          <button className={`icon-button ${layout === "bottom" ? "is-active" : ""}`} onClick={() => onLayoutChange("bottom")} title={t("traffic.detailBottom")}><PanelBottom size={15} /></button>
+          <button className="icon-button" onClick={() => onLayoutChange(layout === "maximized" ? "right" : "maximized")} title={layout === "maximized" ? t("traffic.exitMax") : t("traffic.maxDetail")}>{layout === "maximized" ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
+          <button className="icon-button" onClick={() => setCodeOpen(true)} title={t("traffic.genCode")}><Code2 size={15} /></button>
+          <button className="icon-button" onClick={copyUrl} title={t("traffic.copyUrl")}>{copied ? <span className="copied-check">✓</span> : <Copy size={15} />}</button>
+          <button className="icon-button" onClick={onClose} title={t("traffic.closeDetail")}><X size={16} /></button>
         </div>
       </div>
       <div className="request-meta-line">
@@ -1192,12 +1228,12 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
             </span>
           );
         })()}
-        <span>{request.protocol}</span><span>{request.tls}</span><span>{request.size}</span><span>{request.duration} ms</span>
+        <span>{request.protocol}</span><span>{request.tls === "明文" ? t("traffic.plaintext") : request.tls}</span><span>{request.size}</span><span>{request.duration} ms</span>
       </div>
       {request.risk !== "none" && (
         <div className={`risk-banner risk-banner--${request.risk}`}>
           <ShieldAlert size={15} />
-          <span>{request.risk === "critical" ? "发现敏感凭据或签名参数" : request.risk === "warning" ? "该请求需要关注" : "AI 已标记为协议关键请求"}</span>
+          <span>{request.risk === "critical" ? t("traffic.risk.criticalBanner") : request.risk === "warning" ? t("traffic.risk.warningBanner") : t("traffic.risk.infoBanner")}</span>
         </div>
       )}
       {(() => {
@@ -1209,7 +1245,7 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
           return (
             <div className="risk-banner risk-banner--warning proxy-error-banner" role="alert">
               <CircleAlert size={15} />
-              <span><strong>代理错误（{request.status}）</strong>{request.responseBody.trim()}</span>
+              <span><strong>{t("traffic.proxyError", { status: request.status })}</strong>{request.responseBody.trim()}</span>
             </div>
           );
         }
@@ -1219,9 +1255,9 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
             <div className="risk-banner risk-banner--warning origin-4xx-banner" role="status">
               <CircleAlert size={15} />
               <span>
-                <strong>源站 {request.status}</strong>
+                <strong>{t("traffic.originStatus", { status: request.status })}</strong>
                 {server ? ` · Server: ${server}` : ""}
-                {" — 请求已到达源站（非代理连接超时）。静态 CDN 可试「设置 → HTTPS 解密 → 推荐静态 CDN 绕行」。"}
+                {t("traffic.origin4xxHint")}
               </span>
             </div>
           );
@@ -1238,8 +1274,8 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
       <div className="detail-content">
         {tab === "overview" && <RequestOverview request={request} />}
         {tab === "query" && <QueryViewer query={request.query} />}
-        {tab === "requestHeaders" && <HeaderViewer title="请求头" headers={request.requestHeaders} />}
-        {tab === "responseHeaders" && <HeaderViewer title="响应头" headers={request.responseHeaders} />}
+        {tab === "requestHeaders" && <HeaderViewer title={t("traffic.reqHeaders")} headers={request.requestHeaders} />}
+        {tab === "responseHeaders" && <HeaderViewer title={t("traffic.resHeaders")} headers={request.responseHeaders} />}
         {tab === "cookies" && <CookieViewer requestHeaders={request.requestHeaders} responseHeaders={request.responseHeaders} />}
         {tab === "messages" && (
           <WebSocketMessages frames={websocketFrames} loading={websocketLoading} error={websocketError} />
@@ -1248,7 +1284,7 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
         {tab === "requestBody" && <HttpBodyViewer content={request.requestBody} headers={request.requestHeaders} metadata={legacyBodyMetadata(request.requestBody)} filename={`${request.id}-request-body.txt`} legacyMetadata />}
         {tab === "responseBody" && <HttpBodyViewer content={request.responseBody} headers={request.responseHeaders} metadata={request.responseBodyMetadata} filename={`${request.id}-response-body.txt`} />}
         {tab === "code" && (
-          cryptoLoading ? <div className="detail-empty"><Code2 size={20} /><span>正在读取代码片段</span></div>
+          cryptoLoading ? <div className="detail-empty"><Code2 size={20} /><span>{t("traffic.readingSnippets")}</span></div>
             : cryptoError ? <div className="detail-empty"><CircleAlert size={20} /><span>{cryptoError}</span></div>
               : <CryptoCodeDetail snippets={cryptoSnippets} />
         )}
@@ -1256,12 +1292,12 @@ function RequestDetail({ request, annotationSummary, layout, onAnnotationSaved, 
         {tab === "hook" && (
           request.hook ? (
             <div className="hook-detail">
-              <div className="hook-detail__title"><Code2 size={16} /><strong>{request.hook.algorithm}</strong><span>调用栈已关联</span></div>
-              <label>输入</label><CodeBlock content={request.hook.input} />
-              <label>输出</label><CodeBlock content={request.hook.output} />
-              <button className="secondary-button" onClick={onAnalyze}><Bot size={14} />解释此算法</button>
+              <div className="hook-detail__title"><Code2 size={16} /><strong>{request.hook.algorithm}</strong><span>{t("traffic.hookLinked")}</span></div>
+              <label>{t("traffic.hookInput")}</label><CodeBlock content={request.hook.input} />
+              <label>{t("traffic.hookOutput")}</label><CodeBlock content={request.hook.output} />
+              <button className="secondary-button" onClick={onAnalyze}><Bot size={14} />{t("traffic.explainAlgo")}</button>
             </div>
-          ) : <div className="detail-empty"><Braces size={20} /><span>未关联 JS Hook 调用</span></div>
+          ) : <div className="detail-empty"><Braces size={20} /><span>{t("traffic.noHook")}</span></div>
         )}
         {tab === "rules" && <RuleTraceViewer traces={ruleTraces} loading={ruleTraceLoading} />}
         {tab === "timing" && <TimingBreakdown duration={request.duration} />}
@@ -1283,8 +1319,9 @@ function isDetailTabAvailable(tab: DetailTab, request: RequestRecord) {
 
 function RequestOverview({ request }: { request: RequestRecord }) {
   const responseMetadata = request.responseBodyMetadata ?? legacyBodyMetadata(request.responseBody);
-  const server = headerValue(request.responseHeaders, "server") ?? "未提供";
-  const contentType = headerValue(request.responseHeaders, "content-type") ?? "未提供";
+  const notProvided = t("traffic.notProvided");
+  const server = headerValue(request.responseHeaders, "server") ?? notProvided;
+  const contentType = headerValue(request.responseHeaders, "content-type") ?? notProvided;
   const url = `${request.tls === "明文" ? "http" : "https"}://${request.host}${request.path}${request.query ? `?${request.query}` : ""}`;
   const statusPresentation = classifyTrafficStatus(request.status, {
     responseBody: request.responseBody,
@@ -1299,38 +1336,38 @@ function RequestOverview({ request }: { request: RequestRecord }) {
   return <div className="request-overview">
     {proxyError && (
       <section className="overview-proxy-error" role="alert">
-        <h3>代理错误详情</h3>
+        <h3>{t("traffic.proxyErrorDetail")}</h3>
         <pre>{proxyError}</pre>
       </section>
     )}
     {statusPresentation.kind === "origin4xx" && (
       <section className="overview-origin-4xx" role="status">
-        <h3>源站 {request.status}{server !== "未提供" ? ` · ${server}` : ""}</h3>
-        <p>这是源站返回的 4xx，不是「连接超时」类代理错误。百度静态域若大量 400，请启用设置中的推荐静态 CDN 绕行。</p>
+        <h3>{t("traffic.originStatus", { status: request.status })}{server !== notProvided ? ` · ${server}` : ""}</h3>
+        <p>{t("traffic.origin4xxBody")}</p>
       </section>
     )}
     <dl className="overview-grid">
-      <div className="is-wide"><dt>完整 URL</dt><dd>{url}</dd></div>
-      <div><dt>状态</dt><dd title={statusPresentation.title}>{statusPresentation.label}</dd></div>
-      <div><dt>协议</dt><dd>{request.protocol}</dd></div>
-      <div><dt>TLS</dt><dd>{request.tls}</dd></div>
-      <div><dt>服务器</dt><dd>{server}</dd></div>
-      <div><dt>类型</dt><dd>{request.type}</dd></div>
-      <div><dt>内容类型</dt><dd>{contentType}</dd></div>
-      <div><dt>大小</dt><dd>{request.size}</dd></div>
-      <div><dt>耗时</dt><dd>{request.duration} ms</dd></div>
-      <div><dt>来源</dt><dd>{sourceLabels[request.source]}</dd></div>
-      <div><dt>时间</dt><dd>{request.time}</dd></div>
-      <div><dt>风险</dt><dd>{request.risk === "none" ? "无" : request.risk}</dd></div>
+      <div className="is-wide"><dt>{t("traffic.dt.url")}</dt><dd>{url}</dd></div>
+      <div><dt>{t("traffic.dt.status")}</dt><dd title={statusPresentation.title}>{statusPresentation.label}</dd></div>
+      <div><dt>{t("traffic.dt.protocol")}</dt><dd>{request.protocol}</dd></div>
+      <div><dt>{t("traffic.dt.tls")}</dt><dd>{request.tls === "明文" ? t("traffic.plaintext") : request.tls}</dd></div>
+      <div><dt>{t("traffic.dt.server")}</dt><dd>{server}</dd></div>
+      <div><dt>{t("traffic.dt.type")}</dt><dd>{request.type}</dd></div>
+      <div><dt>{t("traffic.dt.contentType")}</dt><dd>{contentType}</dd></div>
+      <div><dt>{t("traffic.dt.size")}</dt><dd>{request.size}</dd></div>
+      <div><dt>{t("traffic.dt.duration")}</dt><dd>{request.duration} ms</dd></div>
+      <div><dt>{t("traffic.dt.source")}</dt><dd>{sourceLabels[request.source]}</dd></div>
+      <div><dt>{t("traffic.dt.time")}</dt><dd>{request.time}</dd></div>
+      <div><dt>{t("traffic.dt.risk")}</dt><dd>{request.risk === "none" ? t("common.none") : request.risk}</dd></div>
     </dl>
-    <section className="overview-evidence"><h3>正文捕获证据</h3><HttpBodyStatus metadata={responseMetadata} /><HttpBodyMetadataGrid metadata={responseMetadata} /></section>
+    <section className="overview-evidence"><h3>{t("traffic.bodyEvidence")}</h3><HttpBodyStatus metadata={responseMetadata} /><HttpBodyMetadataGrid metadata={responseMetadata} /></section>
   </div>;
 }
 
 function QueryViewer({ query }: { query?: string }) {
   const entries = parseQueryEntries(query);
-  if (!entries.length) return <div className="detail-empty"><ListFilter size={20} /><span>URL 没有 Query 参数</span></div>;
-  return <div className="structured-table"><div className="structured-table__head"><span>名称</span><span>解码值</span><span>序号</span></div>{entries.map((entry) => <div key={`${entry.name}-${entry.index}`}><code>{entry.name}</code><span>{entry.value || <em>空值</em>}</span><small>{entry.duplicate ? `重复 ${entry.index + 1}` : entry.index + 1}</small></div>)}</div>;
+  if (!entries.length) return <div className="detail-empty"><ListFilter size={20} /><span>{t("traffic.noQuery")}</span></div>;
+  return <div className="structured-table"><div className="structured-table__head"><span>{t("traffic.name")}</span><span>{t("traffic.decodedValue")}</span><span>{t("traffic.index")}</span></div>{entries.map((entry) => <div key={`${entry.name}-${entry.index}`}><code>{entry.name}</code><span>{entry.value || <em>{t("traffic.emptyValue")}</em>}</span><small>{entry.duplicate ? t("traffic.duplicate", { n: entry.index + 1 }) : entry.index + 1}</small></div>)}</div>;
 }
 
 function HeaderViewer({ title, headers }: { title: string; headers: Array<{ name: string; value: string }> }) {
@@ -1340,22 +1377,22 @@ function HeaderViewer({ title, headers }: { title: string; headers: Array<{ name
   const visible = headers.filter((header) => !normalized || `${header.name}: ${header.value}`.toLowerCase().includes(normalized));
   const raw = headers.map((header) => `${header.name}: ${header.value}`).join("\n");
   return <div className="header-viewer">
-    <div className="detail-subtoolbar"><div className="segmented-small"><button className={mode === "table" ? "is-active" : ""} onClick={() => setMode("table")}>表格</button><button className={mode === "raw" ? "is-active" : ""} onClick={() => setMode("raw")}>原始</button></div><div className="detail-search"><Search size={13} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${title}`} /></div><button className="icon-button" onClick={() => void navigator.clipboard?.writeText(raw)} title="复制全部"><Copy size={14} /></button></div>
-    {mode === "raw" ? <CodeBlock content={raw || `${title}为空`} muted={!raw} /> : <div className="header-table"><div className="header-table__head"><span>名称</span><span>值</span><span /></div>{visible.map((header, index) => <div key={`${header.name}-${index}`}><code>{header.name}</code><span>{header.value}</span><button onClick={() => void navigator.clipboard?.writeText(`${header.name}: ${header.value}`)} title="复制这一项"><Copy size={12} /></button></div>)}</div>}
-    {visible.length === 0 && <div className="detail-empty detail-empty--compact"><Search size={16} /><span>没有匹配的 Header</span></div>}
+    <div className="detail-subtoolbar"><div className="segmented-small"><button className={mode === "table" ? "is-active" : ""} onClick={() => setMode("table")}>{t("traffic.table")}</button><button className={mode === "raw" ? "is-active" : ""} onClick={() => setMode("raw")}>{t("traffic.raw")}</button></div><div className="detail-search"><Search size={13} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("traffic.searchIn", { title })} /></div><button className="icon-button" onClick={() => void navigator.clipboard?.writeText(raw)} title={t("traffic.copyAll")}><Copy size={14} /></button></div>
+    {mode === "raw" ? <CodeBlock content={raw || t("traffic.emptyTitle", { title })} muted={!raw} /> : <div className="header-table"><div className="header-table__head"><span>{t("traffic.name")}</span><span>{t("traffic.headerValue")}</span><span /></div>{visible.map((header, index) => <div key={`${header.name}-${index}`}><code>{header.name}</code><span>{header.value}</span><button onClick={() => void navigator.clipboard?.writeText(`${header.name}: ${header.value}`)} title={t("traffic.copyItem")}><Copy size={12} /></button></div>)}</div>}
+    {visible.length === 0 && <div className="detail-empty detail-empty--compact"><Search size={16} /><span>{t("traffic.noHeaderMatch")}</span></div>}
   </div>;
 }
 
 function CookieViewer({ requestHeaders, responseHeaders }: { requestHeaders: Array<{ name: string; value: string }>; responseHeaders: Array<{ name: string; value: string }> }) {
   const cookies = parseCookies([...requestHeaders, ...responseHeaders]);
-  if (!cookies.length) return <div className="detail-empty"><ListFilter size={20} /><span>没有 Cookie 或 Set-Cookie</span></div>;
-  return <div className="cookie-table"><div className="cookie-table__head"><span>名称 / 值</span><span>方向</span><span>安全属性</span></div>{cookies.map((cookie, index) => <div key={`${cookie.source}-${cookie.name}-${index}`}><span><strong>{cookie.name}</strong><code>{cookie.value || "空值"}</code></span><small>{cookie.source === "request" ? "请求 Cookie" : "响应 Set-Cookie"}</small><span className="cookie-attributes">{Object.entries(cookie.attributes).length ? Object.entries(cookie.attributes).map(([name, value]) => <em key={name}>{name}{value === true ? "" : `=${value}`}</em>) : <em>会话 Cookie</em>}</span></div>)}</div>;
+  if (!cookies.length) return <div className="detail-empty"><ListFilter size={20} /><span>{t("traffic.noCookies")}</span></div>;
+  return <div className="cookie-table"><div className="cookie-table__head"><span>{t("traffic.cookieNameValue")}</span><span>{t("traffic.cookieDir")}</span><span>{t("traffic.cookieAttrs")}</span></div>{cookies.map((cookie, index) => <div key={`${cookie.source}-${cookie.name}-${index}`}><span><strong>{cookie.name}</strong><code>{cookie.value || t("traffic.emptyValue")}</code></span><small>{cookie.source === "request" ? t("traffic.cookieReq") : t("traffic.cookieRes")}</small><span className="cookie-attributes">{Object.entries(cookie.attributes).length ? Object.entries(cookie.attributes).map(([name, value]) => <em key={name}>{name}{value === true ? "" : `=${value}`}</em>) : <em>{t("traffic.sessionCookie")}</em>}</span></div>)}</div>;
 }
 
 function RuleTraceViewer({ traces, loading }: { traces: CaptureRuleRun[]; loading: boolean }) {
-  if (loading) return <div className="detail-empty"><Clock3 size={20} /><span>正在读取规则轨迹</span></div>;
-  if (!traces.length) return <div className="detail-empty"><SlidersHorizontal size={20} /><span>该请求没有规则命中轨迹</span></div>;
-  return <div className="rule-trace-list">{traces.map((trace, index) => <article key={trace.id} className={`rule-trace-item is-${trace.result}`}><header><span>{index + 1}</span><div><strong>{trace.ruleName}</strong><small>{trace.stage} · v{trace.revision}</small></div><em>{ruleTraceResultLabel(trace.result)}</em></header><div>{Array.isArray(trace.diffSummary.changes) && trace.diffSummary.changes.map((change) => <p key={String(change)}><Check size={11} />{String(change)}</p>)}{trace.error && <p className="is-error"><CircleAlert size={11} />{trace.error}</p>}</div><footer><span>{trace.durationMs} ms</span><time>{new Date(trace.createdAt).toLocaleTimeString("zh-CN", { hour12: false })}</time></footer></article>)}</div>;
+  if (loading) return <div className="detail-empty"><Clock3 size={20} /><span>{t("traffic.readingRules")}</span></div>;
+  if (!traces.length) return <div className="detail-empty"><SlidersHorizontal size={20} /><span>{t("traffic.noRules")}</span></div>;
+  return <div className="rule-trace-list">{traces.map((trace, index) => <article key={trace.id} className={`rule-trace-item is-${trace.result}`}><header><span>{index + 1}</span><div><strong>{trace.ruleName}</strong><small>{trace.stage} · v{trace.revision}</small></div><em>{ruleTraceResultLabel(trace.result)}</em></header><div>{Array.isArray(trace.diffSummary.changes) && trace.diffSummary.changes.map((change) => <p key={String(change)}><Check size={11} />{String(change)}</p>)}{trace.error && <p className="is-error"><CircleAlert size={11} />{trace.error}</p>}</div><footer><span>{trace.durationMs} ms</span><time>{new Date(trace.createdAt).toLocaleTimeString(getClockLocale(), { hour12: false })}</time></footer></article>)}</div>;
 }
 
 
@@ -1403,7 +1440,7 @@ function AnnotationEditor({ requestId, summary, onSaved }: { requestId: string; 
       setAnnotation(saved);
       setTagText(saved.tags.join(", "));
       onSaved(saved);
-      setMessage("标注已保存");
+      setMessage(t("traffic.annotationSaved"));
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -1411,16 +1448,16 @@ function AnnotationEditor({ requestId, summary, onSaved }: { requestId: string; 
     }
   };
 
-  if (loading) return <div className="detail-empty"><Clock3 size={20} /><span>正在读取请求标注</span></div>;
+  if (loading) return <div className="detail-empty"><Clock3 size={20} /><span>{t("traffic.readingAnnotation")}</span></div>;
   return <div className="annotation-editor">
     <div className="annotation-toggles">
-      <button className={annotation.bookmarked ? "is-active" : ""} onClick={() => setAnnotation((current) => ({ ...current, bookmarked: !current.bookmarked }))}><Bookmark size={14} fill={annotation.bookmarked ? "currentColor" : "none"} />书签</button>
-      <button className={annotation.struckThrough ? "is-active" : ""} onClick={() => setAnnotation((current) => ({ ...current, struckThrough: !current.struckThrough }))}><Strikethrough size={14} />删除线</button>
+      <button className={annotation.bookmarked ? "is-active" : ""} onClick={() => setAnnotation((current) => ({ ...current, bookmarked: !current.bookmarked }))}><Bookmark size={14} fill={annotation.bookmarked ? "currentColor" : "none"} />{t("traffic.noteToggle")}</button>
+      <button className={annotation.struckThrough ? "is-active" : ""} onClick={() => setAnnotation((current) => ({ ...current, struckThrough: !current.struckThrough }))}><Strikethrough size={14} />{t("traffic.strikethrough")}</button>
     </div>
-    <label className="annotation-field"><span><StickyNote size={13} />备注</span><textarea value={annotation.note} maxLength={20_000} onChange={(event) => setAnnotation((current) => ({ ...current, note: event.target.value }))} placeholder="记录判断、待办或证据说明" /></label>
-    <label className="annotation-field"><span><Tag size={13} />标签</span><input value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder="用逗号分隔，最多 20 个" /></label>
-    <div className="annotation-colors"><span>高亮</span>{([undefined, "red", "yellow", "green", "blue", "gray"] as const).map((color) => <button key={color ?? "none"} className={`${color ? `color-${color}` : "color-none"} ${annotation.color === color ? "is-active" : ""}`} onClick={() => setAnnotation((current) => ({ ...current, color }))} title={color ? `${color} 高亮` : "取消高亮"}>{annotation.color === color && <Check size={12} />}</button>)}</div>
-    <div className="annotation-footer"><span>{message || (annotation.updatedAt > annotation.createdAt ? `更新于 ${new Date(annotation.updatedAt).toLocaleString("zh-CN")}` : "备注默认不会发送给 AI")}</span><button className="primary-button" onClick={() => void saveAnnotation()} disabled={saving}>{saving ? "保存中" : "保存标注"}</button></div>
+    <label className="annotation-field"><span><StickyNote size={13} />{t("traffic.tab.annotation")}</span><textarea value={annotation.note} maxLength={20_000} onChange={(event) => setAnnotation((current) => ({ ...current, note: event.target.value }))} placeholder={t("traffic.notePlaceholder")} /></label>
+    <label className="annotation-field"><span><Tag size={13} />{t("traffic.tags")}</span><input value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder={t("traffic.tagsPlaceholder")} /></label>
+    <div className="annotation-colors"><span>{t("traffic.highlight")}</span>{([undefined, "red", "yellow", "green", "blue", "gray"] as const).map((color) => <button key={color ?? "none"} className={`${color ? `color-${color}` : "color-none"} ${annotation.color === color ? "is-active" : ""}`} onClick={() => setAnnotation((current) => ({ ...current, color }))} title={color ? t("traffic.highlightColor", { color }) : t("traffic.clearHighlight")}>{annotation.color === color && <Check size={12} />}</button>)}</div>
+    <div className="annotation-footer"><span>{message || (annotation.updatedAt > annotation.createdAt ? t("traffic.updatedAt", { time: new Date(annotation.updatedAt).toLocaleString(getClockLocale()) }) : t("traffic.noteNotToAi"))}</span><button className="primary-button" onClick={() => void saveAnnotation()} disabled={saving}>{saving ? t("common.saving") : t("traffic.saveAnnotation")}</button></div>
   </div>;
 }
 
@@ -1434,9 +1471,9 @@ function annotationSummary(annotation: RequestAnnotation): RequestAnnotationSumm
 }
 
 function WebSocketMessages({ frames, loading, error }: { frames: WebSocketFrameEvent[]; loading: boolean; error: string }) {
-  if (loading) return <div className="detail-empty"><MessagesSquare size={20} /><span>正在读取消息</span></div>;
+  if (loading) return <div className="detail-empty"><MessagesSquare size={20} /><span>{t("traffic.readingMessages")}</span></div>;
   if (error) return <div className="detail-empty"><CircleAlert size={20} /><span>{error}</span></div>;
-  if (!frames.length) return <div className="detail-empty"><MessagesSquare size={20} /><span>尚未捕获 WebSocket 消息</span></div>;
+  if (!frames.length) return <div className="detail-empty"><MessagesSquare size={20} /><span>{t("traffic.noWsMessages")}</span></div>;
   return (
     <div className="websocket-message-list">
       {frames.map((frame) => {
@@ -1445,16 +1482,16 @@ function WebSocketMessages({ frames, loading, error }: { frames: WebSocketFrameE
         return (
           <article key={`${frame.sequence}-${frame.payload.index}`} className={`websocket-message ${outbound ? "is-outbound" : "is-inbound"} ${limited ? "is-limit" : ""}`}>
             <header>
-              <span className="websocket-message__direction">{outbound ? <ArrowUpRight size={13} /> : <ArrowDownLeft size={13} />}{outbound ? "发往服务端" : "来自服务端"}</span>
+              <span className="websocket-message__direction">{outbound ? <ArrowUpRight size={13} /> : <ArrowDownLeft size={13} />}{outbound ? t("traffic.wsOut") : t("traffic.wsIn")}</span>
               <span className={`websocket-opcode opcode-${frame.payload.opcode}`}>{frame.payload.opcode}</span>
               <time>{formatClock(frame.timestamp, true)}</time>
               <small>{formatBytes(frame.payload.sizeBytes)}</small>
             </header>
-            <pre>{frame.payload.data || (frame.payload.opcode === "close" ? "连接已关闭" : "空消息")}</pre>
+            <pre>{frame.payload.data || (frame.payload.opcode === "close" ? t("traffic.wsClosed") : t("traffic.emptyMessage"))}</pre>
             <footer>
               {frame.payload.encoding === "base64" && <span>BASE64</span>}
               {frame.payload.closeCode !== undefined && <span>CODE {frame.payload.closeCode}</span>}
-              {frame.payload.truncated && <span>已截断</span>}
+              {frame.payload.truncated && <span>{t("traffic.truncated")}</span>}
             </footer>
           </article>
         );
@@ -1480,10 +1517,10 @@ function SseInspector({ events, loading, error }: { events: SseEvent[]; loading:
   const pendingCount = pausedAt === undefined ? 0 : events.filter((event) => event.sequence > pausedAt).length;
   const terminal = [...events].reverse().find(isSseTerminal);
   const streamState = terminal?.payload.kind === "capture_limit"
-    ? "已达上限"
+    ? t("traffic.sseLimit")
     : terminal?.payload.kind === "stream_end"
-      ? terminal.payload.complete ? "已结束" : "已中断"
-      : "实时";
+      ? terminal.payload.complete ? t("traffic.sseEnded") : t("traffic.sseInterrupted")
+      : t("traffic.sseLive");
 
   useEffect(() => {
     if (!filteredEvents.length) {
@@ -1495,35 +1532,35 @@ function SseInspector({ events, loading, error }: { events: SseEvent[]; loading:
     }
   }, [filteredEvents, selectedSequence]);
 
-  if (loading) return <div className="detail-empty"><Radio size={20} /><span>正在读取 SSE 事件</span></div>;
+  if (loading) return <div className="detail-empty"><Radio size={20} /><span>{t("traffic.readingSse")}</span></div>;
   if (error) return <div className="detail-empty"><CircleAlert size={20} /><span>{error}</span></div>;
-  if (!events.length) return <div className="detail-empty"><Radio size={20} /><span>正在等待首个 SSE 事件</span></div>;
+  if (!events.length) return <div className="detail-empty"><Radio size={20} /><span>{t("traffic.waitSse")}</span></div>;
 
   return <div className="sse-inspector">
     <header className="sse-toolbar">
       <div className={`sse-stream-state is-${terminal ? "stopped" : "live"}`}>
         <CircleDot size={12} />
         <strong>{streamState}</strong>
-        <span>{events.length.toLocaleString()} 条</span>
+        <span>{t("traffic.sseCount", { count: events.length.toLocaleString() })}</span>
       </div>
-      <label className="sse-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索事件、ID 或数据" /><span>{filteredEvents.length}</span></label>
-      <div className="sse-order" aria-label="事件排序">
-        <button className={order === "ascending" ? "is-active" : ""} onClick={() => setOrder("ascending")} title="按捕获顺序"><ArrowDown size={13} /><span>正序</span></button>
-        <button className={order === "descending" ? "is-active" : ""} onClick={() => setOrder("descending")} title="最新事件优先"><ArrowUp size={13} /><span>倒序</span></button>
+      <label className="sse-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("traffic.sseSearch")} /><span>{filteredEvents.length}</span></label>
+      <div className="sse-order" aria-label={t("traffic.sseOrder")}>
+        <button className={order === "ascending" ? "is-active" : ""} onClick={() => setOrder("ascending")} title={t("traffic.sseAscTitle")}><ArrowDown size={13} /><span>{t("traffic.sseAsc")}</span></button>
+        <button className={order === "descending" ? "is-active" : ""} onClick={() => setOrder("descending")} title={t("traffic.sseDescTitle")}><ArrowUp size={13} /><span>{t("traffic.sseDesc")}</span></button>
       </div>
-      <button className={`sse-pause ${pausedAt !== undefined ? "is-active" : ""}`} onClick={() => setPausedAt((current) => current === undefined ? events.at(-1)?.sequence ?? 0 : undefined)} title={pausedAt === undefined ? "暂停界面刷新，后台继续捕获" : "恢复界面刷新"}>
+      <button className={`sse-pause ${pausedAt !== undefined ? "is-active" : ""}`} onClick={() => setPausedAt((current) => current === undefined ? events.at(-1)?.sequence ?? 0 : undefined)} title={pausedAt === undefined ? t("traffic.ssePauseTitle") : t("traffic.sseResumeTitle")}>
         {pausedAt === undefined ? <Pause size={13} /> : <Play size={13} />}
-        <span>{pausedAt === undefined ? "暂停" : pendingCount ? `继续 +${pendingCount}` : "继续"}</span>
+        <span>{pausedAt === undefined ? t("traffic.ssePause") : pendingCount ? t("traffic.sseResumeN", { count: pendingCount }) : t("traffic.sseResume")}</span>
       </button>
     </header>
     <div className="sse-workspace">
-      <div className="sse-event-list" role="listbox" aria-label="SSE 事件列表">
+      <div className="sse-event-list" role="listbox" aria-label={t("traffic.sseList")}>
         {filteredEvents.map((event) => <button key={event.sequence} className={`${selected?.sequence === event.sequence ? "is-selected" : ""} is-${event.payload.kind}`} onClick={() => setSelectedSequence(event.sequence)} role="option" aria-selected={selected?.sequence === event.sequence}>
           <span className="sse-event-index">#{event.payload.index}</span>
-          <span className="sse-event-summary"><strong>{sseEventLabel(event)}</strong><small>{event.payload.data || event.payload.comments.join(" ") || event.payload.id || "无数据"}</small></span>
+          <span className="sse-event-summary"><strong>{sseEventLabel(event)}</strong><small>{event.payload.data || event.payload.comments.join(" ") || event.payload.id || t("traffic.sseNoData")}</small></span>
           <span className="sse-event-meta"><time>{formatClock(event.timestamp)}</time><small>{formatBytes(event.payload.sizeBytes)}</small></span>
         </button>)}
-        {!filteredEvents.length && <div className="sse-no-results"><Search size={18} /><span>没有匹配事件</span></div>}
+        {!filteredEvents.length && <div className="sse-no-results"><Search size={18} /><span>{t("traffic.sseNoMatch")}</span></div>}
       </div>
       <div className="sse-event-detail">
         {selected ? <>
@@ -1532,17 +1569,17 @@ function SseInspector({ events, loading, error }: { events: SseEvent[]; loading:
             <time>{formatClock(selected.timestamp)}</time>
           </header>
           <dl>
-            <div><dt>事件</dt><dd>{selected.payload.event}</dd></div>
+            <div><dt>{t("traffic.dt.event")}</dt><dd>{selected.payload.event}</dd></div>
             <div><dt>ID</dt><dd>{selected.payload.id || "-"}</dd></div>
-            <div><dt>大小</dt><dd>{formatBytes(selected.payload.sizeBytes)}</dd></div>
-            <div><dt>重试</dt><dd>{selected.payload.retry === undefined ? "-" : `${selected.payload.retry} ms`}</dd></div>
+            <div><dt>{t("traffic.dt.size")}</dt><dd>{formatBytes(selected.payload.sizeBytes)}</dd></div>
+            <div><dt>{t("traffic.dt.retry")}</dt><dd>{selected.payload.retry === undefined ? "-" : `${selected.payload.retry} ms`}</dd></div>
           </dl>
-          {(selected.payload.truncated || selected.payload.incomplete) && <div className="sse-evidence-warning"><CircleAlert size={13} /><span>{selected.payload.truncated ? "事件超过保存上限，内容已截断" : "连接结束前事件没有完整分隔符"}</span></div>}
-          <section><label>DATA</label><pre>{prettySseData(selected.payload.data) || "空数据"}</pre></section>
+          {(selected.payload.truncated || selected.payload.incomplete) && <div className="sse-evidence-warning"><CircleAlert size={13} /><span>{selected.payload.truncated ? t("traffic.sseTruncated") : t("traffic.sseIncomplete")}</span></div>}
+          <section><label>DATA</label><pre>{prettySseData(selected.payload.data) || t("traffic.emptyData")}</pre></section>
           {selected.payload.comments.length > 0 && <section><label>COMMENT</label><pre>{selected.payload.comments.join("\n")}</pre></section>}
-          {selected.payload.fields.length > 0 && <section><label>FIELDS</label><div className="sse-field-list">{selected.payload.fields.map((field, index) => <div key={`${field.name}-${index}`}><span>{field.name || "(空字段)"}</span><code>{field.value || "-"}</code></div>)}</div></section>}
-          <section><label>RAW</label><pre>{selected.payload.raw || "无原始字段"}</pre></section>
-        </> : <div className="sse-no-results"><Radio size={18} /><span>选择事件查看详情</span></div>}
+          {selected.payload.fields.length > 0 && <section><label>FIELDS</label><div className="sse-field-list">{selected.payload.fields.map((field, index) => <div key={`${field.name}-${index}`}><span>{field.name || t("traffic.emptyField")}</span><code>{field.value || "-"}</code></div>)}</div></section>}
+          <section><label>RAW</label><pre>{selected.payload.raw || t("traffic.noRaw")}</pre></section>
+        </> : <div className="sse-no-results"><Radio size={18} /><span>{t("traffic.pickSse")}</span></div>}
       </div>
     </div>
   </div>;
@@ -1639,12 +1676,12 @@ function CodeTemplateDialog({ request, onClose }: { request: RequestRecord; onCl
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section className="code-template-dialog" role="dialog" aria-modal="true" aria-labelledby="request-code-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
-          <div><span className="section-kicker">REQUEST CODE</span><h2 id="request-code-dialog-title">生成请求代码</h2><p>{request.method} · {request.host}{request.path}</p></div>
-          <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <div><span className="section-kicker">REQUEST CODE</span><h2 id="request-code-dialog-title">{t("traffic.genCode")}</h2><p>{request.method} · {request.host}{request.path}</p></div>
+          <button className="icon-button" onClick={onClose} title={t("common.close")}><X size={18} /></button>
         </header>
-        <div className="code-template-toolbar"><label><span>代码语言</span><select aria-label="代码语言" value={template} onChange={(event) => setTemplate(event.target.value as RequestCodeTemplate)}>{requestCodeTemplates.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></div>
+        <div className="code-template-toolbar"><label><span>{t("traffic.codeLanguage")}</span><select aria-label={t("traffic.codeLanguage")} value={template} onChange={(event) => setTemplate(event.target.value as RequestCodeTemplate)}>{requestCodeTemplates.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></div>
         <pre className="generated-code">{code}</pre>
-        <footer className="dialog-footer"><span /><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>关闭</button><button className="primary-button" onClick={copyCode}><Copy size={14} />{copied ? "已复制" : "复制代码"}</button></span></footer>
+        <footer className="dialog-footer"><span /><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>{t("common.close")}</button><button className="primary-button" onClick={copyCode}><Copy size={14} />{copied ? t("common.copied") : t("traffic.copyCode")}</button></span></footer>
       </section>
     </div>
   );
@@ -1657,37 +1694,37 @@ function TlsFingerprintDetail({ fingerprint }: { fingerprint: NonNullable<Reques
   return (
     <div className="fingerprint-detail">
       <div className="fingerprint-mode">
-        <span>入站观测</span>
-        <strong>{fingerprint.captureMode === "tunnel" ? "ClientHello 原样转发" : "MITM 客户端握手"}</strong>
+        <span>{t("traffic.fpInbound")}</span>
+        <strong>{fingerprint.captureMode === "tunnel" ? t("traffic.fpTunnel") : t("traffic.fpMitm")}</strong>
         <small>{outbound.note}</small>
       </div>
       <dl className="fingerprint-values">
         <div><dt>JA3</dt><dd>{inbound.ja3}</dd></div>
         <div><dt>JA4</dt><dd>{inbound.ja4}</dd></div>
-        <div><dt>SNI</dt><dd>{inbound.sni || "未提供"}</dd></div>
-        <div><dt>ALPN</dt><dd>{inbound.alpn.join(", ") || "未提供"}</dd></div>
-        <div><dt>TLS 版本</dt><dd>{inbound.offeredVersions.join(", ") || inbound.legacyVersion}</dd></div>
-        <div><dt>GREASE</dt><dd>{inbound.grease ? "已检测并在哈希计算中排除" : "未检测到"}</dd></div>
-        <div><dt>密码套件</dt><dd>{inbound.cipherSuites.join(", ")}</dd></div>
-        <div><dt>扩展</dt><dd>{inbound.extensions.join(", ")}</dd></div>
-        <div><dt>支持组</dt><dd>{inbound.supportedGroups.join(", ") || "未提供"}</dd></div>
-        <div><dt>签名算法</dt><dd>{inbound.signatureAlgorithms.join(", ") || "未提供"}</dd></div>
-        <div><dt>出站配置</dt><dd>{outbound.profile}{outbound.ja3 ? ` · ${outbound.ja3}` : ""}</dd></div>
+        <div><dt>SNI</dt><dd>{inbound.sni || t("traffic.notProvided")}</dd></div>
+        <div><dt>ALPN</dt><dd>{inbound.alpn.join(", ") || t("traffic.notProvided")}</dd></div>
+        <div><dt>{t("traffic.fpTlsVersion")}</dt><dd>{inbound.offeredVersions.join(", ") || inbound.legacyVersion}</dd></div>
+        <div><dt>GREASE</dt><dd>{inbound.grease ? t("traffic.fpGreaseOn") : t("traffic.fpGreaseOff")}</dd></div>
+        <div><dt>{t("traffic.fpCiphers")}</dt><dd>{inbound.cipherSuites.join(", ")}</dd></div>
+        <div><dt>{t("traffic.fpExtensions")}</dt><dd>{inbound.extensions.join(", ")}</dd></div>
+        <div><dt>{t("traffic.fpGroups")}</dt><dd>{inbound.supportedGroups.join(", ") || t("traffic.notProvided")}</dd></div>
+        <div><dt>{t("traffic.fpSigAlgs")}</dt><dd>{inbound.signatureAlgorithms.join(", ") || t("traffic.notProvided")}</dd></div>
+        <div><dt>{t("traffic.fpOutbound")}</dt><dd>{outbound.profile}{outbound.ja3 ? ` · ${outbound.ja3}` : ""}</dd></div>
       </dl>
       {http2 && (
         <section className="http2-fingerprint">
-          <div className={`fingerprint-mode ${http2.complete ? "is-complete" : "is-partial"}`}><span>HTTP/2 入站</span><strong>{http2.complete ? "连接前言已记录" : "部分连接特征"}</strong><small>{http2.note}</small></div>
+          <div className={`fingerprint-mode ${http2.complete ? "is-complete" : "is-partial"}`}><span>{t("traffic.fpH2Inbound")}</span><strong>{http2.complete ? t("traffic.fpH2Complete") : t("traffic.fpH2Partial")}</strong><small>{http2.note}</small></div>
           <dl className="fingerprint-values">
-            <div><dt>H2 哈希</dt><dd>{http2.hash}</dd></div>
-            <div><dt>SETTINGS</dt><dd>{http2.settings.map((setting) => `${setting.id}:${setting.value} (${setting.name})`).join("; ") || "未观察到"}</dd></div>
-            <div><dt>连接窗口更新</dt><dd>{http2.connectionWindowUpdates.join(", ") || "未观察到"}</dd></div>
-            <div><dt>PRIORITY</dt><dd>{http2.priorityFrames.map((priority) => `stream=${priority.streamId}, dependency=${priority.dependency}, weight=${priority.weight}${priority.exclusive ? ", exclusive" : ""}`).join("; ") || "未观察到"}</dd></div>
-            <div><dt>PRIORITY_UPDATE</dt><dd>{http2.priorityUpdates.map((priority) => `stream=${priority.prioritizedStreamId}, ${priority.fieldValue}`).join("; ") || "未观察到"}</dd></div>
-            <div><dt>伪首部顺序</dt><dd>{http2.pseudoHeaderOrder?.join(", ") || "底层未暴露，不参与哈希"}</dd></div>
+            <div><dt>{t("traffic.fpH2Hash")}</dt><dd>{http2.hash}</dd></div>
+            <div><dt>SETTINGS</dt><dd>{http2.settings.map((setting) => `${setting.id}:${setting.value} (${setting.name})`).join("; ") || t("traffic.fpNotObserved")}</dd></div>
+            <div><dt>{t("traffic.fpWindowUpdate")}</dt><dd>{http2.connectionWindowUpdates.join(", ") || t("traffic.fpNotObserved")}</dd></div>
+            <div><dt>PRIORITY</dt><dd>{http2.priorityFrames.map((priority) => `stream=${priority.streamId}, dependency=${priority.dependency}, weight=${priority.weight}${priority.exclusive ? ", exclusive" : ""}`).join("; ") || t("traffic.fpNotObserved")}</dd></div>
+            <div><dt>PRIORITY_UPDATE</dt><dd>{http2.priorityUpdates.map((priority) => `stream=${priority.prioritizedStreamId}, ${priority.fieldValue}`).join("; ") || t("traffic.fpNotObserved")}</dd></div>
+            <div><dt>{t("traffic.fpPseudoOrder")}</dt><dd>{http2.pseudoHeaderOrder?.join(", ") || t("traffic.fpPseudoHidden")}</dd></div>
           </dl>
         </section>
       )}
-      <details className="fingerprint-raw"><summary>查看原始指纹串</summary><code>{inbound.ja3Raw}</code><code>{inbound.ja4Raw}</code>{http2 && <code>{http2.canonical}</code>}</details>
+      <details className="fingerprint-raw"><summary>{t("traffic.fpRaw")}</summary><code>{inbound.ja3Raw}</code><code>{inbound.ja4Raw}</code>{http2 && <code>{http2.canonical}</code>}</details>
     </div>
   );
 }
@@ -1706,16 +1743,16 @@ function downloadBody(content: string, filename: string, contentType: string) {
 }
 
 function CryptoCodeDetail({ snippets }: { snippets: CryptoCodeSnippet[] }) {
-  if (snippets.length === 0) return <div className="detail-empty"><Code2 size={20} /><span>未提取到加密代码</span></div>;
+  if (snippets.length === 0) return <div className="detail-empty"><Code2 size={20} /><span>{t("traffic.noCrypto")}</span></div>;
   return (
     <div className="crypto-code-list">
       {snippets.map((snippet) => (
         <section className="crypto-code-snippet" key={`${snippet.ordinal}-${snippet.startLine}`}>
           <header>
-            <div><strong>{snippet.name || snippet.kind}</strong><span>行 {snippet.startLine}{snippet.endLine !== snippet.startLine ? `-${snippet.endLine}` : ""}</span></div>
+            <div><strong>{snippet.name || snippet.kind}</strong><span>{t("traffic.line", { line: snippet.endLine !== snippet.startLine ? `${snippet.startLine}-${snippet.endLine}` : snippet.startLine })}</span></div>
             <span>{snippet.algorithms.map((algorithm) => <em key={algorithm}>{algorithm}</em>)}</span>
           </header>
-          {(snippet.truncated || snippet.sourceTruncated) && <small>{snippet.truncated ? "片段已裁剪" : "源脚本未完整捕获"}</small>}
+          {(snippet.truncated || snippet.sourceTruncated) && <small>{snippet.truncated ? t("traffic.snippetTrimmed") : t("traffic.sourceIncomplete")}</small>}
           <CodeBlock content={snippet.code} />
         </section>
       ))}
@@ -1743,7 +1780,7 @@ function TimingBreakdown({ duration }: { duration: number }) {
   const evidence = timingEvidence(duration);
   return (
     <div className="timing-breakdown">
-      <div className="timing-total"><Clock3 size={16} /><strong>{evidence.totalMs} ms</strong><span>端到端总耗时</span></div>
+      <div className="timing-total"><Clock3 size={16} /><strong>{evidence.totalMs} ms</strong><span>{t("traffic.e2eDuration")}</span></div>
       <div className="detail-empty detail-empty--compact"><CircleAlert size={16} /><span>{evidence.note}</span></div>
     </div>
   );

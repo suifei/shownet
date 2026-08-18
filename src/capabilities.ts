@@ -1,4 +1,90 @@
+import { t, type MessageKey } from "./i18n.ts";
 import { isSlowRequest } from "./format.ts";
+
+const SKILL_FIELD_KEYS: Record<string, { name: MessageKey; category: MessageKey; summary: MessageKey; trigger: MessageKey }> = {
+  "noise-filter": {
+    name: "skill.noise-filter.name",
+    category: "skill.noise-filter.category",
+    summary: "skill.noise-filter.summary",
+    trigger: "skill.noise-filter.trigger",
+  },
+  "api-reverse": {
+    name: "skill.api-reverse.name",
+    category: "skill.api-reverse.category",
+    summary: "skill.api-reverse.summary",
+    trigger: "skill.api-reverse.trigger",
+  },
+  "security-audit": {
+    name: "skill.security-audit.name",
+    category: "skill.security-audit.category",
+    summary: "skill.security-audit.summary",
+    trigger: "skill.security-audit.trigger",
+  },
+  "realtime-protocol": {
+    name: "skill.realtime-protocol.name",
+    category: "skill.realtime-protocol.category",
+    summary: "skill.realtime-protocol.summary",
+    trigger: "skill.realtime-protocol.trigger",
+  },
+  "performance-analysis": {
+    name: "skill.performance-analysis.name",
+    category: "skill.performance-analysis.category",
+    summary: "skill.performance-analysis.summary",
+    trigger: "skill.performance-analysis.trigger",
+  },
+  "crypto-reverse": {
+    name: "skill.crypto-reverse.name",
+    category: "skill.crypto-reverse.category",
+    summary: "skill.crypto-reverse.summary",
+    trigger: "skill.crypto-reverse.trigger",
+  },
+  "dynamic-signature": {
+    name: "skill.dynamic-signature.name",
+    category: "skill.dynamic-signature.category",
+    summary: "skill.dynamic-signature.summary",
+    trigger: "skill.dynamic-signature.trigger",
+  },
+  "algorithm-replay": {
+    name: "skill.algorithm-replay.name",
+    category: "skill.algorithm-replay.category",
+    summary: "skill.algorithm-replay.summary",
+    trigger: "skill.algorithm-replay.trigger",
+  },
+  "auto-crawler": {
+    name: "skill.auto-crawler.name",
+    category: "skill.auto-crawler.category",
+    summary: "skill.auto-crawler.summary",
+    trigger: "skill.auto-crawler.trigger",
+  },
+  "web-risk-lab": {
+    name: "skill.web-risk-lab.name",
+    category: "skill.web-risk-lab.category",
+    summary: "skill.web-risk-lab.summary",
+    trigger: "skill.web-risk-lab.trigger",
+  },
+};
+
+const SKILL_PHRASE_KEYS: Record<string, MessageKey> = {
+  "读取会话": "skill.perm.readSession",
+  "读取完整请求": "skill.perm.readRequest",
+  "读取完整 Hook": "skill.perm.readHook",
+  "读取完整代码": "skill.perm.readCode",
+  "读取 TLS 指纹 / 出站状态 / PX 证据": "skill.perm.readTlsPx",
+  "读取 TLS / 出站状态 / PX 证据": "skill.perm.readTlsPx",
+  "生成完整请求代码": "skill.perm.genCode",
+  "算法证据": "skill.out.algoEvidence",
+  "参数变换链": "skill.out.paramChain",
+  "密钥线索": "skill.out.keyClue",
+  "复现框架": "skill.out.replayFrame",
+  "TLS/PX 证据边界": "skill.out.tlsPxBound",
+};
+
+function localizePhrases(phrases: string[]): string[] {
+  return phrases.map((phrase) => {
+    const key = SKILL_PHRASE_KEYS[phrase];
+    return key ? t(key) : phrase;
+  });
+}
 import type {
   AnalysisMode,
   RequestListItem,
@@ -93,8 +179,7 @@ export const builtInSkillPreview: SkillDefinition[] = [
     ],
     ["算法证据", "参数变换链", "密钥线索", "复现框架", "TLS/PX 证据边界"],
   ),
-  {
-    ...skill(
+  betaSkill(skill(
       "dynamic-signature",
       "动态防护协议分析",
       "0.15.0",
@@ -124,9 +209,7 @@ export const builtInSkillPreview: SkillDefinition[] = [
         "严格区分已确认、合理推断和本次未捕获项",
       ],
       ["防护提供商候选", "有序协议链", "协议字段 schema", "PX 结构证据", "scorecard L0/L1/L2", "fidelity 标签", "未捕获项"],
-    ),
-    status: "beta",
-  },
+    )),
   skill(
     "algorithm-replay",
     "算法还原与重播",
@@ -364,7 +447,7 @@ export function buildPreviewSkillPlan(mode: AnalysisMode, requests: RequestListI
   const toolNames = [...new Set(selectedSkills.flatMap((entry) => entry.id === "noise-filter" ? [] : entry.tools))].sort();
   const stages: SkillPlan["stages"] = selectedSkills.map((entry) => ({
     id: entry.id === "noise-filter" ? "filter" : `skill-${entry.id}`,
-    label: entry.id === "noise-filter" ? "智能过滤" : entry.name,
+    label: entry.id === "noise-filter" ? t("skill.stage.filter") : entry.name,
     detail: entry.id === "noise-filter" ? "Phase 1" : entry.version,
     skillId: entry.id,
     kind: "skill" as const,
@@ -373,8 +456,8 @@ export function buildPreviewSkillPlan(mode: AnalysisMode, requests: RequestListI
     maxRetries: 1,
   }));
   stages.push(
-    { id: "quality-gate", label: "产物校验", detail: "证据与契约", skillId: "quality-gate", kind: "decision", suggestedToolCount: 0, requiredOutputCount: 3, maxRetries: 0 },
-    { id: "report", label: "生成报告", detail: "Markdown + Evidence", skillId: "report", kind: "report", suggestedToolCount: 0, requiredOutputCount: 2, maxRetries: 1 },
+    { id: "quality-gate", label: t("skill.stage.quality"), detail: t("skill.stage.qualityDetail"), skillId: "quality-gate", kind: "decision", suggestedToolCount: 0, requiredOutputCount: 3, maxRetries: 0 },
+    { id: "report", label: t("skill.stage.report"), detail: "Markdown + Evidence", skillId: "report", kind: "report", suggestedToolCount: 0, requiredOutputCount: 2, maxRetries: 1 },
   );
 
   return {
@@ -384,6 +467,11 @@ export function buildPreviewSkillPlan(mode: AnalysisMode, requests: RequestListI
     reasons,
     stages,
   };
+}
+
+function betaSkill(definition: SkillDefinition): SkillDefinition {
+  definition.status = "beta";
+  return definition;
 }
 
 function skill(
@@ -398,7 +486,30 @@ function skill(
   objectives: string[],
   outputs: string[],
 ): SkillDefinition {
-  return { id, name, version, category, summary, status: "ready", trigger, tools, permissions, objectives, outputs };
+  const keys = SKILL_FIELD_KEYS[id];
+  const localized: SkillDefinition = {
+    id,
+    name,
+    version,
+    category,
+    summary,
+    status: "ready",
+    trigger,
+    tools,
+    permissions: localizePhrases(permissions),
+    objectives,
+    outputs: localizePhrases(outputs),
+  };
+  if (!keys) return localized;
+  Object.defineProperties(localized, {
+    name: { get: () => t(keys.name), enumerable: true },
+    category: { get: () => t(keys.category), enumerable: true },
+    summary: { get: () => t(keys.summary), enumerable: true },
+    trigger: { get: () => t(keys.trigger), enumerable: true },
+    permissions: { get: () => localizePhrases(permissions), enumerable: true },
+    outputs: { get: () => localizePhrases(outputs), enumerable: true },
+  });
+  return localized;
 }
 
 function readTool(name: string, description: string): ToolDefinition {

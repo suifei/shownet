@@ -1,5 +1,6 @@
 import { SLOW_REQUEST_MS } from "./format.ts";
 import { OBSERVABLE_METHODS } from "./httpMethods.ts";
+import { t, type MessageKey } from "./i18n.ts";
 import type { FilterExpression, RequestField, RiskLevel, SourceType } from "./types";
 
 export type QuickStatus = "pending" | "streaming" | "2xx" | "3xx" | "4xx" | "5xx" | "failed" | "tunnel";
@@ -66,17 +67,25 @@ export const STATUS_VALUES: QuickStatus[] = ["pending", "streaming", "2xx", "3xx
 export const SHOWNET_VALUES: QuickShownet[] = ["hook", "snippets", "risk", "slow"];
 
 export const PROTOCOL_LABELS: Record<string, string> = { "http/1.1": "HTTP/1.1", h2: "HTTP/2", ws: "WebSocket" };
-export const TYPE_LABELS: Record<string, string> = { api: "Fetch/XHR", document: "文档", script: "脚本", image: "图片", font: "字体", websocket: "WebSocket", sse: "SSE" };
+export const TYPE_LABELS: Record<string, string> = {
+  get api() { return t("traffic.type.api"); },
+  get document() { return t("traffic.type.document"); },
+  get script() { return t("traffic.type.script"); },
+  get image() { return t("traffic.type.image"); },
+  get font() { return t("traffic.type.font"); },
+  get websocket() { return t("traffic.type.websocket"); },
+  get sse() { return t("traffic.type.sse"); },
+};
 /**
  * How a request's lifecycle state is named, wherever it appears. The HTTP class
  * buckets below are filter-only groupings, not states.
  */
 export const REQUEST_STATE_LABELS: Record<string, string> = {
-  pending: "进行中",
-  streaming: "流式",
-  complete: "完成",
-  tunnel: "未解密",
-  failed: "失败",
+  get pending() { return t("traffic.state.pending"); },
+  get streaming() { return t("traffic.state.streaming"); },
+  get complete() { return t("traffic.state.complete"); },
+  get tunnel() { return t("traffic.state.tunnel"); },
+  get failed() { return t("traffic.state.failed"); },
 };
 
 export function requestStateLabel(state: string): string {
@@ -84,17 +93,27 @@ export function requestStateLabel(state: string): string {
 }
 
 export const STATUS_LABELS: Record<QuickStatus, string> = {
-  pending: REQUEST_STATE_LABELS.pending,
-  streaming: REQUEST_STATE_LABELS.streaming,
+  get pending() { return REQUEST_STATE_LABELS.pending; },
+  get streaming() { return REQUEST_STATE_LABELS.streaming; },
   "2xx": "2xx",
   "3xx": "3xx",
   "4xx": "4xx",
   "5xx": "5xx",
-  failed: REQUEST_STATE_LABELS.failed,
-  tunnel: REQUEST_STATE_LABELS.tunnel,
+  get failed() { return REQUEST_STATE_LABELS.failed; },
+  get tunnel() { return REQUEST_STATE_LABELS.tunnel; },
 };
-export const SHOWNET_LABELS: Record<QuickShownet, string> = { hook: "有 Hook", snippets: "有代码片段", risk: "有风险", slow: "慢请求" };
-export const RISK_LABELS: Record<string, string> = { none: "无风险", info: "信息", warning: "注意", critical: "严重" };
+export const SHOWNET_LABELS: Record<QuickShownet, string> = {
+  get hook() { return t("traffic.shownet.hook"); },
+  get snippets() { return t("traffic.shownet.snippets"); },
+  get risk() { return t("traffic.shownet.risk"); },
+  get slow() { return t("traffic.shownet.slow"); },
+};
+export const RISK_LABELS: Record<string, string> = {
+  get none() { return t("traffic.risk.none"); },
+  get info() { return t("traffic.risk.info"); },
+  get warning() { return t("traffic.risk.warning"); },
+  get critical() { return t("traffic.risk.critical"); },
+};
 
 /* ---- Active filter description ---------------------------------------
    Filters can be set from the search box, the method chips, the filter panel
@@ -117,18 +136,32 @@ export interface ActiveFilterChip {
   value?: string;
 }
 
+const GROUP_LABEL_KEYS = {
+  text: "traffic.group.text",
+  hosts: "traffic.group.hosts",
+  methods: "traffic.group.methods",
+  protocols: "traffic.group.protocols",
+  types: "traffic.group.types",
+  statuses: "traffic.group.statuses",
+  exactStatuses: "traffic.group.exactStatuses",
+  sources: "traffic.group.sources",
+  risks: "traffic.group.risks",
+  shownet: "traffic.group.shownet",
+  advanced: "traffic.group.advanced",
+} as const satisfies Record<QuickFilterListKey | "text" | "advanced", MessageKey>;
+
 const GROUP_LABELS: Record<QuickFilterListKey | "text" | "advanced", string> = {
-  text: "搜索",
-  hosts: "域名",
-  methods: "方法",
-  protocols: "协议",
-  types: "类型",
-  statuses: "状态",
-  exactStatuses: "状态码",
-  sources: "来源",
-  risks: "风险",
-  shownet: "标记",
-  advanced: "自定义条件",
+  get text() { return t(GROUP_LABEL_KEYS.text); },
+  get hosts() { return t(GROUP_LABEL_KEYS.hosts); },
+  get methods() { return t(GROUP_LABEL_KEYS.methods); },
+  get protocols() { return t(GROUP_LABEL_KEYS.protocols); },
+  get types() { return t(GROUP_LABEL_KEYS.types); },
+  get statuses() { return t(GROUP_LABEL_KEYS.statuses); },
+  get exactStatuses() { return t(GROUP_LABEL_KEYS.exactStatuses); },
+  get sources() { return t(GROUP_LABEL_KEYS.sources); },
+  get risks() { return t(GROUP_LABEL_KEYS.risks); },
+  get shownet() { return t(GROUP_LABEL_KEYS.shownet); },
+  get advanced() { return t(GROUP_LABEL_KEYS.advanced); },
 };
 
 /** Order matches how the groups read in the panel, so the chip row is stable. */
@@ -174,7 +207,7 @@ export function describeActiveFilters(
       id: "advanced",
       group: "advanced",
       groupLabel: GROUP_LABELS.advanced,
-      label: `${countPredicates(advanced)} 个条件`,
+      label: t("traffic.nPredicates", { count: countPredicates(advanced) }),
     });
   }
   return chips;

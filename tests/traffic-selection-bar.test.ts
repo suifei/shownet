@@ -7,7 +7,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
+import { activateUiLocale } from "../src/i18n.ts";
 import { ANALYSIS_MODES, analysisModeFocus, analysisModeLabel } from "../src/analysisModes.ts";
+
+activateUiLocale("zh-CN");
 
 const traffic = await readFile(new URL("../src/components/TrafficView.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -15,15 +18,15 @@ const styles = await readFile(new URL("../src/styles.css", import.meta.url), "ut
 describe("traffic selection bar", () => {
   it("labels every primary action with text, not just an icon tooltip", () => {
     assert.match(traffic, /className="selection-bar"/);
-    for (const label of ["分析选中", "重放", "改写与生成代码", "对比", "更多"]) {
-      assert.match(traffic, new RegExp(`\\/>${label}\\n`), `selection bar must spell out "${label}"`);
+    for (const key of ["traffic.analyzeSelected", "traffic.replay", "traffic.rewrite", "traffic.diff", "traffic.more"]) {
+      assert.match(traffic, new RegExp(`t\\("${key.replace(".", "\\.")}"\\)`), `selection bar must spell out "${key}"`);
     }
   });
 
   it("moves the low-frequency actions into an overflow menu", () => {
     assert.match(traffic, /className="selection-more-menu" role="menu"/);
-    for (const label of ["复制 URL", "归档到请求集合", "导出证据摘要"]) {
-      assert.match(traffic, new RegExp(`role="menuitem"[^\\n]*${label}`), `${label} belongs in the overflow menu`);
+    for (const key of ["traffic.copyUrl", "traffic.archive", "traffic.exportEvidence"]) {
+      assert.match(traffic, new RegExp(`role="menuitem"[^\\n]*t\\("${key.replace(".", "\\.")}"\\)`), `${key} belongs in the overflow menu`);
     }
   });
 
@@ -35,15 +38,15 @@ describe("traffic selection bar", () => {
 
   it("distinguishes session-wide analysis from selection-scoped analysis", () => {
     // Both entry points used to read "AI 分析" with no hint of their scope.
-    assert.match(traffic, /分析整个会话\n/);
-    assert.match(traffic, /\/>分析选中\n/);
-    assert.match(traffic, /title=\{`只分析选中的 \$\{selection\.selectedIds\.length\} 条请求`\}/);
-    assert.match(traffic, /分析选中的 \{selectedRequests\.length\} 条请求/, "the context menu states the count too");
+    assert.match(traffic, /t\("traffic\.analyzeSession"\)/);
+    assert.match(traffic, /t\("traffic\.analyzeSelected"\)/);
+    assert.match(traffic, /t\("traffic\.analyzeSelectedHint"/);
+    assert.match(traffic, /t\("traffic\.analyzeSelectedN"/);
   });
 
   it("says what a disabled action needs instead of going silent", () => {
-    assert.match(traffic, /title=\{selection\.selectedIds\.length === 1 \? "在请求实验室里改参数、改 Header 并生成代码" : "请只选择一条请求"\}/);
-    assert.match(traffic, /title=\{selection\.selectedIds\.length === 2 \? "逐字段对比两条请求" : "请选择两条请求"\}/);
+    assert.match(traffic, /selection\.selectedIds\.length === 1 \? t\("traffic\.rewriteHint"\) : t\("traffic\.rewriteNeedOne"\)/);
+    assert.match(traffic, /selection\.selectedIds\.length === 2 \? t\("traffic\.diffHint"\) : t\("traffic\.diffNeedTwo"\)/);
   });
 
   it("dismisses the overflow menu the same way every other floating layer does", () => {

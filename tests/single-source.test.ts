@@ -145,13 +145,13 @@ describe("session lifecycle is a closed loop", () => {
   it("refuses to delete the session that is being captured into", async () => {
     const app = await read("App.tsx");
     assert.match(app, /if \(capturing && session\.id === captureSessionId\)/);
-    assert.match(app, /请先停止抓包，再删除当前会话/);
+    assert.match(app, /shell\.deleteStopFirst|请先停止抓包，再删除当前会话/);
   });
 
   it("confirms before deleting and says what is lost", async () => {
     const app = await read("App.tsx");
     assert.match(app, /tone: "danger"/);
-    assert.match(app, /条请求、以及这个会话的标注与规则轨迹都会一并删除，无法撤销。/);
+    assert.match(app, /shell\.deleteSessionBody|条请求、以及这个会话的标注与规则轨迹都会一并删除，无法撤销。/);
   });
 });
 
@@ -188,6 +188,8 @@ describe("http methods", () => {
 
 describe("request state naming", () => {
   it("gives each state exactly one name", async () => {
+    const { activateUiLocale } = await import("../src/i18n.ts");
+    activateUiLocale("zh-CN");
     const { REQUEST_STATE_LABELS, STATUS_LABELS, requestStateLabel } = await import("../src/requestFilters.ts");
     // The grid said 流式 and the filter said 流式传输 for the same state.
     assert.equal(STATUS_LABELS.streaming, REQUEST_STATE_LABELS.streaming);

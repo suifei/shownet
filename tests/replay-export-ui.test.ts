@@ -39,7 +39,7 @@ describe("replay export UI path", () => {
       source,
       /export_algorithm_replay_package[\s\S]{0,400}outputDir:\s*null/,
     );
-    assert.match(source, /选择目录并导出|选择目录后导出|先选目录/);
+    assert.match(source, /analysis\.chooseDirExport|analysis\.pickDir|选择目录并导出|先选目录/);
   });
 
   it("BrowserView fixture probe uses a structured side panel with collapsed details", () => {

@@ -75,7 +75,7 @@ describe("report header describes the report, not the picker", () => {
   it("titles the report with the mode that produced it", () => {
     // The title tracked the mode picker. That was invisible while mount forced
     // the two into agreement, and became a lie once it no longer did.
-    assert.match(analysis, /<h2>\{modeLabel\(report\?\.mode \?\? mode\)\}报告<\/h2>/);
+    assert.match(analysis, /t\("analysis\.reportTitle", \{ mode: modeLabel\(report\?\.mode \?\? mode\) \}\)/);
     assert.doesNotMatch(analysis, /<h2>\{selectedMode\.label\}报告<\/h2>/);
   });
 

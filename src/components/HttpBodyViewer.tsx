@@ -1,5 +1,6 @@
 import { CheckCircle2, CircleAlert, Code2, Download, Info, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { t } from "../i18n.ts";
 import { availableBodyModes, bodyHex, bodyPreviewPolicy, detectBodyKind, headerValue, legacyBodyMetadata, parseJsonBody, prettyBody, type BodyViewMode } from "../requestInspector";
 import type { BodyCaptureMetadata, HeaderEntry } from "../types";
 import { formatBytes } from "../format";
@@ -12,13 +13,13 @@ export function HttpBodyViewer({ content, headers, metadata: providedMetadata, f
   useEffect(() => { if (!modes.includes(mode)) setMode(modes[0]); }, [mode, modes]);
   const value = content ?? "";
   const parsed = kind === "json" ? parseJsonBody(value) : undefined;
-  const contentType = headerValue(headers, "content-type") ?? "未知类型";
+  const contentType = headerValue(headers, "content-type") ?? t("traffic.body.unknownType");
   const labels: Record<BodyViewMode, string> = { pretty: "Pretty", tree: "Tree", raw: "Raw", wire: "Wire/Base64", hex: "Hex", preview: "Preview" };
   return <div className="body-viewer">
     <HttpBodyStatus metadata={metadata} />
     <HttpBodyMetadataGrid metadata={metadata} legacy={legacy} />
-    <div className="body-viewer-toolbar"><div className="body-mode-tabs">{modes.map((item) => <button key={item} className={mode === item ? "is-active" : ""} onClick={() => setMode(item)}>{labels[item]}</button>)}</div><span>{kind.toUpperCase()} · {contentType}</span><button className="icon-button" onClick={() => downloadBody(value, filename, contentType)} disabled={!value} title="保存正文"><Download size={14} /></button></div>
-    {!value ? <div className="detail-empty"><Code2 size={20} /><span>{metadata.omittedReason ? "正文按存储策略省略" : "正文为空"}</span></div> : <div className="body-viewer-content">
+    <div className="body-viewer-toolbar"><div className="body-mode-tabs">{modes.map((item) => <button key={item} className={mode === item ? "is-active" : ""} onClick={() => setMode(item)}>{labels[item]}</button>)}</div><span>{kind.toUpperCase()} · {contentType}</span><button className="icon-button" onClick={() => downloadBody(value, filename, contentType)} disabled={!value} title={t("traffic.body.save")}><Download size={14} /></button></div>
+    {!value ? <div className="detail-empty"><Code2 size={20} /><span>{metadata.omittedReason ? t("traffic.body.omitted") : t("traffic.body.empty")}</span></div> : <div className="body-viewer-content">
       {mode === "pretty" && <CodeBlock content={prettyBody(value, kind)} />}
       {mode === "tree" && parsed !== undefined && <JsonTree value={parsed} />}
       {mode === "raw" && <CodeBlock content={value} />}
@@ -30,7 +31,7 @@ export function HttpBodyViewer({ content, headers, metadata: providedMetadata, f
 }
 
 export function HttpBodyMetadataGrid({ metadata, legacy = false }: { metadata: BodyCaptureMetadata; legacy?: boolean }) {
-  return <div className="body-metadata-grid"><span>captured <strong>{String(metadata.captured)}</strong></span><span>decoded <strong>{String(metadata.decoded)}</strong></span><span>truncated <strong>{String(metadata.truncated)}</strong></span><span>complete <strong>{String(metadata.complete)}</strong></span><span>wireBytes <strong>{metadata.wireBytes}</strong></span><span>decodedBytes <strong>{metadata.decodedBytes}</strong></span>{metadata.error && <span className="is-error">error <strong>{metadata.error}</strong></span>}{legacy && <small>兼容记录：原始传输线长元数据不可用</small>}</div>;
+  return <div className="body-metadata-grid"><span>captured <strong>{String(metadata.captured)}</strong></span><span>decoded <strong>{String(metadata.decoded)}</strong></span><span>truncated <strong>{String(metadata.truncated)}</strong></span><span>complete <strong>{String(metadata.complete)}</strong></span><span>wireBytes <strong>{metadata.wireBytes}</strong></span><span>decodedBytes <strong>{metadata.decodedBytes}</strong></span>{metadata.error && <span className="is-error">error <strong>{metadata.error}</strong></span>}{legacy && <small>{t("traffic.body.legacyMeta")}</small>}</div>;
 }
 
 function JsonTree({ value, name, depth = 0 }: { value: unknown; name?: string; depth?: number }) {
@@ -41,8 +42,8 @@ function JsonTree({ value, name, depth = 0 }: { value: unknown; name?: string; d
 
 function SafeBodyPreview({ content, contentType, kind, metadata }: { content: string; contentType: string; kind: ReturnType<typeof detectBodyKind>; metadata: BodyCaptureMetadata }) {
   const policy = bodyPreviewPolicy(kind);
-  if (policy === "image" && metadata.format === "base64") return <div className="safe-image-preview"><img src={`data:${contentType};base64,${content}`} alt="捕获的响应图片" /></div>;
-  if (policy === "text-only") return <div className="unsafe-preview-note"><ShieldAlert size={15} /><span>为避免执行捕获的 HTML、CSS 或 JavaScript，预览保持为纯文本。</span><CodeBlock content={content} /></div>;
+  if (policy === "image" && metadata.format === "base64") return <div className="safe-image-preview"><img src={`data:${contentType};base64,${content}`} alt={t("traffic.body.imageAlt")} /></div>;
+  if (policy === "text-only") return <div className="unsafe-preview-note"><ShieldAlert size={15} /><span>{t("traffic.body.unsafePreview")}</span><CodeBlock content={content} /></div>;
   if (kind === "json") return <JsonTree value={parseJsonBody(content)} />;
   return <CodeBlock content={content} />;
 }
@@ -54,8 +55,8 @@ export function HttpBodyStatus({ metadata }: { metadata: BodyCaptureMetadata }) 
   // and video in a fresh install — next to text saying nothing was affected.
   const warning = Boolean(metadata.error || metadata.truncated || !metadata.complete);
   const encoding = metadata.contentEncoding?.toUpperCase();
-  const headline = omitted ? "二进制正文未保存" : encoding ? `${encoding} ${metadata.decoded ? "已解压" : "未解压"}` : metadata.format === "base64" ? "二进制正文" : "正文已捕获";
-  return <div className={`response-body-status ${warning ? "has-warning" : omitted ? "is-omitted" : "is-ready"}`}><span className="response-body-status__icon">{warning ? <CircleAlert size={14} /> : omitted ? <Info size={14} /> : <CheckCircle2 size={14} />}</span><div><strong>{headline}</strong><span><em>{formatBytes(metadata.wireBytes)} 传输</em>{metadata.decoded && <em>{formatBytes(metadata.decodedBytes)} 解压后</em>}{metadata.format === "base64" && <em>Base64</em>}{metadata.truncated && <em>已截断</em>}{!metadata.complete && <em>流未完整结束</em>}</span>{omitted && <small>已按存储策略省略正文；请求转发与响应大小统计不受影响</small>}{!omitted && metadata.error && <small>{metadata.error}</small>}</div></div>;
+  const headline = omitted ? t("traffic.body.binaryOmitted") : encoding ? `${encoding} ${metadata.decoded ? t("traffic.body.decoded") : t("traffic.body.notDecoded")}` : metadata.format === "base64" ? t("traffic.body.binary") : t("traffic.body.captured");
+  return <div className={`response-body-status ${warning ? "has-warning" : omitted ? "is-omitted" : "is-ready"}`}><span className="response-body-status__icon">{warning ? <CircleAlert size={14} /> : omitted ? <Info size={14} /> : <CheckCircle2 size={14} />}</span><div><strong>{headline}</strong><span><em>{formatBytes(metadata.wireBytes)} {t("traffic.body.wire")}</em>{metadata.decoded && <em>{formatBytes(metadata.decodedBytes)} {t("traffic.body.afterDecode")}</em>}{metadata.format === "base64" && <em>Base64</em>}{metadata.truncated && <em>{t("traffic.truncated")}</em>}{!metadata.complete && <em>{t("traffic.body.streamOpen")}</em>}</span>{omitted && <small>{t("traffic.body.omittedHint")}</small>}{!omitted && metadata.error && <small>{metadata.error}</small>}</div></div>;
 }
 
 function CodeBlock({ content }: { content: string }) { return <pre className="code-block">{content}</pre>; }

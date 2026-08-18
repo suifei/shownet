@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import type { BodyCaptureMetadata, HeaderEntry } from "./types";
 
 export type InspectorLayout = "right" | "bottom" | "maximized";
@@ -163,7 +164,7 @@ export function timingEvidence(totalMs: number): TimingEvidence {
     totalMs: Math.max(0, Math.round(totalMs)),
     phases: [],
     complete: false,
-    note: "当前抓包记录只有端到端总耗时；DNS、TCP、TLS、TTFB 和下载分段尚未采集。",
+    note: t("traffic.timingNote"),
   };
 }
 

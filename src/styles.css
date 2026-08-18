@@ -968,6 +968,64 @@ kbd {
   gap: 9px;
 }
 
+.locale-switcher {
+  position: relative;
+  z-index: 30;
+}
+
+.locale-switcher__button {
+  width: 38px;
+  height: 38px;
+  color: var(--text-muted);
+  border: 1px solid var(--line);
+  background: var(--surface-panel);
+}
+
+.locale-switcher__button:hover,
+.locale-switcher__button.is-open {
+  color: var(--ink);
+  background: var(--surface-sunken);
+}
+
+.locale-switcher__menu {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 168px;
+  padding: 6px;
+  color: var(--text-primary);
+  background: var(--dark-elevated);
+  border: 1px solid var(--dark-border-strong);
+  border-radius: 10px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+  isolation: isolate;
+}
+
+.locale-switcher__menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  color: var(--text-faint);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  background: transparent;
+  border-radius: 8px;
+}
+
+.locale-switcher__menu button:hover {
+  color: var(--text-primary);
+  background: var(--dark-raised);
+}
+
+.locale-switcher__menu button.is-active {
+  color: var(--ink);
+  background: var(--dark-raised);
+}
+
 .ai-service-entry {
   display: inline-flex;
   align-items: center;

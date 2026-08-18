@@ -56,6 +56,21 @@ const SUCCESS = [
   "已加入",
   "已应用",
   "已恢复",
+  "saved",
+  "applied",
+  "complete",
+  "installed",
+  "exported",
+  "copied",
+  "cleared",
+  "enabled",
+  "created",
+  "deleted",
+  "renamed",
+  "started",
+  "stopped",
+  "opened",
+  "restored",
 ];
 
 export function toastTone(message: string): ToastTone {

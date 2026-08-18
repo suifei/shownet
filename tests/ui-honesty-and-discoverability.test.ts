@@ -27,11 +27,11 @@ describe("settings stop offering edits that do not exist", () => {
   });
 
   it("says what to do when the fixed port is taken", () => {
-    assert.match(settings, /端口固定为 \{runtime\.proxyPort\}。若被占用/);
+    assert.match(settings, /settings\.route\.portFixed/);
   });
 
   it("still lets the user copy the endpoint", () => {
-    assert.match(settings, /copyText\(`\$\{runtime\.listenHost\}:\$\{runtime\.proxyPort\}`, "代理地址"\)/);
+    assert.match(settings, /copyText\(`\$\{runtime\.listenHost\}:\$\{runtime\.proxyPort\}`, t\("settings\.route\.proxyAddress"\)\)/);
   });
 });
 
@@ -60,12 +60,12 @@ describe("recorded failures are shown, not just stored", () => {
 describe("analysis entry points state their scope", () => {
   it("names the session-wide and selection-scoped buttons differently", () => {
     // Both used to read "AI 分析" with nothing conveying which was which.
-    assert.match(traffic, /分析整个会话/);
-    assert.match(traffic, /\/>分析选中\n/);
+    assert.match(traffic, /traffic\.analyzeSession/);
+    assert.match(traffic, /traffic\.analyzeSelected/);
   });
 
   it("puts the selection count in the context menu item", () => {
-    assert.match(traffic, /分析选中的 \{selectedRequests\.length\} 条请求/);
+    assert.match(traffic, /traffic\.analyzeSelectedN/);
   });
 });
 
@@ -135,20 +135,20 @@ describe("confirmations live in the app", () => {
 describe("hidden grid interactions are documented", () => {
   it("covers the interactions that had no affordance", () => {
     for (const phrase of [
-      "追加为次级排序条件",
-      "全选当前窗口的请求",
-      "连选一段范围",
-      "按内容自适应列宽",
-      "调整列的先后顺序",
-      "配置显示哪些列",
+      "shortcuts.multiSort",
+      "shortcuts.selectAll",
+      "shortcuts.shiftClick",
+      "shortcuts.autofit",
+      "shortcuts.reorder",
+      "shortcuts.columnsMenu",
     ]) {
-      assert.match(shortcuts, new RegExp(phrase), `${phrase} must be documented`);
+      assert.match(shortcuts, new RegExp(phrase.replace(".", "\\.")), `${phrase} must be documented`);
     }
   });
 
   it("distinguishes alternative keys from combinations", () => {
     // ↑ and ↓ are alternatives; ⌘ and K are pressed together.
-    assert.match(shortcuts, /description: "上下移动当前行", alt: true/);
+    assert.match(shortcuts, /description: t\("shortcuts\.move"\), alt: true/);
     assert.match(shortcuts, /item\.alt \? "\/" : "\+"/);
   });
 

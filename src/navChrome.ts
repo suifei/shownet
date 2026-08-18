@@ -1,4 +1,4 @@
-import type { MessageKey, Translate } from "./i18nTypes.ts";
+import type { MessageKey, Translate } from "./i18n.ts";
 import type { ViewId } from "./types.ts";
 
 export const NAV_VIEWS: ViewId[] = [

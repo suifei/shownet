@@ -27,7 +27,7 @@ describe("system Grok integration boundaries", () => {
     assert.match(settingsView, /\[installAgentWithProxy, setInstallAgentWithProxy\] = useState\(false\)/);
     assert.match(settingsView, /install_official_agent_runtime[\s\S]*useUpstreamProxy: installAgentWithProxy/);
     assert.match(settingsView, /disabled=\{!agentRuntime\.installSupported \|\| installingAgent\}/);
-    assert.match(settingsView, /安装并切换/);
+    assert.match(settingsView, /settings\.grok\.installSwitch/);
     assert.match(settingsView, /window\.confirm/);
     assert.doesNotMatch(workflow, /x\.ai\/cli\/install\.(?:sh|ps1)|grok-build-public-artifacts/);
     assert.doesNotMatch(bundleConfig, /externalBin|grok-build/);

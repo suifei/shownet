@@ -20,12 +20,15 @@ describe("upstream egress probe and env import (P1)", () => {
     assert.match(lib, /async fn probe_upstream_proxy/);
     assert.match(lib, /fn detect_env_upstream_proxy/);
 
-    assert.match(settings, /HTTP_PROXY/);
-    assert.match(settings, /不会.*自动继承|不会<\/strong>自动继承/);
+    assert.match(settings, /settings\.upstream\.help/);
+    assert.match(
+      await readFile(new URL("../src/locales/parts/settings.ts", import.meta.url), "utf8"),
+      /HTTP_PROXY/,
+    );
     assert.match(settings, /detect_env_upstream_proxy/);
     assert.match(settings, /probe_upstream_proxy/);
-    assert.match(settings, /一键导入/);
-    assert.match(settings, /aria-label="探测出口连通性"/);
+    assert.match(settings, /settings\.upstream\.importNow/);
+    assert.match(settings, /aria-label=\{t\("settings\.upstream\.probeAria"\)\}/);
     assert.match(settings, /runUpstreamProbe/);
     assert.match(settings, /importEnvUpstream/);
 
@@ -35,7 +38,7 @@ describe("upstream egress probe and env import (P1)", () => {
     // 502 full error surface
     assert.match(traffic, /proxy-error-banner/);
     // Dynamic status: 502/504 both use the same proxy-error banner wording.
-    assert.match(traffic, /代理错误（\{request\.status\}）|代理错误（502）/);
+    assert.match(traffic, /traffic\.proxyError|代理错误/);
     assert.match(traffic, /overview-proxy-error/);
     assert.match(app, /capture:\/\/proxy-error/);
   });

@@ -109,13 +109,13 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.doesNotMatch(app, /sessions\.find\(\(session\) => session\.active\)\?\.id \?\? activeSession\.id/);
     assert.match(app, /const browserSession = capturing/);
     assert.match(app, /sessionId=\{browserSession\.id\}/);
-    assert.match(app, /正在查看/);
-    assert.match(app, /抓包写入/);
+    assert.match(app, /shell\.viewing/);
+    assert.match(app, /shell\.captureWrite/);
     assert.match(browser, /requireMatchingBrowserOwner/);
     assert.match(browser, /status\.ownerSessionId !== sessionId/);
-    assert.match(app, /临时登录状态、表单内容、页面历史和长连接将被清除/);
+    assert.match(app, /shell\.stopCaptureDetail|临时登录状态、表单内容、页面历史和长连接将被清除/);
     assert.match(app, /captureTransitioningRef\.current = true;[\s\S]*?if \(!next && hasNativeRuntime\)[\s\S]*?confirm\(/);
-    assert.match(app, /confirmLabel: "停止并清除"[\s\S]*?captureTransitioningRef\.current = false;[\s\S]*?setCaptureTransitioning\(false\)/);
+    assert.match(app, /confirmLabel: t\("shell\.stopAndClear"\)[\s\S]*?captureTransitioningRef\.current = false;[\s\S]*?setCaptureTransitioning\(false\)/);
   });
 
   it("ignores stale CDP callbacks from an older socket", async () => {

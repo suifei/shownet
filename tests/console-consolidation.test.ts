@@ -38,7 +38,7 @@ describe("advanced console PX consolidation", () => {
   });
 
   it("turns the three tabs into modes over one evidence list", () => {
-    assert.match(console_, /const PX_MODES = \[/);
+    assert.match(console_, /const PX_MODE_KEYS = \[/);
     assert.match(console_, /className="px-mode-switch" role="tablist"/);
     assert.match(console_, /pxMode === "compare"/);
     assert.match(console_, /pxMode === "tamper"/);
@@ -47,15 +47,15 @@ describe("advanced console PX consolidation", () => {
   });
 
   it("gives every PX mode a hint explaining what it does", () => {
-    const block = console_.slice(console_.indexOf("const PX_MODES"), console_.indexOf("type PxMode"));
-    for (const label of ["解码", "对比", "改写"]) {
+    const block = console_.slice(console_.indexOf("const PX_MODE_KEYS"), console_.indexOf("type PxMode"));
+    for (const label of ["advanced.px.decode", "advanced.px.compare", "advanced.px.tamper"]) {
       assert.ok(block.includes(label), `PX mode ${label} is missing`);
     }
     assert.equal((block.match(/hint:/g) ?? []).length, 3);
   });
 
   it("tells the user when an A/B comparison is still incomplete", () => {
-    assert.match(console_, /标记 A 和 B 两条请求后再做字段 diff/);
+    assert.match(console_, /advanced\.compareNeed/);
   });
 
   it("shows one control for the outbound TLS preset, not two", () => {
@@ -90,7 +90,7 @@ describe("skills view honesty and reachability", () => {
 
   it("stops reporting a resource count the backend never sends", () => {
     assert.doesNotMatch(skills, /<strong>3<\/strong><span>Resources<\/span>/);
-    assert.match(skills, /allowWrites \? "读写" : "只读"\}<\/strong><span>Access<\/span>/);
+    assert.match(skills, /allowWrites \? t\("skills\.readWrite"\) : t\("skills\.readOnly"\)\}<\/strong><span>Access<\/span>/);
   });
 
   it("makes the external MCP row lead somewhere", () => {

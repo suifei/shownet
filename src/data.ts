@@ -1,3 +1,4 @@
+import { t, type MessageKey } from "./i18n.ts";
 import type { CollectionSyncPreview, RequestCollectionWorkspace, RequestDraft, RequestListItem, RequestRecord, Session, SourceType } from "./types";
 
 const commonRequestHeaders = [
@@ -532,12 +533,27 @@ function parseDisplayBytes(value: string) {
   return Math.round(parsed);
 }
 
-export const sourceLabels: Record<SourceType, string> = {
-  browser: "浏览器",
-  desktop: "桌面应用",
-  terminal: "终端",
-  script: "脚本",
-  mobile: "移动设备",
-  iot: "IoT",
-  reverse: "免代理接入",
-};
+const SOURCE_LABEL_KEYS = {
+  browser: "source.browser",
+  desktop: "source.desktop",
+  terminal: "source.terminal",
+  script: "source.script",
+  mobile: "source.mobile",
+  iot: "source.iot",
+  reverse: "source.reverse",
+} as const satisfies Record<SourceType, MessageKey>;
+
+/** Locale-aware source names. Read at render time — do not cache the object. */
+export const sourceLabels: Record<SourceType, string> = new Proxy({} as Record<SourceType, string>, {
+  get(_target, prop: string | symbol) {
+    if (typeof prop !== "string" || !(prop in SOURCE_LABEL_KEYS)) return undefined as unknown as string;
+    return t(SOURCE_LABEL_KEYS[prop as SourceType]);
+  },
+  ownKeys() {
+    return Object.keys(SOURCE_LABEL_KEYS);
+  },
+  getOwnPropertyDescriptor(_target, prop) {
+    if (typeof prop !== "string" || !(prop in SOURCE_LABEL_KEYS)) return undefined;
+    return { configurable: true, enumerable: true, value: t(SOURCE_LABEL_KEYS[prop as SourceType]) };
+  },
+});

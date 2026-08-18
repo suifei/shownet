@@ -32,6 +32,9 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
     assert.match(readme, /## AI 端点与支持/);
     assert.match(readme, /https:\/\/claudegpt\.org\/v1/);
     assert.match(readme, /553354813/);
+    assert.match(readme, /href="\.\/README\.en\.md"/);
+    assert.match(readme, /For international readers/);
+    assert.match(readme, /English README/);
 
     // Product-truth guards (must not overclaim)
     assert.match(readme, /不宣称.*JA3|位级浏览器 JA3/);
@@ -123,5 +126,49 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
       assert.ok(readme.includes(path), `README must link ${path}`);
       await assertNonEmptyFile(path, path.endsWith(".srt") ? 200 : 100_000);
     }
+  });
+
+  it("ships a full English homepage that mirrors the Chinese one", async () => {
+    const zh = await readUtf8("README.md");
+    const en = await readUtf8("README.en.md");
+
+    assert.match(zh, /简体中文/);
+    assert.match(en, /href="\.\/README\.md"/);
+    assert.match(en, /## What it actually fixes/);
+    assert.match(en, /## Real scenarios/);
+    assert.match(en, /## Ten minutes to first traffic/);
+    assert.match(en, /## AI endpoint and support/);
+    assert.match(en, /a certain site|a certain app|a certain API/i);
+    assert.match(en, /https:\/\/claudegpt\.org\/v1/);
+    assert.match(en, /553354813/);
+    assert.match(en, /does not claim.*JA3|not claim.*JA3/i);
+    assert.match(en, /no Root required/);
+    assert.doesNotMatch(en, /12306|春秋航空|kyfw\.|ch\.com/i);
+
+    const start = en.indexOf("## Ten minutes to first traffic");
+    assert.ok(start >= 0, "missing English beginner path");
+    const nextHeading = en.indexOf("\n## ", start + 1);
+    const section = nextHeading >= 0 ? en.slice(start, nextHeading) : en.slice(start);
+    assert.match(section, /### 1\..*Zero config|no CA first/);
+    assert.match(section, /### 2\..*Install the CA/);
+    assert.match(section, /### 3\..*AI/);
+    assert.match(section, /### 4\..*replay|client code/);
+    const browserIdx = section.search(/Zero config|no CA first/);
+    const certIdx = section.search(/### 2\./);
+    const aiIdx = section.search(/### 3\./);
+    const codeIdx = section.search(/### 4\./);
+    assert.ok(browserIdx >= 0 && certIdx > browserIdx && aiIdx > certIdx && codeIdx > aiIdx);
+
+    const sceneArt = [
+      "docs/assets/readme/hero-workspace.jpg",
+      "docs/assets/readme/scenario-login-split.jpg",
+      "docs/assets/readme/scenario-device-ca.jpg",
+      "docs/assets/readme/scenario-signature.jpg",
+      "docs/assets/readme/scenario-to-code.jpg",
+    ];
+    for (const path of sceneArt) {
+      assert.ok(en.includes(path), `English README must use scene illustration ${path}`);
+    }
+    assert.match(en, /scene illustration/);
   });
 });

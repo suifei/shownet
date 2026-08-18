@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import type { CaptureListenerSettings, ClientAccessMode } from "./types";
 
 export const MAX_CLIENT_ACCESS_RULES = 128;
@@ -11,22 +12,22 @@ export function parseClientAccessRules(value: string): string[] {
 
 export function validateClientAccessSettings(settings: CaptureListenerSettings): string | undefined {
   if (settings.accessRules.length > MAX_CLIENT_ACCESS_RULES) {
-    return `设备范围最多支持 ${MAX_CLIENT_ACCESS_RULES} 条 IP 或 CIDR`;
+    return t("settings.device.maxRules", { count: MAX_CLIENT_ACCESS_RULES });
   }
   if (settings.accessMode === "allow" && settings.accessRules.length === 0) {
-    return "仅受信设备模式至少需要一个私网 IP 或 CIDR";
+    return t("settings.device.allowNeedRule");
   }
   return undefined;
 }
 
 export function clientAccessModeLabel(mode: ClientAccessMode): string {
-  if (mode === "allow") return "仅受信设备";
-  if (mode === "deny") return "除已阻止设备外";
-  return "所有私网设备";
+  if (mode === "allow") return t("settings.device.allowOnly");
+  if (mode === "deny") return t("settings.device.denyListed");
+  return t("settings.device.allPrivate");
 }
 
 export function clientAccessModeSummary(mode: ClientAccessMode, ruleCount: number): string {
-  if (mode === "allow") return `仅允许 ${ruleCount} 条受信范围`;
-  if (mode === "deny") return `已阻止 ${ruleCount} 条设备范围`;
-  return "允许当前私网中的设备";
+  if (mode === "allow") return t("settings.device.allowSummary", { count: ruleCount });
+  if (mode === "deny") return t("settings.device.denySummary", { count: ruleCount });
+  return t("settings.device.privateSummary");
 }

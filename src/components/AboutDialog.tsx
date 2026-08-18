@@ -2,6 +2,7 @@ import { Check, Copy, ExternalLink, Github, Scale, X } from "lucide-react";
 import { useState } from "react";
 
 import shownetAppIcon from "../assets/shownet-app-icon.png";
+import { t } from "../i18n.ts";
 import type { RuntimeStatus } from "../types";
 
 interface AboutDialogProps {
@@ -20,7 +21,7 @@ function platformLabel(platform: string) {
   if (platform === "macos") return "macOS";
   if (platform === "windows") return "Windows";
   if (platform === "linux") return "Linux";
-  return platform || "未知平台";
+  return platform || t("common.unknownPlatform");
 }
 
 export function AboutDialog({ runtime, native, onClose, onCopy, onOpenExternal }: AboutDialogProps) {
@@ -30,13 +31,13 @@ export function AboutDialog({ runtime, native, onClose, onCopy, onOpenExternal }
   const diagnostics = [
     `ShowNet ${runtime.appVersion}`,
     platformLabel(runtime.platform),
-    native ? "桌面版" : "浏览器预览",
-    `代理 ${runtime.listenHost}:${runtime.proxyPort}`,
-    `CA ${runtime.caInstalled ? "已信任" : "未安装"}`,
+    native ? t("common.desktopEdition") : t("common.browserPreview"),
+    `${t("about.proxy")} ${runtime.listenHost}:${runtime.proxyPort}`,
+    `CA ${runtime.caInstalled ? t("common.trusted") : t("common.notInstalled")}`,
   ].join(" · ");
 
   const copyDiagnostics = () => {
-    onCopy(diagnostics, "版本信息");
+    onCopy(diagnostics, t("about.diagnosticsLabel"));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   };
@@ -50,46 +51,46 @@ export function AboutDialog({ runtime, native, onClose, onCopy, onOpenExternal }
         aria-labelledby="about-dialog-title"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <button className="icon-button about-dialog__close" onClick={onClose} title="关闭"><X size={18} /></button>
+        <button className="icon-button about-dialog__close" onClick={onClose} title={t("common.close")}><X size={18} /></button>
 
         <header className="about-dialog__identity">
           <img src={shownetAppIcon} alt="" aria-hidden="true" />
           <h2 id="about-dialog-title">ShowNet</h2>
-          <p className="about-dialog__tagline">AI 原生抓包 · 自动部署证书 · 自动协议逆向</p>
+          <p className="about-dialog__tagline">{t("about.tagline")}</p>
           <p className="about-dialog__version">
-            版本 {runtime.appVersion}
+            {t("about.version", { version: runtime.appVersion })}
             <span aria-hidden="true"> · </span>
             {platformLabel(runtime.platform)}
-            {!native && <em className="about-dialog__preview">浏览器预览</em>}
+            {!native && <em className="about-dialog__preview">{t("common.browserPreview")}</em>}
           </p>
         </header>
 
         <dl className="about-dialog__facts">
           <div>
-            <dt>代理地址</dt>
+            <dt>{t("about.proxy")}</dt>
             <dd><code>{runtime.listenHost}:{runtime.proxyPort}</code></dd>
           </div>
           <div>
-            <dt>HTTPS 证书</dt>
+            <dt>{t("about.certificate")}</dt>
             <dd className={runtime.caInstalled ? "is-ok" : "is-pending"}>
-              {runtime.caInstalled ? "已写入系统信任库" : "尚未安装"}
+              {runtime.caInstalled ? t("about.caInStore") : t("about.caMissing")}
             </dd>
           </div>
           <div>
-            <dt>开源许可</dt>
+            <dt>{t("about.license")}</dt>
             <dd><Scale size={13} />{LICENSE}</dd>
           </div>
         </dl>
 
         <footer className="about-dialog__footer">
-          <span>反馈问题时附上这一行，能省去大半来回。</span>
+          <span>{t("about.feedback")}</span>
           <div className="about-dialog__actions">
             <button className="secondary-button" onClick={() => onOpenExternal(PROJECT_URL)}>
-              <Github size={14} />项目主页<ExternalLink size={12} />
+              <Github size={14} />{t("about.homepage")}<ExternalLink size={12} />
             </button>
             <button className="primary-button" onClick={copyDiagnostics}>
               {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "已复制" : "复制版本信息"}
+              {copied ? t("common.copied") : t("about.copyDiagnostics")}
             </button>
           </div>
         </footer>

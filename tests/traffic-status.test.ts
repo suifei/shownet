@@ -40,6 +40,6 @@ describe("traffic status classification (P0-C)", () => {
     assert.match(traffic, /classifyTrafficStatus/);
     assert.match(traffic, /origin-4xx-banner/);
     assert.match(traffic, /proxy-error-banner/);
-    assert.match(traffic, /源站/);
+    assert.match(traffic, /traffic\.originStatus|源站/);
   });
 });

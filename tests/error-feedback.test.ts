@@ -73,9 +73,9 @@ describe("traffic view has a channel for failed actions", () => {
     const source = await read("components/TrafficView.tsx");
     // A bookmark is how a user marks evidence; a silent no-op means they think
     // it is marked when it is not.
-    assert.match(source, /setActionError\(`书签保存失败/);
-    assert.match(source, /setActionError\(`保存视图失败/);
-    assert.match(source, /setActionError\(`删除视图失败/);
+    assert.match(source, /setActionError\(t\("traffic.bookmarkFailed"/);
+    assert.match(source, /setActionError\(t\("traffic.saveViewFailed"/);
+    assert.match(source, /setActionError\(t\("traffic.deleteViewFailed"/);
   });
 
   it("styles the channel so it reads as an error", async () => {

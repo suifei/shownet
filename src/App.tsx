@@ -76,7 +76,8 @@ import {
 } from "./liveCaptureDisplay";
 import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatcher, createRequestQueryId, isRequestQueryCancelled, mergeRequestWindowItems, queryPreviewRequestList, REQUEST_LIST_WINDOW_SIZE, requiresLiveQueryRefresh } from "./requestList";
 import { formatBytes } from "./format";
-import { activateUiLocale, createTranslator, detectHostLocale, type Translate } from "./i18n";
+import { activateUiLocale, createTranslator, resolveUiLocale, t, writeStoredUiLocale, type Translate } from "./i18n.ts";
+import { LocaleSwitcher } from "./components/LocaleSwitcher";
 import { chromeLabel, chromeTitle, NAV_VIEWS } from "./navChrome";
 import { toastTone } from "./toastTone";
 import { createProxyErrorQueue, type ProxyErrorQueue } from "./proxyErrorQueue";
@@ -295,6 +296,10 @@ function sessionInitial(name: string) {
 }
 
 function formatSessionTime(value: string, t: Translate, intlLocale: string) {
+  // Preview fixtures store preformatted Chinese clocks. Re-translate them.
+  if (value === "刚刚" || value === t("clock.justNow")) return t("clock.justNow");
+  if (value.startsWith("今天 ")) return `${t("clock.today")} ${value.slice("今天 ".length)}`;
+  if (value.startsWith("昨天 ")) return `${t("clock.yesterday")} ${value.slice("昨天 ".length)}`;
   if (value === t("clock.justNow") || value.includes(t("clock.today")) || value.includes(t("clock.yesterday"))) {
     return value;
   }
@@ -357,11 +362,16 @@ async function runLocalEditCommand(action: string, active: Element | null = docu
 }
 
 function App() {
+  const [uiLocale, setUiLocale] = useState(() => resolveUiLocale());
   const { t, intlLocale } = useMemo(() => {
-    const locale = detectHostLocale();
-    activateUiLocale(locale);
-    return createTranslator(locale);
-  }, []);
+    const pack = activateUiLocale(uiLocale);
+    return createTranslator(pack.id);
+  }, [uiLocale]);
+  const applyUiLocale = (locale: string) => {
+    const pack = activateUiLocale(locale);
+    writeStoredUiLocale(pack.id);
+    setUiLocale(pack.id);
+  };
   const views = viewMeta(t);
   const navGroups = primaryNavigationGroups(t);
   const [activeView, setActiveView] = useState<ViewId>("traffic");
@@ -445,13 +455,13 @@ function App() {
 
   useDismissibleLayer(sessionToolsOpen, sessionToolsRef, () => setSessionToolsOpen(false));
 
-  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? loadingSession;
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? { ...loadingSession, name: t("shell.loadingSession") };
   const captureSessionId = capturing
     ? (runtime.activeSessionId ?? sessions.find((session) => session.active)?.id ?? "")
     : "";
   const captureSession = sessions.find((session) => session.id === captureSessionId);
   const browserSession = capturing
-    ? (captureSession ?? { ...loadingSession, id: captureSessionId, name: "活动抓包会话" })
+    ? (captureSession ?? { ...loadingSession, id: captureSessionId, name: t("shell.activeCaptureSession") })
     : activeSession;
   const viewingCaptureSession = Boolean(captureSessionId && activeSession.id === captureSessionId);
 
@@ -493,7 +503,7 @@ function App() {
       if (queryId) cancelBackendRequestQuery(queryId);
       setRequestQueryCancelling(false);
       setRequestListLoading(false);
-      if (notify && queryId) setToast("查询已取消，仍显示上一次结果");
+      if (notify && queryId) setToast(t("shell.queryCancelled"));
       return undefined;
     }
     const clickedAt = performance.now();
@@ -508,12 +518,12 @@ function App() {
         settled: false,
         backendWaitMs: performance.now() - clickedAt,
       };
-      if (notify) setToast(`取消查询失败：${String(error)}`);
+      if (notify) setToast(t("shell.queryCancelFailed", { error: String(error) }));
     }
     setRequestListLoading(false);
     setRequestQueryCancelling(false);
-    if (notify && acknowledgement.settled) setToast("查询已取消，仍显示上一次结果");
-    if (notify && !acknowledgement.settled) setToast("查询取消超时，界面已停止等待");
+    if (notify && acknowledgement.settled) setToast(t("shell.queryCancelled"));
+    if (notify && !acknowledgement.settled) setToast(t("shell.queryCancelTimeout"));
     await waitForNextPaint();
     const measurement: RequestQueryIdleMeasurement = {
       ...acknowledgement,
@@ -606,7 +616,7 @@ function App() {
       setRequestListPage((current) => current ? { ...current, items: loaded.items, nextCursor: undefined } : current);
     } catch (error) {
       if (!isRequestQueryCancelled(error) && queryGeneration === requestLoadGenerationRef.current && windowGeneration === requestWindowLoadGenerationRef.current) {
-        setToast(`读取流量窗口失败：${String(error)}`);
+        setToast(t("shell.windowFailed", { error: String(error) }));
       }
     } finally {
       finishRequestQuery(queryId);
@@ -776,7 +786,7 @@ function App() {
       for (const entry of buffered) requestListBatcher.enqueue(entry.item, entry.created);
     } catch (error) {
       publishLiveDisplay(liveDisplayController.failSync(Date.now()));
-      setToast(`同步最新流量失败：${String(error)}`);
+      setToast(t("shell.syncFailed", { error: String(error) }));
     }
   }, [activeSessionId, liveDisplayController, publishLiveDisplay, refreshRequests, requestListBatcher]);
 
@@ -800,7 +810,7 @@ function App() {
 
   const importSessionPath = useCallback(async (path: string) => {
     if (capturing) {
-      setToast("请先停止抓包，再打开其他会话");
+      setToast(t("shell.openStopFirst"));
       return;
     }
     setTransferring(true);
@@ -809,9 +819,9 @@ function App() {
       await refreshSessions();
       setActiveSessionId(imported.id);
       setActiveView("traffic");
-      setToast(`已打开 ${imported.name}`);
+      setToast(t("shell.openedSession", { name: imported.name }));
     } catch (error) {
-      setToast(`打开会话失败：${String(error)}`);
+      setToast(t("shell.openFailed", { error: String(error) }));
     } finally {
       setTransferring(false);
     }
@@ -826,9 +836,9 @@ function App() {
       await refreshRequests(sessionId);
       setAnalysisAutoRun({ id: Date.now(), sessionId });
       setActiveView("analysis");
-      setToast("Crypto Lab 已完成，内置 Agent 正在分析加密链路");
+      setToast(t("shell.cryptoLabDone"));
     } catch (error) {
-      setToast(`读取 Crypto Lab 证据失败：${String(error)}`);
+      setToast(t("shell.cryptoLabFailed", { error: String(error) }));
     }
   }, [refreshRequests]);
 
@@ -851,7 +861,7 @@ function App() {
         ? active
         : lastLocalEditableRef.current;
       void runLocalEditCommand(event.payload, editable).catch((error) => {
-        setToast(`系统编辑命令失败：${String(error)}`);
+        setToast(t("shell.editCmdFailed", { error: String(error) }));
       });
     }).then((dispose) => { unlisten = dispose; });
     return () => {
@@ -879,7 +889,7 @@ function App() {
         );
       })
       .catch((error) => {
-        if (!disposed) setToast(`原生服务初始化失败：${String(error)}`);
+        if (!disposed) setToast(t("shell.nativeInitFailed", { error: String(error) }));
       })
       .finally(() => {
         if (!disposed) setSessionCatalogReady(true);
@@ -915,7 +925,7 @@ function App() {
     if (!hasNativeRuntime) return;
     requestWindowOffsetRef.current = 0;
     setRequestWindowOffset(0);
-    refreshRequests(activeSessionId).catch((error) => setToast(`读取流量失败：${String(error)}`));
+    refreshRequests(activeSessionId).catch((error) => setToast(t("shell.readTrafficFailed", { error: String(error) })));
   }, [activeSessionId, refreshRequests]);
 
   useEffect(() => {
@@ -941,7 +951,7 @@ function App() {
     const unlisteners: UnlistenFn[] = [];
     const refreshBreakpointQueue = () => invoke<BreakpointQueueSnapshot>("get_breakpoint_queue")
       .then((snapshot) => { if (!disposed) setBreakpointQueue(snapshot); })
-      .catch((error) => { if (!disposed) setToast(`读取人工断点失败：${String(error)}`); });
+      .catch((error) => { if (!disposed) setToast(t("shell.readBreakpointsFailed", { error: String(error) })); });
 
     const proxyErrors = createProxyErrorQueue({
       show: (message) => setToast(message),
@@ -1031,7 +1041,7 @@ function App() {
       else unlisteners.push(...listeners);
     };
 
-    subscribe().catch((error) => setToast(`事件订阅失败：${String(error)}`));
+    subscribe().catch((error) => setToast(t("shell.subscribeFailed", { error: String(error) })));
     return () => {
       disposed = true;
       // A held failure must not fire into a view that is gone.
@@ -1084,7 +1094,7 @@ function App() {
     const timer = window.setTimeout(() => {
       void invoke<UpdateCheckResult>("check_for_updates")
         .then((result) => {
-          if (result.available) setToast(`发现 ShowNet ${result.latestVersion}，请到设置中确认下载`);
+          if (result.available) setToast(t("shell.updateAvailable", { version: result.latestVersion }));
         })
         .catch(() => {
           // Startup checks are best-effort; the explicit Settings action exposes errors.
@@ -1133,11 +1143,11 @@ function App() {
         setRequestWindowOffset(0);
         setActiveView("traffic");
         if (announce) setToast(capturing && captureSession
-          ? `新会话已创建；抓包仍写入“${captureSession.name}”`
-          : "新会话已创建");
+          ? t("shell.sessionCreatedKeep", { name: captureSession.name })
+          : t("shell.sessionCreated"));
         return created;
       } catch (error) {
-        setToast(`创建会话失败：${String(error)}`);
+        setToast(t("shell.createFailed", { error: String(error) }));
         return null;
       }
     }
@@ -1156,15 +1166,15 @@ function App() {
     setActiveSessionId(id);
     setActiveView("traffic");
     if (announce) setToast(capturing && captureSession
-      ? `新会话已创建；抓包仍写入“${captureSession.name}”`
-      : "新会话已创建");
+      ? t("shell.sessionCreatedKeep", { name: captureSession.name })
+      : t("shell.sessionCreated"));
     return newSession;
   };
 
   const toggleCapture = async () => {
     if (captureTransitioningRef.current) return false;
     if (!sessionCatalogReady) {
-      setToast("会话仍在加载，请稍候再试");
+      setToast(t("shell.sessionLoading"));
       return false;
     }
     captureTransitioningRef.current = true;
@@ -1173,9 +1183,9 @@ function App() {
     if (!next && hasNativeRuntime) {
       const browser = await getProxyBrowserStatus().catch(() => null);
       if (browser?.running && !await confirm({
-        title: `停止“${captureSession?.name ?? "当前会话"}”的抓包？`,
-        detail: "内嵌浏览器也会关闭；临时登录状态、表单内容、页面历史和长连接将被清除。",
-        confirmLabel: "停止并清除",
+        title: t("shell.stopCaptureNamed", { name: captureSession?.name ?? t("shell.currentSession") }),
+        detail: t("shell.stopCaptureDetail"),
+        confirmLabel: t("shell.stopAndClear"),
         tone: "danger",
       })) {
         captureTransitioningRef.current = false;
@@ -1186,7 +1196,7 @@ function App() {
     try {
       const target = next
         ? await ensureCaptureSession(activeSession.id, async () => {
-          setToast("当前没有会话，正在自动创建并启动抓包");
+          setToast(t("shell.captureNoSession"));
           return createSession(false);
         })
         : { sessionId: captureSessionId || activeSession.id, created: false };
@@ -1215,11 +1225,11 @@ function App() {
         await refreshSessions();
       }
       setToast(target.created
-        ? "已自动创建会话并开始抓包"
-        : next ? "抓包已开始，流量正在汇入当前会话" : "抓包已暂停");
+        ? t("shell.captureCreated")
+        : next ? t("shell.captureStarted") : t("shell.capturePaused"));
       return next;
     } catch (error) {
-      setToast(`抓包状态切换失败：${String(error)}`);
+      setToast(t("shell.captureToggleFailed", { error: String(error) }));
       return false;
     } finally {
       captureTransitioningRef.current = false;
@@ -1230,20 +1240,20 @@ function App() {
   const deleteSession = async (session: Session) => {
     setSessionToolsOpen(false);
     if (capturing && session.id === captureSessionId) {
-      setToast("请先停止抓包，再删除当前会话");
+      setToast(t("shell.deleteStopFirst"));
       return;
     }
     if (!await confirm({
-      title: `删除会话“${session.name}”？`,
-      detail: `${session.requestCount} 条请求、以及这个会话的标注与规则轨迹都会一并删除，无法撤销。`,
-      confirmLabel: "删除会话",
+      title: t("shell.deleteSessionTitle", { name: session.name }),
+      detail: t("shell.deleteSessionBody", { count: session.requestCount }),
+      confirmLabel: t("shell.deleteSession"),
       tone: "danger",
     })) return;
 
     if (!hasNativeRuntime) {
       setSessions((items) => items.filter((item) => item.id !== session.id));
       forgetStoredBrowserUrl(session.id);
-      setToast(`已删除 ${session.name}`);
+      setToast(t("shell.sessionDeleted", { name: session.name }));
       return;
     }
     setTransferring(true);
@@ -1251,9 +1261,9 @@ function App() {
       await invoke("delete_session", { sessionId: session.id });
       forgetStoredBrowserUrl(session.id);
       await refreshSessions();
-      setToast(`已删除 ${session.name}`);
+      setToast(t("shell.sessionDeleted", { name: session.name }));
     } catch (error) {
-      setToast(`删除会话失败：${String(error)}`);
+      setToast(t("shell.deleteFailed", { error: String(error) }));
     } finally {
       setTransferring(false);
     }
@@ -1274,7 +1284,7 @@ function App() {
   const saveSessionName = async (sessionId: string) => {
     const name = sessionNameDraft.trim();
     if (!name) {
-      setToast("会话名称不能为空");
+      setToast(t("shell.renameEmpty"));
       return;
     }
     setRenamingSession(true);
@@ -1287,9 +1297,9 @@ function App() {
       }
       setRenamingSessionId("");
       setSessionNameDraft("");
-      setToast(`会话已重命名为 ${name}`);
+      setToast(t("shell.renamed", { name }));
     } catch (error) {
-      setToast(`重命名失败：${String(error)}`);
+      setToast(t("shell.renameFailed", { error: String(error) }));
     } finally {
       setRenamingSession(false);
     }
@@ -1300,7 +1310,7 @@ function App() {
     if (!activeSession.id) return;
     if (!hasNativeRuntime) {
       setExportOpen(false);
-      setToast(`${format === "shownet" ? "会话包" : format.toUpperCase()} 导出已准备`);
+      setToast(t("shell.exportReady", { format: format === "shownet" ? t("shell.packLabel") : format.toUpperCase() }));
       return;
     }
     const config = {
@@ -1322,9 +1332,9 @@ function App() {
         path,
       });
       setExportOpen(false);
-      setToast(`${result.format} 已导出 · ${formatBytes(result.bytes)}`);
+      setToast(t("shell.exported", { format: result.format, size: formatBytes(result.bytes) }));
     } catch (error) {
-      setToast(`导出失败：${String(error)}`);
+      setToast(t("shell.exportFailed", { error: String(error) }));
     } finally {
       setTransferring(false);
     }
@@ -1333,11 +1343,11 @@ function App() {
   const openSessionFile = async () => {
     setSessionToolsOpen(false);
     if (!hasNativeRuntime) {
-      setToast("桌面版可打开 .shownet 会话包");
+      setToast(t("shell.desktopOpenPack"));
       return;
     }
     if (capturing) {
-      setToast("请先停止抓包，再打开其他会话");
+      setToast(t("shell.openStopFirst"));
       return;
     }
     const path = await open({
@@ -1380,12 +1390,12 @@ function App() {
       }
       if (capturing || transferringRef.current) {
         setSessionDrop({ status: "idle" });
-        setToast(capturing ? "请先停止抓包，再打开其他会话" : "正在处理会话文件，请稍候");
+        setToast(capturing ? t("shell.openStopFirst") : t("shell.dropProcessing"));
         return;
       }
       if (!supported || !path) {
         setSessionDrop({ status: "idle" });
-        if (containsSession) setToast("一次只能打开一个 .shownet 会话文件");
+        if (containsSession) setToast(t("shell.oneSessionFile"));
         return;
       }
       setSessionDrop({ status: "importing", path });
@@ -1395,7 +1405,7 @@ function App() {
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
-    }).catch((error) => setToast(`文件拖放不可用：${String(error)}`));
+    }).catch((error) => setToast(t("shell.dropUnavailable", { error: String(error) })));
     return () => {
       disposed = true;
       void unlisten?.();
@@ -1420,9 +1430,9 @@ function App() {
     try {
       if (hasNativeRuntime) await writeText(value);
       else await navigator.clipboard.writeText(value);
-      setToast(`${label}已复制`);
+      setToast(t("common.copiedLabel", { label }));
     } catch (error) {
-      setToast(`复制失败：${String(error)}`);
+      setToast(t("common.copyFailed", { error: String(error) }));
     }
   };
 
@@ -1484,18 +1494,18 @@ function App() {
   const commandActions: CommandAction[] = [
     {
       id: "setup-guide",
-      title: "打开新手引导",
-      subtitle: setupState.ready ? "抓包链路已就绪" : `还剩 ${setupState.total - setupState.done} 个必做步骤`,
+      title: t("cmd.setup.title"),
+      subtitle: setupState.ready ? t("cmd.setup.subtitleReady") : t("cmd.setup.subtitleLeft", { count: setupState.total - setupState.done }),
       group: "start",
       keywords: ["setup", "guide", "onboarding", "getting started", "xssy", "yindao"],
-      badge: setupState.ready ? "已就绪" : `${setupState.done}/${setupState.total}`,
+      badge: setupState.ready ? t("common.ready") : `${setupState.done}/${setupState.total}`,
       badgeTone: setupState.ready ? "ok" : "warn",
       run: () => { setCommandOpen(false); setSetupOpen(true); },
     },
     {
       id: "shortcuts",
-      title: "快捷键与鼠标操作",
-      subtitle: "多列排序、批量选择、列宽调整等隐藏交互",
+      title: t("cmd.shortcuts.title"),
+      subtitle: t("cmd.shortcuts.subtitle"),
       group: "start",
       keywords: ["shortcut", "keyboard", "keys", "hotkey", "kjj", "kuaijiejian"],
       shortcut: "?",
@@ -1503,8 +1513,8 @@ function App() {
     },
     {
       id: "about",
-      title: "关于 ShowNet",
-      subtitle: "版本、代理地址、证书状态与开源许可",
+      title: t("cmd.about.title"),
+      subtitle: t("cmd.about.subtitle"),
       group: "start",
       keywords: ["about", "version", "license", "gpl", "gy", "banben"],
       badge: runtime.appVersion,
@@ -1512,152 +1522,152 @@ function App() {
     },
     {
       id: "capture-toggle",
-      title: capturing ? "停止抓包" : "开始抓包",
-      subtitle: capturing ? `代理运行在 :${runtime.proxyPort}` : "启动本机代理，流量写入当前会话",
+      title: capturing ? t("shell.stopCapture") : t("shell.startCapture"),
+      subtitle: capturing ? t("cmd.capture.stopSubtitle", { port: runtime.proxyPort }) : t("cmd.capture.startSubtitle"),
       group: "capture",
       keywords: ["capture", "start", "stop", "proxy", "record", "kbz", "zbb"],
-      badge: capturing ? "运行中" : "已暂停",
+      badge: capturing ? t("common.running") : t("common.paused"),
       badgeTone: capturing ? "ok" : "neutral",
       disabled: captureTransitioning || !sessionCatalogReady,
-      disabledReason: captureTransitioning ? "抓包状态正在切换" : "会话仍在加载",
+      disabledReason: captureTransitioning ? t("cmd.capture.switching") : t("cmd.capture.loading"),
       run: () => { setCommandOpen(false); void toggleCapture(); },
     },
     {
       id: "connect-sources",
-      title: "连接流量来源",
-      subtitle: "浏览器 · 桌面应用 · 终端 · 手机 · IoT · 免代理入口",
+      title: t("cmd.connect.title"),
+      subtitle: t("cmd.connect.subtitle"),
       group: "capture",
       keywords: ["connect", "source", "device", "mobile", "terminal", "lljr", "ly"],
       run: () => { setCommandOpen(false); setConnectOpen(true); },
     },
     {
       id: "open-browser-capture",
-      title: "打开内嵌浏览器抓包",
-      subtitle: runtime.caInstalled ? "代理 Chrome · CDP 与 JS Hook 已就绪" : "首次使用需先安装并信任 HTTPS Root CA",
+      title: t("cmd.browserCapture.title"),
+      subtitle: runtime.caInstalled ? t("cmd.browserCapture.ready") : t("cmd.browserCapture.needCa"),
       group: "capture",
       keywords: ["browser", "chrome", "embedded", "cdp", "llq"],
       run: () => navigate("browser"),
     },
     {
       id: "proxy-terminal",
-      title: "打开代理终端",
-      subtitle: "自动配置 HTTP_PROXY 与 CA 信任，适合 curl / Node / Python",
+      title: t("cmd.terminal.title"),
+      subtitle: t("cmd.terminal.subtitle"),
       group: "capture",
       keywords: ["terminal", "shell", "curl", "cli", "dlzd"],
       run: () => { setCommandOpen(false); setConnectOpen(true); },
     },
     {
       id: "copy-proxy",
-      title: "复制代理地址",
+      title: t("cmd.copyProxy.title"),
       subtitle: `127.0.0.1:${runtime.proxyPort}`,
       group: "capture",
       keywords: ["copy", "proxy", "address", "endpoint", "fzdl"],
       run: () => {
         setCommandOpen(false);
-        void copyConnectValue(`127.0.0.1:${runtime.proxyPort}`, "代理地址");
+        void copyConnectValue(`127.0.0.1:${runtime.proxyPort}`, t("settings.route.copyProxy"));
       },
     },
     {
       id: "session-new",
-      title: capturing ? "新建空会话" : "新建会话",
+      title: capturing ? t("shell.newEmptySession") : t("shell.newSession"),
       subtitle: capturing && captureSession
-        ? `创建空会话；抓包继续写入 ${captureSession.name}`
-        : "创建一个干净的会话",
+        ? t("cmd.session.keepWriting", { name: captureSession.name })
+        : t("cmd.session.newClean"),
       group: "session",
       keywords: ["new", "session", "create", "xjhh"],
       disabled: captureTransitioning,
-      disabledReason: "抓包状态正在切换",
+      disabledReason: t("cmd.capture.switching"),
       run: () => { setCommandOpen(false); void createSession(); },
     },
     {
       id: "session-open",
-      title: "打开会话文件",
-      subtitle: ".shownet 会话包",
+      title: t("shell.openSessionFile"),
+      subtitle: t("cmd.session.pack"),
       group: "session",
       keywords: ["open", "import", "session", "file", "dkhh"],
       disabled: capturing,
-      disabledReason: "请先停止抓包",
+      disabledReason: t("cmd.session.stopFirst"),
       run: () => { setCommandOpen(false); void openSessionFile(); },
     },
     {
       id: "session-save",
-      title: "保存会话包",
-      subtitle: "完整流量、规则与标注",
+      title: t("shell.saveSession"),
+      subtitle: t("cmd.session.saveDetail"),
       group: "session",
       keywords: ["save", "export", "shownet", "backup", "bchh"],
       disabled: !activeSession.id || transferring,
-      disabledReason: transferring ? "正在处理文件" : "当前没有会话",
+      disabledReason: transferring ? t("cmd.session.busy") : t("cmd.session.none"),
       run: () => { setCommandOpen(false); void exportSession("shownet"); },
     },
     {
       id: "session-delete",
-      title: "删除当前会话",
-      subtitle: `${activeSession.name} · ${activeSession.requestCount} 条请求`,
+      title: t("cmd.session.deleteCurrent"),
+      subtitle: t("cmd.session.deleteMeta", { name: activeSession.name, count: activeSession.requestCount }),
       group: "session",
       keywords: ["delete", "remove", "drop", "schh", "shanchu"],
       disabled: !activeSession.id || (capturing && activeSession.id === captureSessionId),
-      disabledReason: capturing && activeSession.id === captureSessionId ? "请先停止抓包" : "当前没有会话",
+      disabledReason: capturing && activeSession.id === captureSessionId ? t("cmd.session.stopFirst") : t("cmd.session.none"),
       run: () => { setCommandOpen(false); void deleteSession(activeSession); },
     },
     {
       id: "session-export",
-      title: "导出为 HAR / Postman / OpenAPI",
-      subtitle: "交给其他抓包工具或 API 平台",
+      title: t("cmd.session.exportTitle"),
+      subtitle: t("cmd.session.exportSubtitle"),
       group: "session",
       keywords: ["export", "har", "postman", "openapi", "swagger", "dc"],
       disabled: !activeSession.id,
-      disabledReason: "当前没有会话",
+      disabledReason: t("cmd.session.none"),
       run: () => { setCommandOpen(false); setExportOpen(true); },
     },
-    { id: "go-traffic", title: chromeLabel(t, "traffic"), subtitle: "请求列表、筛选与详情", group: "navigate", keywords: ["traffic", "requests", "list", "ll", "流量"], run: () => navigate("traffic") },
-    { id: "go-browser", title: chromeLabel(t, "browser"), subtitle: "内嵌 Chrome，开始抓包", group: "navigate", keywords: ["browser", "chrome", "embedded", "llq", "浏览器"], run: () => navigate("browser") },
-    { id: "go-lab", title: chromeLabel(t, "lab"), subtitle: "构建、重放、对比与生成客户端代码", group: "navigate", keywords: ["lab", "request", "replay", "build", "sys", "实验室"], run: () => navigate("lab") },
-    { id: "go-collections", title: "请求集合", subtitle: "导入 HAR / Postman / OpenAPI，整理接口", group: "navigate", keywords: ["collection", "folder", "postman", "openapi", "qqjh"], run: () => openWorkbench("collections") },
-    { id: "go-rules", title: "规则与断点", subtitle: "重写、转发、弱网与人工断点", group: "navigate", keywords: ["rules", "breakpoint", "rewrite", "map remote", "gz"], badge: breakpointQueue.tasks.length ? `${breakpointQueue.tasks.length} 待处理` : undefined, badgeTone: "warn", run: () => openWorkbench("rules") },
-    { id: "go-environment", title: "环境变量", subtitle: "多环境与加密 Secret", group: "navigate", keywords: ["environment", "variable", "secret", "env", "hjbl"], run: () => openWorkbench("environment") },
-    { id: "go-analysis", title: chromeLabel(t, "analysis"), subtitle: "自动逆向接口、签名与加密链路", group: "navigate", keywords: ["ai", "analysis", "reverse", "agent", "fx", "分析"], run: () => navigate("analysis") },
-    { id: "go-skills", title: chromeLabel(t, "skills"), subtitle: "内置能力契约与 MCP 工具", group: "navigate", keywords: ["skill", "mcp", "agent", "tools", "nl", "能力"], run: () => navigate("skills") },
-    { id: "go-advanced", title: chromeLabel(t, "advanced"), subtitle: "TLS 指纹、PX 证据与出站预置", group: "navigate", keywords: ["advanced", "mitm", "tls", "ja3", "px", "gj", "高级"], run: () => navigate("advanced") },
-    { id: "go-settings", title: chromeLabel(t, "settings"), subtitle: "证书、代理、AI 与存储", group: "navigate", keywords: ["settings", "preferences", "sz", "设置"], run: () => navigate("settings") },
+    { id: "go-traffic", title: chromeLabel(t, "traffic"), subtitle: t("cmd.go.traffic"), group: "navigate", keywords: ["traffic", "requests", "list", "ll", "流量"], run: () => navigate("traffic") },
+    { id: "go-browser", title: chromeLabel(t, "browser"), subtitle: t("cmd.go.browser"), group: "navigate", keywords: ["browser", "chrome", "embedded", "llq", "浏览器"], run: () => navigate("browser") },
+    { id: "go-lab", title: chromeLabel(t, "lab"), subtitle: t("cmd.go.lab"), group: "navigate", keywords: ["lab", "request", "replay", "build", "sys", "实验室"], run: () => navigate("lab") },
+    { id: "go-collections", title: t("cmd.go.collections"), subtitle: t("cmd.go.collectionsSub"), group: "navigate", keywords: ["collection", "folder", "postman", "openapi", "qqjh"], run: () => openWorkbench("collections") },
+    { id: "go-rules", title: t("cmd.go.rules"), subtitle: t("cmd.go.rulesSub"), group: "navigate", keywords: ["rules", "breakpoint", "rewrite", "map remote", "gz"], badge: breakpointQueue.tasks.length ? t("cmd.go.waiting", { count: breakpointQueue.tasks.length }) : undefined, badgeTone: "warn", run: () => openWorkbench("rules") },
+    { id: "go-environment", title: t("cmd.go.environment"), subtitle: t("cmd.go.environmentSub"), group: "navigate", keywords: ["environment", "variable", "secret", "env", "hjbl"], run: () => openWorkbench("environment") },
+    { id: "go-analysis", title: chromeLabel(t, "analysis"), subtitle: t("cmd.go.analysis"), group: "navigate", keywords: ["ai", "analysis", "reverse", "agent", "fx", "分析"], run: () => navigate("analysis") },
+    { id: "go-skills", title: chromeLabel(t, "skills"), subtitle: t("cmd.go.skills"), group: "navigate", keywords: ["skill", "mcp", "agent", "tools", "nl", "能力"], run: () => navigate("skills") },
+    { id: "go-advanced", title: chromeLabel(t, "advanced"), subtitle: t("cmd.go.advanced"), group: "navigate", keywords: ["advanced", "mitm", "tls", "ja3", "px", "gj", "高级"], run: () => navigate("advanced") },
+    { id: "go-settings", title: chromeLabel(t, "settings"), subtitle: t("cmd.go.settings"), group: "navigate", keywords: ["settings", "preferences", "sz", "设置"], run: () => navigate("settings") },
     {
       id: "install-ca",
-      title: "安装 HTTPS 证书",
-      subtitle: "写入系统信任库，解密 App 与桌面程序",
+      title: t("cmd.ca.title"),
+      subtitle: t("cmd.ca.subtitle"),
       group: "config",
       keywords: ["ca", "cert", "certificate", "https", "trust", "root", "azzs"],
-      badge: runtime.caInstalled ? "已信任" : "未安装",
+      badge: runtime.caInstalled ? t("common.trusted") : t("common.notInstalled"),
       badgeTone: runtime.caInstalled ? "ok" : "warn",
       run: () => openSettingsTab("capture"),
     },
     {
       id: "device-access",
-      title: "手机与设备接入",
-      subtitle: "扫码装证书 · Wi-Fi 代理 · Android 一键配置",
+      title: t("cmd.device.title"),
+      subtitle: t("cmd.device.subtitle"),
       group: "config",
       keywords: ["device", "mobile", "phone", "android", "qr", "lan", "sjjr"],
-      badge: runtime.lanEnabled ? "已开启" : "未开启",
+      badge: runtime.lanEnabled ? t("common.enabled") : t("common.disabled"),
       badgeTone: runtime.lanEnabled ? "ok" : "neutral",
       run: () => openSettingsTab("capture"),
     },
     {
       id: "ai-settings",
-      title: "配置 AI 服务",
-      subtitle: "API Key、模型与分析策略",
+      title: t("cmd.ai.title"),
+      subtitle: t("cmd.ai.subtitle"),
       group: "config",
       keywords: ["ai", "model", "api key", "openai", "provider", "pzai"],
-      badge: aiConfigured ? "已配置" : "未配置",
+      badge: aiConfigured ? t("common.configured") : t("common.notConfigured"),
       badgeTone: aiConfigured ? "ok" : "warn",
       run: () => openSettingsTab("ai"),
     },
-    { id: "mcp-settings", title: "MCP 服务与客户端接入", subtitle: "把 ShowNet 接到 Claude Code / Cursor / Codex", group: "config", keywords: ["mcp", "claude", "cursor", "codex", "client"], run: () => openSettingsTab("mcp") },
-    { id: "data-settings", title: "数据与存储", subtitle: "数据库位置、保留天数与清理", group: "config", keywords: ["data", "storage", "database", "cleanup", "sj"], run: () => openSettingsTab("data") },
-    { id: "capture-settings", title: "代理与 HTTPS 设置", subtitle: "监听、系统代理、出口代理与解密策略", group: "config", keywords: ["settings", "proxy", "port", "upstream", "decrypt", "sz"], run: () => openSettingsTab("capture") },
+    { id: "mcp-settings", title: t("cmd.mcp.title"), subtitle: t("cmd.mcp.subtitle"), group: "config", keywords: ["mcp", "claude", "cursor", "codex", "client"], run: () => openSettingsTab("mcp") },
+    { id: "data-settings", title: t("cmd.data.title"), subtitle: t("cmd.data.subtitle"), group: "config", keywords: ["data", "storage", "database", "cleanup", "sj"], run: () => openSettingsTab("data") },
+    { id: "capture-settings", title: t("cmd.captureSettings.title"), subtitle: t("cmd.captureSettings.subtitle"), group: "config", keywords: ["settings", "proxy", "port", "upstream", "decrypt", "sz"], run: () => openSettingsTab("capture") },
   ];
 
   return (
     <div className="app-shell">
-      <nav className="nav-rail" aria-label="主导航">
-        <button className="brand-mark" title={`关于 ShowNet ${runtime.appVersion}`} onClick={() => setAboutOpen(true)}>
+      <nav className="nav-rail" aria-label={t("shell.mainNav")}>
+        <button className="brand-mark" title={t("shell.aboutTitle", { version: runtime.appVersion })} onClick={() => setAboutOpen(true)}>
           <img src={shownetAppIcon} alt="" aria-hidden="true" />
         </button>
         <div className="nav-rail__items">
@@ -1686,10 +1696,10 @@ function App() {
           <button
             className="nav-rail__item command-button"
             onClick={() => setCommandOpen(true)}
-            title="快捷命令"
+            title={t("shell.commandTitle")}
           >
             <Command size={19} />
-            <span>命令</span>
+            <span>{t("shell.command")}</span>
           </button>
           <button
             data-nav="settings"
@@ -1710,30 +1720,30 @@ function App() {
             <span className="product-name">ShowNet</span>
             <span className="product-channel">DESKTOP</span>
           </div>
-          <button className="icon-button" title="收起会话" onClick={() => setCompactSessions((value) => !value)}>
+          <button className="icon-button" title={t("shell.collapseSessions")} onClick={() => setCompactSessions((value) => !value)}>
             <Menu size={17} />
           </button>
         </div>
 
-        <button className="new-session-button" onClick={() => void createSession()} disabled={captureTransitioning} title={capturing && captureSession ? `创建空会话；抓包仍写入 ${captureSession.name}` : "新建会话"}>
+        <button className="new-session-button" onClick={() => void createSession()} disabled={captureTransitioning} title={capturing && captureSession ? t("shell.newEmptyHint", { name: captureSession.name }) : t("shell.newSession")}>
           <Plus size={16} />
-          <span>{capturing ? "新建空会话" : "新建会话"}</span>
+          <span>{capturing ? t("shell.newEmptySession") : t("shell.newSession")}</span>
         </button>
 
         <div className="sessions-label">
-          <span>会话</span>
+          <span>{t("shell.sessions")}</span>
           <div className="session-tools" ref={sessionToolsRef}>
-            <button className="icon-button icon-button--small" title="会话菜单" onClick={() => setSessionToolsOpen((open) => !open)}>
+            <button className="icon-button icon-button--small" title={t("shell.sessionMenu")} onClick={() => setSessionToolsOpen((open) => !open)}>
               <MoreHorizontal size={16} />
             </button>
             {sessionToolsOpen && (
               <div className="session-tools-menu">
-                <button onClick={openSessionFile}><FolderOpen size={14} /><span><strong>打开会话</strong><small>.shownet</small></span></button>
-                <button onClick={() => void exportSession("shownet")} disabled={!activeSession.id || transferring}><Save size={14} /><span><strong>保存会话包</strong><small>完整流量 · 完整规则</small></span></button>
+                <button onClick={openSessionFile}><FolderOpen size={14} /><span><strong>{t("shell.openSession")}</strong><small>.shownet</small></span></button>
+                <button onClick={() => void exportSession("shownet")} disabled={!activeSession.id || transferring}><Save size={14} /><span><strong>{t("shell.saveSession")}</strong><small>{t("shell.saveSessionDetail")}</small></span></button>
                 <i />
-                <button onClick={() => { setSessionToolsOpen(false); setExportOpen(true); }} disabled={!activeSession.id}><Download size={14} /><span><strong>导出为其他格式</strong><small>HAR · Postman · OpenAPI</small></span></button>
+                <button onClick={() => { setSessionToolsOpen(false); setExportOpen(true); }} disabled={!activeSession.id}><Download size={14} /><span><strong>{t("shell.exportOther")}</strong><small>{t("shell.exportOtherDetail")}</small></span></button>
                 <i />
-                <button className="is-danger" onClick={() => void deleteSession(activeSession)} disabled={!activeSession.id || transferring}><Trash2 size={14} /><span><strong>删除会话</strong><small>{activeSession.requestCount} 条请求 · 不可撤销</small></span></button>
+                <button className="is-danger" onClick={() => void deleteSession(activeSession)} disabled={!activeSession.id || transferring}><Trash2 size={14} /><span><strong>{t("shell.deleteSession")}</strong><small>{t("shell.deleteSessionDetail", { count: activeSession.requestCount })}</small></span></button>
               </div>
             )}
           </div>
@@ -1760,11 +1770,11 @@ function App() {
                         cancelSessionRename();
                       }
                     }}
-                    aria-label={`重命名 ${session.name}`}
+                    aria-label={t("shell.renameNamed", { name: session.name })}
                   />
                   <span className="session-rename-editor__actions">
-                    <button type="submit" title="保存名称" disabled={renamingSession || !sessionNameDraft.trim()}><Check size={13} /></button>
-                    <button type="button" title="取消重命名" disabled={renamingSession} onClick={cancelSessionRename}><X size={13} /></button>
+                    <button type="submit" title={t("shell.saveName")} disabled={renamingSession || !sessionNameDraft.trim()}><Check size={13} /></button>
+                    <button type="button" title={t("shell.cancelRename")} disabled={renamingSession} onClick={cancelSessionRename}><X size={13} /></button>
                   </span>
                 </form>
               ) : (
@@ -1775,16 +1785,16 @@ function App() {
                       setActiveSessionId(session.id);
                       setActiveView("traffic");
                     }}
-                    title={isCaptureTarget ? `${session.name} 正在接收抓包；点击查看记录` : `打开 ${session.name} 的抓包记录`}
+                    title={isCaptureTarget ? t("shell.captureTarget", { name: session.name }) : t("shell.openCapture", { name: session.name })}
                   >
                     <span className={`session-status ${isCaptureTarget ? "is-live" : ""}`} />
                     {/* Collapsed, the row is 72px wide and the body is hidden;
                         without this the sessions are indistinguishable dots. */}
                     <span className="session-item__initial" aria-hidden="true">{sessionInitial(session.name)}</span>
                     <span className="session-item__body">
-                      <span className="session-item__title"><strong>{session.name}</strong>{isCaptureTarget && <em>抓包中</em>}</span>
+                      <span className="session-item__title"><strong>{session.name}</strong>{isCaptureTarget && <em>{t("shell.capturing")}</em>}</span>
                       <span className="session-item__meta">
-                        <span>{formatSessionTime(session.createdAt, t, intlLocale)} · {session.requestCount} 条</span>
+                        <span>{formatSessionTime(session.createdAt, t, intlLocale)} · {t("shell.requestsMeta", { count: session.requestCount })}</span>
                         <span className="session-sources">
                           {session.sources.slice(0, 4).map((source) => {
                             const Icon = sourceIcons[source];
@@ -1801,8 +1811,8 @@ function App() {
                       event.stopPropagation();
                       void deleteSession(session);
                     }}
-                    title="删除会话"
-                    aria-label={`删除 ${session.name}`}
+                    title={t("shell.deleteSession")}
+                    aria-label={t("shell.deleteSession") + " " + session.name}
                     disabled={transferring}
                   >
                     <Trash2 size={12} />
@@ -1813,8 +1823,8 @@ function App() {
                       event.stopPropagation();
                       beginSessionRename(session);
                     }}
-                    title="重命名会话"
-                    aria-label={`重命名 ${session.name}`}
+                    title={t("shell.renameSession")}
+                    aria-label={t("shell.renameNamed", { name: session.name })}
                   >
                     <Pencil size={12} />
                   </button>
@@ -1827,11 +1837,11 @@ function App() {
                     setActiveSessionId(session.id);
                     setActiveView("analysis");
                   }}
-                  title={`打开最近 AI 报告${session.latestAnalysisUpdatedAt ? ` · ${formatSessionTime(new Date(session.latestAnalysisUpdatedAt).toISOString(), t, intlLocale)}` : ""}`}
-                  aria-label={`打开 ${session.name} 的最近 AI 报告`}
+                  title={`${t("shell.openReport")}${session.latestAnalysisUpdatedAt ? ` · ${formatSessionTime(new Date(session.latestAnalysisUpdatedAt).toISOString(), t, intlLocale)}` : ""}`}
+                  aria-label={t("shell.openReportNamed", { name: session.name })}
                 >
                   <Sparkles size={11} />
-                  <span>{session.latestAnalysisStatus === "failed" ? "失败" : `${session.analysisReportCount} 份报告`}</span>
+                  <span>{session.latestAnalysisStatus === "failed" ? t("common.failed") : t("shell.reports", { count: session.analysisReportCount })}</span>
                 </button>
               )}
             </div>
@@ -1842,12 +1852,12 @@ function App() {
         <div className="proxy-mini-status">
           <div className="proxy-mini-status__top">
             <span className={`live-dot ${capturing ? "is-on" : ""}`} />
-            <strong><span className="proxy-mini-status__label">代理 :</span>{runtime.proxyPort}</strong>
-            <span title={captureSession?.name}>{capturing ? `写入 ${captureSession?.name ?? "活动会话"}` : "已暂停"}</span>
+            <strong><span className="proxy-mini-status__label">{t("shell.proxy")} :</span>{runtime.proxyPort}</strong>
+            <span title={captureSession?.name}>{capturing ? t("shell.writing", { name: captureSession?.name ?? t("shell.sessions") }) : t("shell.paused")}</span>
           </div>
           <div className="proxy-mini-status__meta">
-            <span>{runtime.caInstalled ? "CA 已信任" : "CA 待安装"}</span>
-            <button onClick={() => navigate("settings")}>管理</button>
+            <span>{runtime.caInstalled ? t("shell.caTrusted") : t("shell.caPending")}</span>
+            <button onClick={() => navigate("settings")}>{t("common.manage")}</button>
           </div>
         </div>
       </aside>
@@ -1857,30 +1867,30 @@ function App() {
           <div className="topbar__title">
             <span className="topbar__eyebrow">
               {activeView === "browser" && captureSession
-                ? `浏览器写入 · ${captureSession.name}`
-                : viewingCaptureSession ? `${activeSession.name} · 抓包中` : `正在查看 · ${activeSession.name}`}
+                ? t("shell.browserWriting", { name: captureSession.name })
+                : viewingCaptureSession ? t("shell.viewingLive", { name: activeSession.name }) : t("shell.viewing", { name: activeSession.name })}
             </span>
             <h1>{views[activeView].title}</h1>
           </div>
           <div className="topbar__actions">
             {capturing && captureSession && !viewingCaptureSession && (
-              <button className="capture-context-button" onClick={() => { setActiveSessionId(captureSession.id); setActiveView("traffic"); }} title={`返回正在抓包的会话 ${captureSession.name}`}>
+              <button className="capture-context-button" onClick={() => { setActiveSessionId(captureSession.id); setActiveView("traffic"); }} title={t("shell.returnCapture", { name: captureSession.name })}>
                 <Radio size={14} />
-                <span><small>抓包写入</small><strong>{captureSession.name}</strong></span>
+                <span><small>{t("shell.captureWrite")}</small><strong>{captureSession.name}</strong></span>
                 <ChevronRight size={13} />
               </button>
             )}
             {!setupState.ready && (
-              <button className="setup-pill" onClick={() => setSetupOpen(true)} title="打开新手引导，看看还差哪一步">
+              <button className="setup-pill" onClick={() => setSetupOpen(true)} title={t("shell.setupTitle")}>
                 <Compass size={14} />
-                <span>还差 <strong>{setupState.total - setupState.done}</strong> 步就能抓到流量</span>
+                <span>{t("shell.setupPill", { count: setupState.total - setupState.done })}</span>
               </button>
             )}
-            {breakpointQueue.tasks.length > 0 && <button className="breakpoint-alert-button" onClick={openBreakpointConsole} title="打开人工断点队列"><Pause size={13} fill="currentColor" /><span>{breakpointQueue.tasks.length} 条断点</span><strong>待处理</strong></button>}
+            {breakpointQueue.tasks.length > 0 && <button className="breakpoint-alert-button" onClick={openBreakpointConsole} title={t("shell.breakpoints", { count: breakpointQueue.tasks.length })}><Pause size={13} fill="currentColor" /><span>{t("shell.breakpoints", { count: breakpointQueue.tasks.length })}</span><strong>{t("common.pending")}</strong></button>}
             <button className="ai-service-entry" onClick={() => navigate("analysis")} title="ClaudeGPT.org · gpt-5.5">
               <Sparkles size={16} />
-              <span className="ai-service-entry__desktop"><small>首选 AI 服务 · 加群申请 $5 免费额度</small><strong>ClaudeGPT.org · gpt-5.5</strong></span>
-              <span className="ai-service-entry__mobile"><strong>ClaudeGPT.org</strong><small>申请 $5 免费额度</small></span>
+              <span className="ai-service-entry__desktop"><small>{t("shell.aiEntrySmall")}</small><strong>ClaudeGPT.org · gpt-5.5</strong></span>
+              <span className="ai-service-entry__mobile"><strong>ClaudeGPT.org</strong><small>{t("shell.aiEntryMobile")}</small></span>
             </button>
             <button className="status-button" onClick={() => setConnectOpen(true)}>
               <span className="source-stack">
@@ -1888,13 +1898,14 @@ function App() {
                 <Wifi size={14} />
                 <Terminal size={14} />
               </span>
-              <span>{(captureSession ?? activeSession).sources.length} 个来源</span>
+              <span>{t("shell.sourcesCount", { count: (captureSession ?? activeSession).sources.length })}</span>
               <ChevronDown size={14} />
             </button>
-            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={() => void toggleCapture()} disabled={captureTransitioning || !sessionCatalogReady} title={capturing && captureSession ? `停止“${captureSession.name}”的抓包` : "开始抓包"}>
+            <button className={`capture-button ${capturing ? "is-capturing" : ""}`} onClick={() => void toggleCapture()} disabled={captureTransitioning || !sessionCatalogReady} title={capturing && captureSession ? t("shell.stopCaptureNamed", { name: captureSession.name }) : t("shell.startCapture")}>
               {capturing ? <Square size={13} fill="currentColor" /> : <CircleDot size={15} />}
-              <span>{!sessionCatalogReady ? "加载会话" : captureTransitioning ? "处理中" : capturing ? "停止抓包" : "开始抓包"}</span>
+              <span>{!sessionCatalogReady ? t("shell.loadSession") : captureTransitioning ? t("common.processing") : capturing ? t("shell.stopCapture") : t("shell.startCapture")}</span>
             </button>
+            <LocaleSwitcher onChange={applyUiLocale} />
           </div>
         </header>
 
@@ -2050,7 +2061,7 @@ function App() {
           onClose={() => setAboutOpen(false)}
           onCopy={(value, label) => void copyConnectValue(value, label)}
           onOpenExternal={(url) => {
-            void openExternalUrl(url).catch((error) => setToast(`打开链接失败：${String(error)}`));
+            void openExternalUrl(url).catch((error) => setToast(t("shell.openLinkFailed", { error: String(error) })));
           }}
         />
       )}
@@ -2086,8 +2097,8 @@ function App() {
       {sessionDrop.status !== "idle" && (
         <div className={`session-drop-overlay is-${sessionDrop.status}`} role="status" aria-live="polite">
           <span><FileArchive size={26} /></span>
-          <strong>{sessionDrop.status === "ready" ? "松开以打开会话" : sessionDrop.status === "importing" ? "正在打开会话" : sessionDrop.status === "blocked" ? "请先停止抓包" : "不支持此文件"}</strong>
-          <small>{sessionDrop.path ? droppedFileName(sessionDrop.path) : "请选择单个 .shownet 文件"}</small>
+          <strong>{sessionDrop.status === "ready" ? t("shell.dropReady") : sessionDrop.status === "importing" ? t("shell.dropImporting") : sessionDrop.status === "blocked" ? t("shell.dropBlocked") : t("shell.dropUnsupported")}</strong>
+          <small>{sessionDrop.path ? droppedFileName(sessionDrop.path) : t("shell.dropHint")}</small>
         </div>
       )}
     </div>
@@ -2107,16 +2118,16 @@ function SessionExportDialog({
 }) {
   const [format, setFormat] = useState<SessionExportFormat>("har");
   const formats: Array<{ id: SessionExportFormat; name: string; detail: string; icon: typeof FileJson }> = [
-    { id: "har", name: "HAR 1.2", detail: "浏览器与主流抓包工具", icon: FileArchive },
-    { id: "postman", name: "Postman 2.1", detail: "导入 API Collection", icon: FileJson },
-    { id: "openapi", name: "OpenAPI 3.1", detail: "生成接口文档与客户端", icon: FileJson },
+    { id: "har", name: "HAR 1.2", detail: t("export.har"), icon: FileArchive },
+    { id: "postman", name: "Postman 2.1", detail: t("export.postman"), icon: FileJson },
+    { id: "openapi", name: "OpenAPI 3.1", detail: t("export.openapi"), icon: FileJson },
   ];
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="session-export-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
-          <div><span className="section-kicker">SESSION EXPORT</span><h2 id="session-export-dialog-title">导出会话</h2><p>{session.name} · {session.requestCount} 条请求</p></div>
-          <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <div><span className="section-kicker">SESSION EXPORT</span><h2 id="session-export-dialog-title">{t("export.title")}</h2><p>{t("export.meta", { name: session.name, count: session.requestCount })}</p></div>
+          <button className="icon-button" onClick={onClose} title={t("common.close")}><X size={18} /></button>
         </header>
         <div className="export-format-list">
           {formats.map((item) => {
@@ -2124,7 +2135,7 @@ function SessionExportDialog({
             return <button key={item.id} className={format === item.id ? "is-active" : ""} onClick={() => setFormat(item.id)}><span><Icon size={18} /></span><div><strong>{item.name}</strong><small>{item.detail}</small></div>{format === item.id && <Check size={15} />}</button>;
           })}
         </div>
-        <footer className="dialog-footer"><div><ShieldCheck size={15} /><span>请求、响应与认证信息按目标格式完整保留</span></div><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy} onClick={() => onExport(format)}><Download size={14} />{busy ? "导出中" : "选择位置"}</button></span></footer>
+        <footer className="dialog-footer"><div><ShieldCheck size={15} /><span>{t("export.keep")}</span></div><span className="dialog-actions"><button className="secondary-button" onClick={onClose}>{t("common.cancel")}</button><button className="primary-button" disabled={busy} onClick={() => onExport(format)}><Download size={14} />{busy ? t("export.exporting") : t("export.choose")}</button></span></footer>
       </section>
     </div>
   );
@@ -2179,27 +2190,27 @@ function ConnectDialog({
     status: "active" | "available" | "manual";
     activeLabel?: string;
   }> = [
-    { source: "browser", detail: "代理 Chrome · CDP / JS Hook", status: runtime.proxyRunning ? "available" : "manual" },
+    { source: "browser", detail: t("connect.browserDetail"), status: runtime.proxyRunning ? "available" : "manual" },
     { source: "desktop", detail: runtime.systemProxyEnabled ? `系统代理 · 127.0.0.1:${runtime.proxyPort}` : `手动代理 · 127.0.0.1:${runtime.proxyPort}`, status: runtime.systemProxyActive ? "active" : "manual" },
-    { source: "terminal", detail: "一键启动 · 自动 HTTPS 信任", status: runtime.proxyRunning && runtime.activeSessionId === sessionId ? "active" : "available", activeLabel: "已就绪" },
-    { source: "script", detail: "SDK 或代理参数", status: "manual" },
+    { source: "terminal", detail: t("connect.terminalDetail"), status: runtime.proxyRunning && runtime.activeSessionId === sessionId ? "active" : "available", activeLabel: t("connect.ready") },
+    { source: "script", detail: t("connect.scriptDetail"), status: "manual" },
     {
       source: "mobile",
-      detail: runtime.lanEnabled && lanEndpoint ? `Wi-Fi 代理 · ${lanEndpoint}` : "需开启局域网设备接入",
+      detail: runtime.lanEnabled && lanEndpoint ? `Wi-Fi 代理 · ${lanEndpoint}` : t("connect.needLan"),
       status: runtime.lanEnabled && lanEndpoint ? (runtime.proxyRunning ? "active" : "available") : "manual",
-      activeLabel: "已监听",
+      activeLabel: t("connect.listening"),
     },
     {
       source: "iot",
-      detail: runtime.lanEnabled && lanEndpoint ? `网关代理 · ${lanEndpoint}` : "需开启局域网设备接入",
+      detail: runtime.lanEnabled && lanEndpoint ? `网关代理 · ${lanEndpoint}` : t("connect.needLan"),
       status: runtime.lanEnabled && lanEndpoint ? (runtime.proxyRunning ? "active" : "available") : "manual",
-      activeLabel: "已监听",
+      activeLabel: t("connect.listening"),
     },
     {
       source: "reverse",
-      detail: reverseProxyStatus?.running ? `${reverseProxyStatus.targetUrl} · ${reverseProxyStatus.localUrl}` : "只改请求地址 · 无需客户端 CA",
+      detail: reverseProxyStatus?.running ? `${reverseProxyStatus.targetUrl} · ${reverseProxyStatus.localUrl}` : t("connect.reverseDetail"),
       status: reverseProxyStatus?.running ? "active" : "available",
-      activeLabel: "运行中",
+      activeLabel: t("connect.runningLabel"),
     },
   ];
   useEffect(() => {
@@ -2263,9 +2274,9 @@ function ConnectDialog({
         <header className="dialog-header">
           <div>
             <span className="section-kicker">CAPTURE SOURCES</span>
-            <h2 id="connect-dialog-title">{diagnostics ? "连接诊断" : "流量来源"}</h2>
+            <h2 id="connect-dialog-title">{diagnostics ? t("connect.diagnostics") : t("connect.title")}</h2>
           </div>
-          <div className="connect-dialog__header-actions"><button className="secondary-button" onClick={() => diagnostics ? setDiagnostics(undefined) : void runDiagnostics()} disabled={diagnosing}><Activity className={diagnosing ? "spin" : ""} size={14} />{diagnostics ? "返回来源" : diagnosing ? "诊断中" : "运行诊断"}</button><button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+          <div className="connect-dialog__header-actions"><button className="secondary-button" onClick={() => diagnostics ? setDiagnostics(undefined) : void runDiagnostics()} disabled={diagnosing}><Activity className={diagnosing ? "spin" : ""} size={14} />{diagnostics ? t("connect.back") : diagnosing ? t("connect.running") : t("connect.run")}</button><button className="icon-button" onClick={onClose} title={t("common.close")}><X size={18} /></button></div>
         </header>
         {diagnostics ? <div className="connection-diagnostics">
           <div className="diagnostic-summary"><strong>{diagnostics.checks.filter((check) => check.status === "healthy").length} 项正常</strong><span>{diagnostics.checks.filter((check) => check.status === "warning" || check.status === "error").length} 项需处理</span><small>{new Date(diagnostics.generatedAt).toLocaleTimeString()}</small></div>
@@ -2289,7 +2300,7 @@ function ConnectDialog({
                   <span>{detail}</span>
                 </span>
                 <span className={`source-option__status ${status === "active" ? "is-ready" : ""}`}>
-                  {status === "active" ? (activeLabel || "已接管") : status === "available" ? "可使用" : "配置"}
+                  {status === "active" ? (activeLabel || t("connect.active")) : status === "available" ? t("connect.available") : t("connect.configure")}
                 </span>
                 <ChevronRight className="source-option__arrow" size={14} />
               </button>
@@ -2327,9 +2338,9 @@ function ConnectDialog({
         <footer className="dialog-footer">
           <div>
             <ShieldCheck size={16} />
-            <span>{selectedSource === "reverse" ? "远程 HTTPS 由 ShowNet 校验，客户端无需安装 CA" : "HTTPS 解密由 ShowNet CA 提供"}</span>
+            <span>{selectedSource === "reverse" ? t("connect.caByReverse") : t("connect.caByShownet")}</span>
           </div>
-          <button className="secondary-button" onClick={onSettings}>代理设置</button>
+          <button className="secondary-button" onClick={onSettings}>{t("connect.settings")}</button>
         </footer>
       </section>
     </div>
@@ -2612,19 +2623,19 @@ function CommandPalette({
   let rowIndex = -1;
   return (
     <div className="modal-backdrop command-backdrop" onMouseDown={onClose}>
-      <section className="command-palette" role="dialog" aria-modal="true" aria-label="快捷命令" onMouseDown={(event) => event.stopPropagation()}>
+      <section className="command-palette" role="dialog" aria-modal="true" aria-label={t("shell.commandTitle")} onMouseDown={(event) => event.stopPropagation()}>
         <div className="command-search">
           <Search size={18} />
           <input
             autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索任何功能：抓包、证书、导出、AI、MCP…"
-            aria-label="搜索操作"
+            placeholder={t("shell.paletteSearch")}
+            aria-label={t("shell.paletteSearchLabel")}
           />
           <kbd>ESC</kbd>
         </div>
-        <div className="command-results" role="listbox" aria-label="命令结果" ref={listRef}>
+        <div className="command-results" role="listbox" aria-label={t("shell.paletteResults")} ref={listRef}>
           {groups.map((group) => {
             const GroupIcon = commandGroupIcons[group.id] ?? Network;
             return (
@@ -2658,13 +2669,13 @@ function CommandPalette({
           {flattened.length === 0 && (
             <div className="command-empty">
               <FileSearch size={20} />
-              <span>没有匹配的操作</span>
+              <span>{t("shell.paletteEmpty")}</span>
             </div>
           )}
         </div>
         <div className="command-footer">
           <span><Zap size={13} /> ShowNet Command</span>
-          <span>↑↓ 选择 · ↵ 执行 · ESC 关闭</span>
+          <span>{t("shell.paletteHint")}</span>
         </div>
       </section>
     </div>

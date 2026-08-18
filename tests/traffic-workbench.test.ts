@@ -135,10 +135,10 @@ describe("request lab navigation", () => {
     assert.match(workbench, /sessionId:\s*sessionId\?\.trim\(\) \|\| undefined/);
     assert.doesNotMatch(workbench, /modal-backdrop|workbench-backdrop/);
     assert.match(workbench, /autoCreateFromSelection/);
-    assert.match(workbench, /正在创建可编辑请求/);
-    assert.match(workbench, /aria-label="请求实验室工具"/);
-    assert.match(workbench, /空白请求/);
-    assert.match(workbench, /从抓包创建/);
+    assert.match(workbench, /lab\.creating/);
+    assert.match(workbench, /aria-label=\{t\("lab\.tools"\)\}/);
+    assert.match(workbench, /lab\.blank/);
+    assert.match(workbench, /lab\.fromCapture/);
     assert.match(workbench, /onSelectCapture/);
     assert.match(workbench, /title="草稿列表"/);
     assert.match(workbench, /title="生成代码"/);
@@ -249,7 +249,7 @@ describe("request lab navigation", () => {
     assert.match(types, /export interface BreakpointQueueSnapshot/);
     assert.match(app, /listen\("capture:\/\/breakpoints-changed"/);
     assert.match(app, /className="breakpoint-alert-button"/);
-    assert.match(app, /title="打开人工断点队列"/);
+    assert.match(app, /title=\{t\("shell\.breakpoints"/);
     assert.match(workbench, /<option value="breakpoint">人工断点<\/option>/);
     assert.match(workbench, /min="5" max="300"/);
     assert.match(workbench, /最长等待（秒）/);
@@ -275,7 +275,7 @@ describe("request lab navigation", () => {
     assert.match(traffic, /onCancelRequestQuery: \(\) => void/);
     assert.match(traffic, /className="request-query-progress"[^>]*role="status"/);
     assert.match(traffic, /data-testid="cancel-request-query"/);
-    assert.match(traffic, /cancelling \? "正在停止" : "正在载入"/);
+    assert.match(traffic, /cancelling \? t\("traffic\.stopping"\) : t\("traffic\.loadingMore"\)/);
     assert.match(traffic, /traffic-empty traffic-empty--loading/);
     assert.match(app, /invoke<boolean>\("cancel_request_query", \{ queryId \}\)/);
     assert.match(app, /invoke<RequestQueryCancellationAck>\("cancel_request_query_and_wait", \{ queryId \}\)/);
