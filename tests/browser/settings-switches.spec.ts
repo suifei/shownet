@@ -1,13 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { gotoApp, openView } from "./helpers";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const SCRATCH = process.env.GROK_SCRATCH
-  ?? "/var/folders/8r/lc9rk4817v12c8mgj8k_g42h0000gn/T/grok-goal-2b2b063050af/implementer";
+const evidenceDir = join(root, "test-results", "settings-switches");
 
 function parseRgb(value: string): { r: number; g: number; b: number } | null {
   const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
@@ -70,8 +69,9 @@ test("shipped switch CSS keeps off / on / knob off the settings panel", async ({
     expect(key(on.knob), `${name} knob vs on`).not.toBe(key(on.track));
   }
 
-  await page.screenshot({ path: `${SCRATCH}/settings-switches.png` });
-  await writeFile(`${SCRATCH}/settings-switches.json`, `${JSON.stringify(measured, null, 2)}\n`);
+  await mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: join(evidenceDir, "fixture.png") });
+  await writeFile(join(evidenceDir, "fixture.json"), `${JSON.stringify(measured, null, 2)}\n`);
 });
 
 test("Settings view still mounts the named switch rows", async ({ page }) => {
@@ -84,5 +84,6 @@ test("Settings view still mounts the named switch rows", async ({ page }) => {
     await page.getByRole("heading", { name: /设备接入/ }).click();
   }
   await expect(lan).toBeVisible();
-  await page.screenshot({ path: `${SCRATCH}/settings-switches-app.png` });
+  await mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: join(evidenceDir, "settings-app.png") });
 });
