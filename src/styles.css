@@ -53,6 +53,13 @@
   --accent-bg-strong: #14385a;
   --accent-border: #1f4f78;
 
+  /* Settings switches (#54). Off/on/knob must stay distinct from the glass
+     settings panel (--surface-panel / --material-regular) and from each other.
+     The panel ramp (--surface-sunken, --dark-raised, --success-bg) collapses. */
+  --switch-track-off: var(--text-faint);
+  --switch-track-on: var(--accent-fill);
+  --switch-knob: var(--text-primary);
+
   /* ---- iOS dark semantic colours ---- */
   --danger: #ff453a;            /* systemRed */
   --danger-strong: #ff6961;
@@ -5143,7 +5150,7 @@ kbd {
   flex: 0 0 auto;
   width: 28px;
   height: 16px;
-  background: var(--surface-sunken);
+  background: var(--switch-track-off);
   border-radius: 12px;
   transition: background 150ms ease;
 }
@@ -5155,7 +5162,7 @@ kbd {
   left: 2px;
   width: 12px;
   height: 12px;
-  background: var(--surface-panel);
+  background: var(--switch-knob);
   border-radius: 50%;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   content: "";
@@ -5163,7 +5170,7 @@ kbd {
 }
 
 .switch-row input:checked + i,
-.settings-switch-row input:checked + i { background: var(--dark-raised); }
+.settings-switch-row input:checked + i { background: var(--switch-track-on); }
 .switch-row input:checked + i::after,
 .settings-switch-row input:checked + i::after { transform: translateX(12px); }
 
@@ -7563,9 +7570,9 @@ kbd {
 .mcp-guide-code code { color: var(--success-ink); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mcp-guide-token-switch { display: inline-flex; align-items: center; gap: 5px; color: var(--text-faint); cursor: pointer; font-size: 11px; }
 .mcp-guide-token-switch input { position: absolute; opacity: 0; pointer-events: none; }
-.mcp-guide-token-switch i { position: relative; width: 26px; height: 16px; background: var(--dark-elevated); border-radius: 12px; transition: background 140ms ease; }
-.mcp-guide-token-switch i::after { position: absolute; top: 3px; left: 3px; width: 10px; height: 10px; content: ""; background: var(--surface-sunken); border-radius: 50%; transition: transform 140ms ease; }
-.mcp-guide-token-switch input:checked + i { background: var(--success-bg); }
+.mcp-guide-token-switch i { position: relative; width: 26px; height: 16px; background: var(--switch-track-off); border-radius: 12px; transition: background 140ms ease; }
+.mcp-guide-token-switch i::after { position: absolute; top: 3px; left: 3px; width: 10px; height: 10px; content: ""; background: var(--switch-knob); border-radius: 50%; transition: transform 140ms ease; }
+.mcp-guide-token-switch input:checked + i { background: var(--switch-track-on); }
 .mcp-guide-token-switch input:checked + i::after { transform: translateX(10px); }
 .mcp-guide-token-switch input:disabled + i { opacity: .45; }
 .mcp-guide-token-switch b { font-weight: 500; white-space: nowrap; }
@@ -7607,9 +7614,9 @@ kbd {
 .mcp-client-row__actions .icon-button.is-danger { color: var(--danger-ink); }
 .compact-switch { position: relative; display: block; width: 30px; height: 18px; margin-right: 3px; }
 .compact-switch input { position: absolute; opacity: 0; pointer-events: none; }
-.compact-switch i { position: absolute; inset: 0; background: var(--surface-sunken); border-radius: 14px; transition: background 0.15s ease; }
-.compact-switch i::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; content: ""; background: var(--surface-panel); border-radius: 50%; box-shadow: 0 1px 2px rgba(20, 24, 27, 0.22); transition: transform 0.15s ease; }
-.compact-switch input:checked + i { background: var(--success-bg); }
+.compact-switch i { position: absolute; inset: 0; background: var(--switch-track-off); border-radius: 14px; transition: background 0.15s ease; }
+.compact-switch i::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; content: ""; background: var(--switch-knob); border-radius: 50%; box-shadow: 0 1px 2px rgba(20, 24, 27, 0.22); transition: transform 0.15s ease; }
+.compact-switch input:checked + i { background: var(--switch-track-on); }
 .compact-switch input:checked + i::after { transform: translateX(12px); }
 .mcp-client-editor { display: flex; flex-direction: column; gap: 11px; padding: 12px; background: var(--success-bg); border: 1px solid var(--success-border); border-radius: 10px; }
 .mcp-client-editor .secret-input button.is-active { color: var(--danger-ink); background: var(--danger-bg); }
