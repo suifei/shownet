@@ -28,6 +28,9 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:1420",
     ...devices["Desktop Chrome"],
     viewport: { width: 1440, height: 900 },
+    // Existing specs click Chinese rail labels. Chrome's default on CI is
+    // en-US; pin zh-CN so those specs keep matching the Chinese pack.
+    locale: "zh-CN",
   },
   webServer: {
     command: "npm run dev",

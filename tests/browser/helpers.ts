@@ -1,7 +1,10 @@
 import type { Page } from "@playwright/test";
 
-/** Nav rail labels, in the order they appear. */
-export const VIEWS = ["流量", "浏览器", "实验室", "高级", "AI 分析", "能力", "设置"] as const;
+import { lookupMessage, ZH_PACK } from "../../src/i18n";
+import { chromeLabel, NAV_VIEWS } from "../../src/navChrome";
+
+/** Nav rail labels, in the order they appear (Chinese pack). */
+export const VIEWS = NAV_VIEWS.map((view) => chromeLabel((key) => lookupMessage(ZH_PACK, key), view));
 
 export interface GotoOptions {
   /**
