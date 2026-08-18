@@ -2,6 +2,10 @@
 
 本文盘点产品前后端能力、前后关系与自动化边界，便于开箱使用与二次开发。实现以仓库源码为准。
 
+<p align="center">
+  <img src="assets/readme/hero-workspace.jpg" alt="本地工作台上的会话分析（场景示意）" width="920" />
+</p>
+
 ## 1. 一句话定位
 
 **AI 原生抓包 + 自动证书 + 自动协议逆向 + 一键生成可运行代码。**  
@@ -17,6 +21,31 @@
 | **4 导出** | 确认报告 / Lab 生成 | 算法重放包、多语言客户端、Auto-crawler、集合导入导出 | 报告 / Request Lab / Skill |
 
 零配置最短路径：**浏览器「开始抓包」→ 看流量 → AI 分析 → 导出代码**（无需先装 CA）。
+
+四条常见失败路径（配图是场景示意，界面见 [README 上手](../README.md#十分钟上手)）：
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/readme/scenario-login-split.jpg" alt="登录在系统浏览器成功、抓包链路断开" width="100%" />
+      <br />系统浏览器能登，套上代理就掉线
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/readme/scenario-device-ca.jpg" alt="手机与电脑通过本地证书连在同一条链路上" width="100%" />
+      <br />手机 App 只能看到 CONNECT
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/readme/scenario-signature.jpg" alt="签名链路里的密钥与摘要节点" width="100%" />
+      <br />请求体看懂了，签名永远对不上
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/readme/scenario-to-code.jpg" alt="会话证据整理成可调用的客户端草稿" width="100%" />
+      <br />抓了一下午，还要手写一套客户端
+    </td>
+  </tr>
+</table>
 
 ### 2.1 找不到功能时的两个统一入口
 

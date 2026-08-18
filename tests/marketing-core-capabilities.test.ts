@@ -37,6 +37,19 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
     assert.match(readme, /不宣称.*JA3|位级浏览器 JA3/);
     assert.match(readme, /无需 Root/);
     assert.doesNotMatch(readme, /12306|春秋航空|kyfw\.|ch\.com/i);
+
+    const sceneArt = [
+      "docs/assets/readme/hero-workspace.jpg",
+      "docs/assets/readme/scenario-login-split.jpg",
+      "docs/assets/readme/scenario-device-ca.jpg",
+      "docs/assets/readme/scenario-signature.jpg",
+      "docs/assets/readme/scenario-to-code.jpg",
+    ];
+    for (const path of sceneArt) {
+      assert.ok(readme.includes(path), `README must use scene illustration ${path}`);
+      await assertNonEmptyFile(path, 50_000);
+    }
+    assert.match(readme, /场景示意/);
   });
 
   it("README beginner path is zero-to-success ordered: browser without CA → CA → AI → code", async () => {

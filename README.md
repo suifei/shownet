@@ -30,9 +30,13 @@
 
 产品原则很短：**开箱能抓、证据能回看、结论能复现。** 不关 TLS 解密，不加站点白名单，也不把配置里的 JA4 目标说成「这次握手已经一致」。
 
+<p align="center">
+  <img src="docs/assets/readme/hero-workspace.jpg" alt="本地工作台上的会话分析（场景示意）" width="920" />
+</p>
+
 ## 真实场景
 
-下面用「某某网站 / 某某 App」说话，只谈技术点，不点名具体站点。
+下面用「某某网站 / 某某 App」说话，只谈技术点，不点名具体站点。本节配图是场景示意，不是产品截图；对应界面见 [十分钟上手](#十分钟上手)。
 
 ### 1. 某某网站：扫码登录成功，回跳后又回到登录页
 
@@ -42,7 +46,7 @@
 
 **ShowNet 怎么收：** 默认不注入页面 Hook；Cookie 碎屑会合后再发给源站；正式包装了与 Chrome 对齐的出站。指纹面板只在**测到当次连接**时才说匹配，不会把预置目标当成证据。
 
-<img src="docs/assets/readme/ui-browser.jpg" alt="内嵌浏览器，默认不注入页面 Hook" width="920" />
+<img src="docs/assets/readme/scenario-login-split.jpg" alt="同一会话在系统浏览器成功、在抓包链路断开（场景示意）" width="920" />
 
 ### 2. 某某 App：电脑抓得到元数据，手机 HTTPS 全是乱码或空白
 
@@ -52,7 +56,7 @@
 
 **ShowNet 怎么收：** 每份安装自带独立 Root CA，私钥加密存在本地库。本机一键写入系统信任库；手机扫码页同时给证书和 Wi‑Fi 代理参数。Android 可从电脑推用户证书，**无需 Root**。证书锁定的 App 只采元数据，不会伪造成功解密。
 
-<img src="docs/assets/readme/ui-settings.jpg" alt="本机 Root CA 一键安装与解密策略" width="920" />
+<img src="docs/assets/readme/scenario-device-ca.jpg" alt="手机与电脑通过本地证书连在同一条抓包链路上（场景示意）" width="920" />
 
 ### 3. 某某接口：请求体看懂了，签名永远对不上
 
@@ -62,7 +66,7 @@
 
 **ShowNet 怎么收：** 需要时再打开 JS Hook，把加解密调用和代理请求按时间对齐。AI 分析只读当前会话，报告必须链回 `#序号` 请求。算法重放只写入**用抓包真值跑通**的步骤；识别到但没复现的只列名。
 
-<img src="docs/assets/readme/ui-analysis-graph.jpg" alt="真实分析报告：Phase、Graph 与 Agent 轨迹" width="920" />
+<img src="docs/assets/readme/scenario-signature.jpg" alt="签名链路里的密钥与摘要节点（场景示意）" width="920" />
 
 ### 4. 某某后台：抓了一下午，还要手写一套客户端
 
@@ -72,7 +76,7 @@
 
 **ShowNet 怎么收：** 把样本收成端点，抓到的凭据变成构造函数参数，而不是写死的密钥。能推出登录链路就生成 `authenticate_*()`。缺口进 `GAPS.md`。Request Lab 还可直接生成 Python / JS / Go / cURL。
 
-<img src="docs/assets/readme/ui-lab.jpg" alt="请求实验室：从抓包构建、重放与生成代码" width="920" />
+<img src="docs/assets/readme/scenario-to-code.jpg" alt="会话证据整理成可调用的客户端草稿（场景示意）" width="920" />
 
 ## 十分钟上手
 
@@ -87,6 +91,8 @@
 ### 2. 要解密 App / 系统 HTTPS 时，再安装 CA
 
 设置里「安装 CA」写入本机信任库；手机用扫码页。代理入口默认 `127.0.0.1:8888`。失败可导出 DER/PEM 手动装。
+
+<img src="docs/assets/readme/ui-settings.jpg" alt="本机 Root CA 一键安装与解密策略" width="920" />
 
 ### 3. 用 AI 把会话说清楚
 
@@ -106,9 +112,15 @@
   <img src="docs/assets/readme/ui-analysis-report.jpg" alt="已完成的 API 逆向报告" width="920" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/readme/ui-analysis-graph.jpg" alt="真实分析报告：Phase、Graph 与 Agent 轨迹" width="920" />
+</p>
+
 ### 4. 从报告导出算法重放或客户端代码
 
 分析报告可导出算法重放包；流量或集合可进 Request Lab 生成代码。没证实的步骤会标出来。
+
+<img src="docs/assets/readme/ui-lab.jpg" alt="请求实验室：从抓包构建、重放与生成代码" width="920" />
 
 更完整的功能关系：[功能全景与工作流](docs/feature-map.md)。TLS 预置与控制台：[ClientHello 文档](docs/clienthello-catalog-and-mitm-console.md)。
 
