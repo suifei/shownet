@@ -4,6 +4,18 @@ import { afterEach, vi } from "vitest";
 
 afterEach(cleanup);
 
+// Same pin as playwright.config.ts `locale: "zh-CN"`. jsdom defaults to
+// en-US, and App now resolves the UI pack from navigator.language; existing
+// render specs click 流量 / 实验室 / 设置.
+Object.defineProperty(globalThis.navigator, "language", {
+  configurable: true,
+  get: () => "zh-CN",
+});
+Object.defineProperty(globalThis.navigator, "languages", {
+  configurable: true,
+  get: () => ["zh-CN", "zh"],
+});
+
 // The app renders inside Tauri. Under jsdom there is no native runtime, so the
 // IPC surface has to be stubbed before any component module is imported —
 // several of them call `isTauri()` at module scope.

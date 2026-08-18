@@ -76,6 +76,8 @@ import {
 } from "./liveCaptureDisplay";
 import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatcher, createRequestQueryId, isRequestQueryCancelled, mergeRequestWindowItems, queryPreviewRequestList, REQUEST_LIST_WINDOW_SIZE, requiresLiveQueryRefresh } from "./requestList";
 import { formatBytes } from "./format";
+import { activateUiLocale, createTranslator, detectHostLocale, type Translate } from "./i18n";
+import { chromeLabel, chromeTitle, NAV_VIEWS } from "./navChrome";
 import { toastTone } from "./toastTone";
 import { createProxyErrorQueue, type ProxyErrorQueue } from "./proxyErrorQueue";
 import { defaultCaptureSessionName } from "./sessionPresentation";
@@ -171,21 +173,32 @@ async function waitForRequestQueryCancelButton(timeoutMs = 1_000) {
   return undefined;
 }
 
-const viewMeta: Record<ViewId, { label: string; title: string; icon: typeof Network }> = {
-  traffic: { label: "流量", title: "实时流量", icon: Network },
-  browser: { label: "浏览器", title: "内嵌浏览器", icon: Browser },
-  lab: { label: "实验室", title: "请求实验室", icon: FlaskConical },
-  advanced: { label: "高级", title: "MITM 高级控制台", icon: ShieldCheck },
-  analysis: { label: "AI 分析", title: "AI 智能分析", icon: Sparkles },
-  skills: { label: "能力", title: "Skill 与 MCP", icon: Braces },
-  settings: { label: "设置", title: "抓包与系统设置", icon: Settings },
+const viewIcons: Record<ViewId, typeof Network> = {
+  traffic: Network,
+  browser: Browser,
+  lab: FlaskConical,
+  advanced: ShieldCheck,
+  analysis: Sparkles,
+  skills: Braces,
+  settings: Settings,
 };
 
-const primaryNavigationGroups: Array<{ label: string; views: ViewId[] }> = [
-  { label: "抓包", views: ["traffic", "browser"] },
-  { label: "请求工具", views: ["lab", "advanced"] },
-  { label: "智能能力", views: ["analysis", "skills"] },
-];
+function viewMeta(t: Translate): Record<ViewId, { label: string; title: string; icon: typeof Network }> {
+  return Object.fromEntries(
+    NAV_VIEWS.map((view) => [
+      view,
+      { label: chromeLabel(t, view), title: chromeTitle(t, view), icon: viewIcons[view] },
+    ]),
+  ) as Record<ViewId, { label: string; title: string; icon: typeof Network }>;
+}
+
+function primaryNavigationGroups(t: Translate): Array<{ label: string; views: ViewId[] }> {
+  return [
+    { label: t("navGroup.capture"), views: ["traffic", "browser"] },
+    { label: t("navGroup.tools"), views: ["lab", "advanced"] },
+    { label: t("navGroup.intelligence"), views: ["analysis", "skills"] },
+  ];
+}
 
 
 const fallbackRuntime: RuntimeStatus = {
@@ -281,24 +294,25 @@ function sessionInitial(name: string) {
   return first;
 }
 
-function formatSessionTime(value: string) {
-  if (value === "刚刚" || value.includes("今天") || value.includes("昨天") || value.includes("月")) {
+function formatSessionTime(value: string, t: Translate, intlLocale: string) {
+  if (value === t("clock.justNow") || value.includes(t("clock.today")) || value.includes(t("clock.yesterday"))) {
     return value;
   }
   const timestamp = new Date(value);
   if (Number.isNaN(timestamp.getTime())) return value;
   const now = new Date();
   const elapsed = now.getTime() - timestamp.getTime();
-  if (elapsed >= 0 && elapsed < 60_000) return "刚刚";
+  if (elapsed >= 0 && elapsed < 60_000) return t("clock.justNow");
+  const clock = timestamp.toLocaleTimeString(intlLocale, { hour: "2-digit", minute: "2-digit", hour12: false });
   if (timestamp.toDateString() === now.toDateString()) {
-    return `今天 ${timestamp.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+    return `${t("clock.today")} ${clock}`;
   }
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
   if (timestamp.toDateString() === yesterday.toDateString()) {
-    return `昨天 ${timestamp.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+    return `${t("clock.yesterday")} ${clock}`;
   }
-  return `${timestamp.getMonth() + 1}月${timestamp.getDate()}日`;
+  return timestamp.toLocaleDateString(intlLocale, { month: "numeric", day: "numeric" });
 }
 
 async function runLocalEditCommand(action: string, active: Element | null = document.activeElement) {
@@ -343,6 +357,13 @@ async function runLocalEditCommand(action: string, active: Element | null = docu
 }
 
 function App() {
+  const { t, intlLocale } = useMemo(() => {
+    const locale = detectHostLocale();
+    activateUiLocale(locale);
+    return createTranslator(locale);
+  }, []);
+  const views = viewMeta(t);
+  const navGroups = primaryNavigationGroups(t);
   const [activeView, setActiveView] = useState<ViewId>("traffic");
   const [sessions, setSessions] = useState<Session[]>(hasNativeRuntime ? [] : initialSessions);
   const [activeSessionId, setActiveSessionId] = useState(hasNativeRuntime ? "" : initialSessions[0].id);
@@ -1588,14 +1609,16 @@ function App() {
       disabledReason: "当前没有会话",
       run: () => { setCommandOpen(false); setExportOpen(true); },
     },
-    { id: "go-traffic", title: "实时流量", subtitle: "请求列表、筛选与详情", group: "navigate", keywords: ["traffic", "requests", "list", "ll"], run: () => navigate("traffic") },
-    { id: "go-lab", title: "请求实验室", subtitle: "构建、重放、对比与生成客户端代码", group: "navigate", keywords: ["lab", "request", "replay", "build", "sys"], run: () => navigate("lab") },
+    { id: "go-traffic", title: chromeLabel(t, "traffic"), subtitle: "请求列表、筛选与详情", group: "navigate", keywords: ["traffic", "requests", "list", "ll", "流量"], run: () => navigate("traffic") },
+    { id: "go-browser", title: chromeLabel(t, "browser"), subtitle: "内嵌 Chrome，开始抓包", group: "navigate", keywords: ["browser", "chrome", "embedded", "llq", "浏览器"], run: () => navigate("browser") },
+    { id: "go-lab", title: chromeLabel(t, "lab"), subtitle: "构建、重放、对比与生成客户端代码", group: "navigate", keywords: ["lab", "request", "replay", "build", "sys", "实验室"], run: () => navigate("lab") },
     { id: "go-collections", title: "请求集合", subtitle: "导入 HAR / Postman / OpenAPI，整理接口", group: "navigate", keywords: ["collection", "folder", "postman", "openapi", "qqjh"], run: () => openWorkbench("collections") },
     { id: "go-rules", title: "规则与断点", subtitle: "重写、转发、弱网与人工断点", group: "navigate", keywords: ["rules", "breakpoint", "rewrite", "map remote", "gz"], badge: breakpointQueue.tasks.length ? `${breakpointQueue.tasks.length} 待处理` : undefined, badgeTone: "warn", run: () => openWorkbench("rules") },
     { id: "go-environment", title: "环境变量", subtitle: "多环境与加密 Secret", group: "navigate", keywords: ["environment", "variable", "secret", "env", "hjbl"], run: () => openWorkbench("environment") },
-    { id: "go-analysis", title: "AI 智能分析", subtitle: "自动逆向接口、签名与加密链路", group: "navigate", keywords: ["ai", "analysis", "reverse", "agent", "fx"], run: () => navigate("analysis") },
-    { id: "go-skills", title: "Skill 与 MCP", subtitle: "内置能力契约与 MCP 工具", group: "navigate", keywords: ["skill", "mcp", "agent", "tools", "nl"], run: () => navigate("skills") },
-    { id: "go-advanced", title: "MITM 高级控制台", subtitle: "TLS 指纹、PX 证据与出站预置", group: "navigate", keywords: ["advanced", "mitm", "tls", "ja3", "px", "gj"], run: () => navigate("advanced") },
+    { id: "go-analysis", title: chromeLabel(t, "analysis"), subtitle: "自动逆向接口、签名与加密链路", group: "navigate", keywords: ["ai", "analysis", "reverse", "agent", "fx", "分析"], run: () => navigate("analysis") },
+    { id: "go-skills", title: chromeLabel(t, "skills"), subtitle: "内置能力契约与 MCP 工具", group: "navigate", keywords: ["skill", "mcp", "agent", "tools", "nl", "能力"], run: () => navigate("skills") },
+    { id: "go-advanced", title: chromeLabel(t, "advanced"), subtitle: "TLS 指纹、PX 证据与出站预置", group: "navigate", keywords: ["advanced", "mitm", "tls", "ja3", "px", "gj", "高级"], run: () => navigate("advanced") },
+    { id: "go-settings", title: chromeLabel(t, "settings"), subtitle: "证书、代理、AI 与存储", group: "navigate", keywords: ["settings", "preferences", "sz", "设置"], run: () => navigate("settings") },
     {
       id: "install-ca",
       title: "安装 HTTPS 证书",
@@ -1638,20 +1661,21 @@ function App() {
           <img src={shownetAppIcon} alt="" aria-hidden="true" />
         </button>
         <div className="nav-rail__items">
-          {primaryNavigationGroups.map((group) => (
+          {navGroups.map((group) => (
             <div className="nav-rail__group" role="group" aria-label={group.label} key={group.label}>
               {group.views.map((view) => {
-                const Icon = viewMeta[view].icon;
+                const Icon = views[view].icon;
                 return (
                   <button
                     key={view}
+                    data-nav={view}
                     className={`nav-rail__item ${view === "lab" ? "nav-rail__item--lab" : ""} ${activeView === view ? "is-active" : ""}`}
                     onClick={() => navigate(view)}
-                    title={viewMeta[view].label}
-                    aria-label={viewMeta[view].label}
+                    title={views[view].label}
+                    aria-label={views[view].label}
                   >
                     <Icon size={20} />
-                    <span>{viewMeta[view].label}</span>
+                    <span>{views[view].label}</span>
                   </button>
                 );
               })}
@@ -1668,12 +1692,14 @@ function App() {
             <span>命令</span>
           </button>
           <button
+            data-nav="settings"
             className={`nav-rail__item ${activeView === "settings" ? "is-active" : ""}`}
             onClick={() => navigate("settings")}
-            title="设置"
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
           >
             <Settings size={20} />
-            <span>设置</span>
+            <span>{t("nav.settings")}</span>
           </button>
         </div>
       </nav>
@@ -1758,7 +1784,7 @@ function App() {
                     <span className="session-item__body">
                       <span className="session-item__title"><strong>{session.name}</strong>{isCaptureTarget && <em>抓包中</em>}</span>
                       <span className="session-item__meta">
-                        <span>{formatSessionTime(session.createdAt)} · {session.requestCount} 条</span>
+                        <span>{formatSessionTime(session.createdAt, t, intlLocale)} · {session.requestCount} 条</span>
                         <span className="session-sources">
                           {session.sources.slice(0, 4).map((source) => {
                             const Icon = sourceIcons[source];
@@ -1801,7 +1827,7 @@ function App() {
                     setActiveSessionId(session.id);
                     setActiveView("analysis");
                   }}
-                  title={`打开最近 AI 报告${session.latestAnalysisUpdatedAt ? ` · ${formatSessionTime(new Date(session.latestAnalysisUpdatedAt).toISOString())}` : ""}`}
+                  title={`打开最近 AI 报告${session.latestAnalysisUpdatedAt ? ` · ${formatSessionTime(new Date(session.latestAnalysisUpdatedAt).toISOString(), t, intlLocale)}` : ""}`}
                   aria-label={`打开 ${session.name} 的最近 AI 报告`}
                 >
                   <Sparkles size={11} />
@@ -1834,7 +1860,7 @@ function App() {
                 ? `浏览器写入 · ${captureSession.name}`
                 : viewingCaptureSession ? `${activeSession.name} · 抓包中` : `正在查看 · ${activeSession.name}`}
             </span>
-            <h1>{viewMeta[activeView].title}</h1>
+            <h1>{views[activeView].title}</h1>
           </div>
           <div className="topbar__actions">
             {capturing && captureSession && !viewingCaptureSession && (

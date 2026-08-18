@@ -11,6 +11,18 @@
 /** Requests at or above this take the slow treatment, everywhere. */
 export const SLOW_REQUEST_MS = 1_000;
 
+/** Chrome clock locale. Written by the language-pack activator; default zh-CN. */
+let clockLocale = "zh-CN";
+
+export function setClockLocale(locale: string): void {
+  const trimmed = locale.trim();
+  if (trimmed) clockLocale = trimmed;
+}
+
+export function getClockLocale(): string {
+  return clockLocale;
+}
+
 /**
  * The grid highlight used `> 1000` while the 慢请求 filter used `>= 1000`, so a
  * request timed at exactly 1000 ms matched the filter but rendered unmarked.
@@ -46,7 +58,7 @@ export function formatClock(value: number | string | null | undefined, withMilli
   if (value === null || value === undefined) return withMillis ? "--:--:--.---" : "--:--:--";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return withMillis ? "--:--:--.---" : "--:--:--";
-  const clock = date.toLocaleTimeString("zh-CN", { hour12: false });
+  const clock = date.toLocaleTimeString(clockLocale, { hour12: false });
   return withMillis ? `${clock}.${String(date.getMilliseconds()).padStart(3, "0")}` : clock;
 }
 
