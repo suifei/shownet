@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import App from "../../src/App";
+import { lookupMessage, ZH_PACK } from "../../src/i18n";
+import { chromeLabel } from "../../src/navChrome";
 import { filterCommands, groupCommands, type CommandAction } from "../../src/commandRegistry";
 
 vi.mock("../../src/components/BrowserView", () => ({ BrowserView: () => null }));
@@ -121,7 +123,8 @@ describe("command palette ranking", () => {
     const palette = screen.getByRole("dialog", { name: "快捷命令" });
     const input = within(palette).getByRole("textbox");
 
-    for (const [query, expected] of [["ca", "安装 HTTPS 证书"], ["cert", "安装 HTTPS 证书"], ["har", "导出为 HAR / Postman / OpenAPI"], ["ja3", "MITM 高级控制台"]] as const) {
+    const advancedTitle = chromeLabel((key) => lookupMessage(ZH_PACK, key), "advanced");
+    for (const [query, expected] of [["ca", "安装 HTTPS 证书"], ["cert", "安装 HTTPS 证书"], ["har", "导出为 HAR / Postman / OpenAPI"], ["ja3", advancedTitle]] as const) {
       await userEvent.clear(input);
       await userEvent.type(input, query);
       const first = within(palette).getAllByRole("option")[0];
