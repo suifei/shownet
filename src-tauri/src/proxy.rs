@@ -7356,12 +7356,13 @@ mod tests {
     /// the Host header (both come from `host_header_authority`).
     #[test]
     fn every_h2_forward_path_strips_before_capture() {
-        // Two independent forwarding paths reach an h2 origin: the MITM tunnel
-        // and the explicit-proxy forward. Both can be handed an HTTP/1.1 request
-        // carrying connection-specific headers, and hyper rejects either as a
-        // bare "http2 error". The second path was missed the first time round.
-        // Counting occurrences would count this test's own string literal, so
-        // each call site is located by the code that follows it instead.
+        // Three independent forwarding paths reach an origin: the MITM tunnel,
+        // explicit-proxy HTTPS WebSocket (wreq), and the remaining explicit
+        // forward. All three can be handed HTTP/2 cookie crumbs, and wreq's
+        // RequestBuilder keeps only the last same-name header. The WSS path was
+        // missed when it first landed. Counting occurrences would count this
+        // test's own string literal, so each call site is located by the code
+        // that follows it instead.
         let source = production_source();
         let stripped = source
             .matches("strip_http2_forbidden_headers(&mut parts.headers);")
@@ -7381,8 +7382,8 @@ mod tests {
             "both the MITM and explicit-proxy forward paths must strip h2 hop-by-hop headers"
         );
         assert_eq!(
-            collapsed_before_capture, 2,
-            "both forward paths must join cookie crumbs before capture"
+            collapsed_before_capture, 3,
+            "MITM, explicit WSS, and explicit HTTP(S) must join cookie crumbs before capture"
         );
     }
 
