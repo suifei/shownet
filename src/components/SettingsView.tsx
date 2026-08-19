@@ -74,6 +74,7 @@ import {
   promptBudgetBytes,
 } from "../aiContextBudget";
 import type { AgentRuntimeStatus, AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
+import { displayedClientHelloPresetId } from "../clientHelloPreset.ts";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
 import {
@@ -1921,7 +1922,7 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
                 <span>{t("settings.upstream.clientHello")}</span>
                 <select
                   disabled={savingOutboundTls}
-                  value={outboundTls?.presetId ?? "chrome150"}
+                  value={displayedClientHelloPresetId(outboundTls)}
                   onChange={(event) => {
                     const presetId = event.target.value;
                     void (async () => {

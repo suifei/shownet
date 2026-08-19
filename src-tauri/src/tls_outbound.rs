@@ -326,9 +326,6 @@ pub fn resolve_profile_for_connection(
 ) -> (OutboundTlsProfile, bool) {
     if auto_from_inbound() {
         if let Some(fp) = inbound {
-            let preset_id =
-                tls_clienthello_catalog::select_preset_from_inbound(&fp.ja4, &fp.alpn, fp.grease);
-            let _ = tls_clienthello_catalog::set_active_preset_id(preset_id);
             return (select_profile_from_inbound(fp), true);
         }
     }
@@ -343,7 +340,7 @@ pub fn resolve_preset_for_connection(
         if let Some(fp) = inbound {
             let id =
                 tls_clienthello_catalog::select_preset_from_inbound(&fp.ja4, &fp.alpn, fp.grease);
-            if let Ok(p) = set_active_preset(id) {
+            if let Ok(p) = tls_clienthello_catalog::get_preset(id) {
                 return (p, true);
             }
         }
@@ -1324,5 +1321,36 @@ mod tests {
         let st = status_json();
         assert_eq!(st["engine"], "impersonate");
         assert_eq!(st["impersonateRequested"], true);
+    }
+
+    #[test]
+    fn inbound_auto_pick_does_not_overwrite_user_chrome151_selection() {
+        let _guard = preset_lock();
+        let previous_auto = auto_from_inbound();
+        set_auto_from_inbound(true);
+        set_active_preset("chrome151").unwrap();
+        let inbound = sample_inbound("t13d1516h2_8daaf6152771_b0b2ea4df27e", &["h2"], true);
+        assert_eq!(
+            tls_clienthello_catalog::select_preset_from_inbound(
+                &inbound.ja4,
+                &inbound.alpn,
+                inbound.grease
+            ),
+            "chrome150",
+            "pre-fix mapper still returns chrome150 for h2 chrome-like inbound"
+        );
+        let (_preset, from_inbound) = resolve_preset_for_connection(Some(&inbound));
+        assert!(from_inbound);
+        assert_eq!(
+            active_preset_id(),
+            "chrome151",
+            "visiting a page must not clobber the user's ClientHello selection"
+        );
+        assert_eq!(status_json()["presetId"], "chrome151");
+        let (_profile, selected) = resolve_profile_for_connection(Some(&inbound));
+        assert!(selected);
+        assert_eq!(active_preset_id(), "chrome151");
+        set_auto_from_inbound(previous_auto);
+        set_active_preset("chrome150").unwrap();
     }
 }

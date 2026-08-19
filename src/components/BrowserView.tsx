@@ -33,6 +33,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CompositionEvent, FormEvent, KeyboardEvent, PointerEvent, WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cdpInsertTextPayload, shouldForwardRawKeyToCdp } from "../browserIme.ts";
 import { buildCdpFileDragData, isShownetSessionPath, mapScreencastPoint } from "../browserDrag";
 import { DEFAULT_BROWSER_URL, readStoredBrowserUrl, writeStoredBrowserUrl } from "../browserSessionUrl";
 import { userAgentMetadataFor } from "../browserIdentity";
@@ -1121,7 +1122,6 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
       // Focus remote document (CDP) + local IME capture surface for Chinese composition (P5).
       ensureRemotePageFocus();
       imeInputRef.current?.focus({ preventScroll: true });
-      event.currentTarget.focus({ preventScroll: true });
       event.currentTarget.setPointerCapture(event.pointerId);
       activePointerRef.current = event.pointerId;
       activePointerButtonRef.current = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
@@ -1340,15 +1340,19 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
   const commitComposition = (event: CompositionEvent<HTMLTextAreaElement>) => {
     composingRef.current = false;
     const text = event.data;
-    if (text && cdpSendRef.current) cdpSendRef.current("Input.insertText", { text });
+    const payload = cdpInsertTextPayload(text);
+    if (payload && cdpSendRef.current) cdpSendRef.current(payload.method, payload.params);
     skipCompositionInputRef.current = true;
     window.setTimeout(() => { skipCompositionInputRef.current = false; }, 0);
     event.currentTarget.value = "";
+    imeInputRef.current?.focus({ preventScroll: true });
   };
 
   const dispatchKey = (type: "keyDown" | "keyUp", event: KeyboardEvent<HTMLDivElement>) => {
     if (!cdpSendRef.current) return;
-    if (type === "keyDown" && (event.nativeEvent.isComposing || composingRef.current)) {
+    const composing = event.nativeEvent.isComposing || composingRef.current;
+    const imeSurfaceFocused = event.target === imeInputRef.current;
+    if (type === "keyDown" && composing) {
       suppressedCompositionKeys.current.add(event.code);
       event.stopPropagation();
       return;
@@ -1402,6 +1406,16 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
       event.preventDefault();
       event.stopPropagation();
       if (type === "keyDown") reload();
+      return;
+    }
+    if (!shouldForwardRawKeyToCdp({
+      composing,
+      key: event.key,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      imeSurfaceFocused,
+    })) {
+      event.stopPropagation();
       return;
     }
     event.preventDefault();
@@ -1704,8 +1718,8 @@ export function BrowserView({ active, capturing, sessionId, sessionName, onAnaly
                     event.currentTarget.value = "";
                     return;
                   }
-                  const text = event.currentTarget.value;
-                  if (text && cdpSendRef.current) cdpSendRef.current("Input.insertText", { text });
+                  const payload = cdpInsertTextPayload(event.currentTarget.value);
+                  if (payload && cdpSendRef.current) cdpSendRef.current(payload.method, payload.params);
                   event.currentTarget.value = "";
                 }}
               />

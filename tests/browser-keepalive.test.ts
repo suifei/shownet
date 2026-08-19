@@ -80,6 +80,10 @@ describe("embedded browser keep-alive (P2)", () => {
     assert.match(browser, /ensureRemotePageFocus/);
     assert.match(browser, /Emulation\.setFocusEmulationEnabled/);
     assert.match(browser, /imeInputRef\.current\?\.focus/);
+    assert.doesNotMatch(
+      browser,
+      /imeInputRef\.current\?\.focus\(\{ preventScroll: true \}\);\s*event\.currentTarget\.focus/,
+    );
     assert.match(browser, /browser-statusbar__hint/);
   });
 

@@ -23,6 +23,7 @@ import {
   type ConsoleTabId,
   type WorkflowPhaseId,
 } from "../advancedConsoleCapabilities";
+import { displayedClientHelloPresetId } from "../clientHelloPreset.ts";
 import type {
   BrowserHookEvent,
   OutboundTlsProfileStatus,
@@ -716,7 +717,7 @@ export function AdvancedConsoleView({
                   <span>{t("advanced.versionedPreset")}</span>
                   <select
                     disabled={saving}
-                    value={outboundTls?.presetId ?? "chrome150"}
+                    value={displayedClientHelloPresetId(outboundTls)}
                     onChange={(e) => void setTlsProfile(e.target.value)}
                   >
                     {(outboundTls?.presets ?? []).length > 0
