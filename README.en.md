@@ -21,7 +21,7 @@
   <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet live traffic" width="920" />
 </p>
 
-Current release: [v0.4.32](https://github.com/suifei/shownet/releases/tag/v0.4.32). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
+Current release: [v0.4.33](https://github.com/suifei/shownet/releases/tag/v0.4.33). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
 
 The [Chinese README](./README.md) is the default GitHub homepage. This English page is the same product story for a global audience.
 
