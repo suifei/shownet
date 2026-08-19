@@ -96,7 +96,7 @@ describe("chrome lookup wiring", () => {
     assert.notEqual(chromeLabel(zh, "settings"), chromeLabel(en, "settings"));
   });
 
-  it("App nav and palette titles call chrome lookup, not only Chinese literals", () => {
+  it("App nav and palette titles call chrome lookup, not only Chinese literals", async () => {
     assert.match(app, /chromeLabel\(t,/);
     assert.match(app, /resolveUiLocale/);
     assert.match(app, /createTranslator/);
@@ -111,6 +111,8 @@ describe("chrome lookup wiring", () => {
     assert.doesNotMatch(app, /<span>设置<\/span>/);
     assert.doesNotMatch(app, /<span>命令<\/span>/);
     assert.match(app, /<LocaleSwitcher onChange=\{applyUiLocale\} \/>/);
+    const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+    assert.match(css, /\.topbar\s*\{[^}]*z-index:\s*40/s);
   });
 
   it("lets a stored pack override the host locale", () => {
