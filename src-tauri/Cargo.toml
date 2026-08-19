@@ -61,7 +61,7 @@ tokio-rustls = "0.26"
 # Only compiled with the `impersonate-boring` feature. wreq is a byte-exact
 # browser-impersonation HTTP client (its own boring2 + a patched h2 that emits
 # Chrome's pseudo-header order); it backs the impersonate egress.
-wreq = { version = "6.0.0-rc.29", optional = true, features = ["socks", "stream"] }
+wreq = { version = "6.0.0-rc.29", optional = true, features = ["socks", "stream", "ws"] }
 wreq-util = { version = "3.0.0-rc.14", optional = true }
 sync_wrapper = "1"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }

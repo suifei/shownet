@@ -2438,9 +2438,8 @@ fn dedicated_request_sender_factory(
             let profile = route.tls_profile;
             let _ = default_profile;
             // Normal HTTPS reconnects use wreq so they keep the same Chrome JA4
-            // as the shared tunnel. WebSocket upgrades still need a raw TLS
-            // stream for Connection: Upgrade; that narrow arm stays on the
-            // rustls connector only when prefer_http2 is false.
+            // as the shared tunnel. WebSocket upgrades use wreq's websocket
+            // builder at the call site, not this factory.
             #[cfg(feature = "impersonate-boring")]
             if route.scheme == "https" && route.prefer_http2 {
                 let client = crate::impersonate_egress::build_client_for_route(
@@ -2765,6 +2764,20 @@ async fn forward_mitm_https(
         // the shared h2 sender carrying Upgrade headers, which is the very
         // "http2 error" this path exists to avoid.
         let use_dedicated_base = authority_changed || websocket;
+        #[cfg(feature = "impersonate-boring")]
+        let impersonate_client = if websocket && scheme == "https" {
+            let slot = sender.lock().await;
+            match &*slot {
+                HttpsRequestSender::Impersonate { client, .. } => Some(client.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        #[cfg(feature = "impersonate-boring")]
+        let impersonate_websocket = impersonate_client.is_some();
+        #[cfg(not(feature = "impersonate-boring"))]
+        let impersonate_websocket = false;
         let outbound_profile =
             tls_outbound::OutboundTlsProfile::parse(tls_fingerprint.outbound.profile.as_str());
         let dedicated_route = DedicatedRequestRoute {
@@ -2824,7 +2837,7 @@ async fn forward_mitm_https(
         // connection it actually goes out on. Deciding that from the client's
         // protocol, or from the shared connection while sending on a dedicated
         // one, produces a request the origin rejects outright.
-        let mut dedicated_sender = if use_dedicated {
+        let mut dedicated_sender = if use_dedicated && !impersonate_websocket {
             Some(dedicated_sender_factory(dedicated_route.clone()).await?)
         } else {
             None
@@ -2921,6 +2934,85 @@ async fn forward_mitm_https(
             extended_websocket,
         );
         runtime_request.request_headers = request_headers.clone();
+        #[cfg(feature = "impersonate-boring")]
+        if impersonate_websocket {
+            let path_and_query = parts
+                .uri
+                .path_and_query()
+                .map(|item| item.as_str().to_string())
+                .unwrap_or_else(|| "/".to_string());
+            let url = format!(
+                "wss://{}{path_and_query}",
+                host_header_authority("https", tls_identity_host, tls_identity_port)
+            );
+            let header_pairs: Vec<(String, Vec<u8>)> = parts
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+                .collect();
+            let upgraded = impersonate_client
+                .expect("checked above")
+                .websocket_upgrade(&url, &header_pairs)
+                .await?;
+            let mut builder = Response::builder().status(upgraded.status);
+            for (name, value) in &upgraded.headers {
+                if name.eq_ignore_ascii_case("transfer-encoding") {
+                    continue;
+                }
+                builder = builder.header(name.as_str(), value.as_slice());
+            }
+            let (mut response, outbound) = (
+                builder
+                    .body(empty_body())
+                    .map_err(|error| format!("组装 WebSocket 响应失败: {error}"))?,
+                upgraded.socket,
+            );
+            response.headers_mut().remove("sec-websocket-extensions");
+            if extended_websocket {
+                *response.status_mut() = StatusCode::OK;
+                response.headers_mut().remove("sec-websocket-accept");
+                strip_http2_forbidden_headers(response.headers_mut());
+            }
+            let response_headers = headers_to_entries(response.headers());
+            let mut handshake = websocket_handshake_input(
+                &request_id,
+                &session_id,
+                &source,
+                peer,
+                method,
+                "wss",
+                host,
+                port,
+                path,
+                query,
+                tls_version,
+                Some(tls_fingerprint),
+                request_headers,
+                response_headers,
+                start.elapsed().as_millis() as i64,
+            );
+            if extended_websocket {
+                handshake.status = StatusCode::OK.as_u16() as i64;
+                handshake.protocol = "h2".to_string();
+            } else {
+                handshake.status = response.status().as_u16() as i64;
+            }
+            capture_sink(handshake);
+            if let Some(inbound_upgrade) = inbound_upgrade {
+                spawn_impersonate_websocket_relay(
+                    inbound_upgrade,
+                    outbound,
+                    session_id,
+                    source,
+                    format!("proxy:{}", peer.ip()),
+                    request_id,
+                    event_sink,
+                    error_sink.clone(),
+                );
+            }
+            let (parts, _) = response.into_parts();
+            return Ok(Response::from_parts(parts, empty_body()));
+        }
         // Decided before the body is consumed by TapBody below; the retry needs
         // to know whether the request can be rebuilt, and by then it cannot ask.
         let replay = replayable_over_http11(&parts, &editable_request_body)
@@ -4725,6 +4817,195 @@ fn spawn_websocket_relay(
     });
 }
 
+#[cfg(feature = "impersonate-boring")]
+fn spawn_impersonate_websocket_relay(
+    inbound_upgrade: hyper::upgrade::OnUpgrade,
+    mut upstream: wreq::ws::WebSocket,
+    session_id: String,
+    source: String,
+    source_instance_id: String,
+    request_id: String,
+    event_sink: EventSink,
+    error_sink: ErrorSink,
+) {
+    tauri::async_runtime::spawn(async move {
+        let result: Result<(), String> = async {
+            let inbound = inbound_upgrade
+                .await
+                .map_err(|error| format!("WebSocket 升级失败: {error}"))?;
+            let config = WebSocketConfig::default().write_buffer_size(0);
+            let client =
+                WebSocketStream::from_raw_socket(TokioIo::new(inbound), Role::Server, Some(config))
+                    .await;
+            let mut capture = WebSocketCapture {
+                session_id,
+                source,
+                source_instance_id,
+                request_id,
+                event_sink,
+                event_count: 0,
+                captured_bytes: 0,
+                stopped: false,
+            };
+            relay_impersonate_websocket(client, &mut upstream, &mut capture).await
+        }
+        .await;
+        if let Err(error) = result {
+            error_sink(error);
+        }
+    });
+}
+
+#[cfg(feature = "impersonate-boring")]
+async fn relay_impersonate_websocket<ClientIo>(
+    client: WebSocketStream<ClientIo>,
+    upstream: &mut wreq::ws::WebSocket,
+    capture: &mut WebSocketCapture,
+) -> Result<(), String>
+where
+    ClientIo: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut client_write, mut client_read) = client.split();
+    loop {
+        tokio::select! {
+            incoming = client_read.next() => {
+                let Some(message) = incoming else {
+                    let _ = SinkExt::close(upstream).await;
+                    return Ok(());
+                };
+                let Some(message) = websocket_step(message, "读取客户端 WebSocket 消息失败")? else {
+                    return Ok(());
+                };
+                capture.record("client_to_server", &message);
+                match message {
+                    Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
+                        if let Some(forward) = to_wreq_ws_message(message) {
+                            if let Err(error) = upstream.send(forward).await {
+                                return Err(format!("wreq 出站 WebSocket 发送失败: {error}"));
+                            }
+                        }
+                    }
+                    Message::Ping(_) => {
+                        // Same as the rustls relay: tungstenite already answered
+                        // the browser; do not invent a second Ping toward origin.
+                        if websocket_step(client_write.flush().await, "回复客户端 WebSocket Ping 失败")?.is_none() {
+                            return Ok(());
+                        }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(frame) => {
+                        let _ = client_write.flush().await;
+                        if let Some(forward) = to_wreq_ws_message(Message::Close(frame)) {
+                            let _ = upstream.send(forward).await;
+                        }
+                        let _ = SinkExt::close(upstream).await;
+                        return Ok(());
+                    }
+                }
+            }
+            incoming = upstream.next() => {
+                let Some(message) = incoming else {
+                    let _ = client_write.close().await;
+                    return Ok(());
+                };
+                let message = message.map_err(|error| format!("wreq 出站 WebSocket 读取失败: {error}"))?;
+                if let Some(forward) = from_wreq_ws_message(message) {
+                    capture.record("server_to_client", &forward);
+                    match forward {
+                        Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
+                            if websocket_step(client_write.send(forward).await, "转发上游 WebSocket 消息失败")?.is_none() {
+                                return Ok(());
+                            }
+                        }
+                        Message::Ping(_) | Message::Pong(_) => {
+                            // wreq/tungstenite answers origin Ping itself.
+                        }
+                        Message::Close(frame) => {
+                            let _ = client_write.send(Message::Close(frame)).await;
+                            let _ = client_write.flush().await;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "impersonate-boring")]
+fn to_wreq_ws_message(message: Message) -> Option<wreq::ws::message::Message> {
+    match message {
+        Message::Text(text) => Some(wreq::ws::message::Message::text(text.to_string())),
+        Message::Binary(data) => Some(wreq::ws::message::Message::binary(data)),
+        Message::Ping(data) => Some(wreq::ws::message::Message::ping(data)),
+        Message::Pong(data) => Some(wreq::ws::message::Message::pong(data)),
+        Message::Close(frame) => Some(match frame {
+            Some(frame) => wreq::ws::message::Message::close(wreq::ws::message::CloseFrame {
+                code: u16::from(frame.code).into(),
+                reason: frame.reason.as_str().to_string().into(),
+            }),
+            None => wreq::ws::message::Message::close(None),
+        }),
+        Message::Frame(_) => None,
+    }
+}
+
+#[cfg(feature = "impersonate-boring")]
+fn from_wreq_ws_message(message: wreq::ws::message::Message) -> Option<Message> {
+    match message {
+        wreq::ws::message::Message::Text(text) => Some(Message::Text(text.as_str().into())),
+        wreq::ws::message::Message::Binary(data) => Some(Message::Binary(data)),
+        wreq::ws::message::Message::Ping(data) => Some(Message::Ping(data)),
+        wreq::ws::message::Message::Pong(data) => Some(Message::Pong(data)),
+        wreq::ws::message::Message::Close(frame) => Some(Message::Close(frame.map(|frame| {
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: u16::from(frame.code).into(),
+                reason: frame.reason.as_str().into(),
+            }
+        }))),
+    }
+}
+
+#[cfg(feature = "impersonate-boring")]
+async fn impersonate_origin_websocket(
+    upstream: &EffectiveUpstreamProxy,
+    connection_host: &str,
+    connection_port: u16,
+    tls_identity_host: &str,
+    tls_identity_port: u16,
+    path_and_query: &str,
+    headers: &HeaderMap,
+) -> Result<(Response<ProxyBody>, wreq::ws::WebSocket), String> {
+    let client = crate::impersonate_egress::build_client_for_route(
+        upstream,
+        connection_host,
+        connection_port,
+        tls_identity_host,
+        tls_identity_port,
+    )
+    .await?;
+    let url = format!(
+        "wss://{}{path_and_query}",
+        host_header_authority("https", tls_identity_host, tls_identity_port)
+    );
+    let header_pairs: Vec<(String, Vec<u8>)> = headers
+        .iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+        .collect();
+    let upgraded = client.websocket_upgrade(&url, &header_pairs).await?;
+    let mut builder = Response::builder().status(upgraded.status);
+    for (name, value) in &upgraded.headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            continue;
+        }
+        builder = builder.header(name.as_str(), value.as_slice());
+    }
+    let response = builder
+        .body(empty_body())
+        .map_err(|error| format!("组装 WebSocket 响应失败: {error}"))?;
+    Ok((response, upgraded.socket))
+}
+
 async fn relay_websocket<ClientIo, UpstreamIo>(
     client: WebSocketStream<ClientIo>,
     upstream: WebSocketStream<UpstreamIo>,
@@ -5017,38 +5298,105 @@ async fn forward_http(
     let (tls_identity_host, tls_identity_port) = active_mirror_route
         .map(RuntimeMirrorRoute::identity_target)
         .unwrap_or((&host, port));
+    #[cfg(feature = "impersonate-boring")]
+    if websocket && scheme == "https" {
+        parts.headers.remove("x-shownet-replay-context");
+        parts.headers.remove(REVERSE_PROXY_CONTEXT_HEADER);
+        parts.uri = origin_form_uri(&parts.uri)?;
+        parts.version = Version::HTTP_11;
+        let (host_header_host, host_header_port) = active_mirror_route
+            .map(RuntimeMirrorRoute::identity_target)
+            .unwrap_or((&host, port));
+        let replace_host_header = authority_changed && !control.redirect_preserve_host
+            || active_mirror_route.is_some_and(|route| route.identity == MirrorIdentity::Target);
+        ensure_host_header(
+            &mut parts.headers,
+            &scheme,
+            host_header_host,
+            host_header_port,
+            replace_host_header,
+        )?;
+        parts.headers.remove("proxy-authorization");
+        parts.headers.remove("proxy-connection");
+        parts.headers.remove("sec-websocket-extensions");
+        collapse_cookie_headers(&mut parts.headers);
+        request_headers = request_headers_for_capture(
+            &parts.headers,
+            active_mirror_route,
+            &scheme,
+            &host,
+            port,
+            false,
+        );
+        let path_and_query = parts
+            .uri
+            .path_and_query()
+            .map(|item| item.as_str().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let (mut response, outbound) = impersonate_origin_websocket(
+            &upstream,
+            connection_host,
+            connection_port,
+            tls_identity_host,
+            tls_identity_port,
+            &path_and_query,
+            &parts.headers,
+        )
+        .await?;
+        response.headers_mut().remove("sec-websocket-extensions");
+        let response_headers = headers_to_entries(response.headers());
+        capture_sink(websocket_handshake_input(
+            &request_id,
+            &session_id,
+            &source,
+            peer,
+            method,
+            "wss",
+            host,
+            port,
+            path,
+            query,
+            "TLS 1.3 (wreq/Chrome)".to_string(),
+            None,
+            request_headers,
+            response_headers,
+            start.elapsed().as_millis() as i64,
+        ));
+        if let Some(inbound_upgrade) = inbound_upgrade {
+            spawn_impersonate_websocket_relay(
+                inbound_upgrade,
+                outbound,
+                session_id,
+                source,
+                source_instance_id,
+                request_id,
+                event_sink,
+                error_sink,
+            );
+        }
+        let (parts, _) = response.into_parts();
+        return Ok(Response::from_parts(parts, empty_body()));
+    }
     let mut sender = if scheme == "https" {
         let force_http11 = tls_outbound::origin_force_http11_for_host(tls_identity_host);
         #[cfg(feature = "impersonate-boring")]
         {
-            if websocket {
-                // Upgrade needs a raw TLS stream; wreq cannot terminate
-                // Connection: Upgrade. Prefer MITM tunnel's dedicated path.
-                let stream =
-                    connect_destination(&upstream, connection_host, connection_port).await?;
-                let profile = tls_outbound::global_profile();
-                let verified =
-                    connect_verified_tls_measured(stream, tls_identity_host, profile, true).await?;
-                handshake_origin_https(verified.stream, verified.negotiated_alpn.as_deref(), false)
-                    .await?
-            } else {
-                // Explicit / replay HTTPS must match MITM Chrome JA4.
-                // Do not pre-dial: wreq opens the only origin TCP.
-                let _ = force_http11;
-                let client = crate::impersonate_egress::build_client_for_route(
-                    &upstream,
-                    connection_host,
-                    connection_port,
-                    tls_identity_host,
-                    tls_identity_port,
-                )
-                .await?;
-                let base = format!(
-                    "https://{}",
-                    host_header_authority("https", tls_identity_host, tls_identity_port)
-                );
-                HttpsRequestSender::Impersonate { client, base }
-            }
+            // Explicit / replay HTTPS must match MITM Chrome JA4.
+            // Do not pre-dial: wreq opens the only origin TCP.
+            let _ = force_http11;
+            let client = crate::impersonate_egress::build_client_for_route(
+                &upstream,
+                connection_host,
+                connection_port,
+                tls_identity_host,
+                tls_identity_port,
+            )
+            .await?;
+            let base = format!(
+                "https://{}",
+                host_header_authority("https", tls_identity_host, tls_identity_port)
+            );
+            HttpsRequestSender::Impersonate { client, base }
         }
         #[cfg(not(feature = "impersonate-boring"))]
         {
@@ -7069,6 +7417,14 @@ mod tests {
             source.contains("let use_dedicated_base = authority_changed || websocket;"),
             "any websocket must take the dedicated HTTP/1.1 route"
         );
+        assert!(
+            source.contains("impersonate_origin_websocket("),
+            "HTTPS WebSocket must use the Chrome TLS websocket builder, not rustls"
+        );
+        assert!(
+            !source.contains("wreq cannot terminate"),
+            "the rustls Upgrade fallback is no longer the product HTTPS WebSocket path"
+        );
     }
 
     #[test]
@@ -7451,12 +7807,12 @@ mod tests {
 
     #[test]
     fn every_websocket_step_goes_through_the_classifier() {
-        // Six places move a frame or a flush: two reads, two sends, two pings.
-        // One left on a bare map_err puts the noise back for that direction.
+        // rustls relay: two reads, two sends, two pings. impersonate relay:
+        // client-side read/send/pong still go through the same classifier.
         let source = production_source();
         assert_eq!(
             source.matches("websocket_step(").count(),
-            6,
+            9,
             "every WebSocket step must ask whether the peer simply went away"
         );
         assert!(
@@ -9592,6 +9948,128 @@ mod tests {
             accepted.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "MITM+wreq must open exactly one origin TCP"
+        );
+    }
+
+    #[cfg(feature = "impersonate-boring")]
+    #[tokio::test]
+    async fn mitm_wss_uses_wreq_and_relays_frames() {
+        let ca = test_certificate_authority();
+        let _roots = crate::impersonate_egress::install_test_root_certificate_der(
+            ca.certificate_der().as_ref().to_vec(),
+        );
+        let host = "localhost";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_config = ca.server_config(host).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let tls = match TlsAcceptor::from(server_config).accept(stream).await {
+                Ok(tls) => tls,
+                Err(_) => return,
+            };
+            let mut websocket = match accept_async(tls).await {
+                Ok(websocket) => websocket,
+                Err(_) => return,
+            };
+            while let Some(message) = websocket.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        let _ = websocket.send(Message::Text(text)).await;
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequestInput>::new()));
+        let capture_sink: CaptureSink = {
+            let captured = captured.clone();
+            Arc::new(move |request| captured.lock().unwrap().push(request))
+        };
+        let events = Arc::new(Mutex::new(Vec::<CaptureEventInput>::new()));
+        let event_sink: EventSink = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let handle = ProxyHandle::start_with_event_sinks(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            "session-wss-wreq".to_string(),
+            direct_upstream(),
+            ca.clone(),
+            capture_sink,
+            None,
+            event_sink,
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        let client = TcpStream::connect(handle.local_addr()).await.unwrap();
+        let mut tunnel = BoxedIo(Box::new(client));
+        tunnel
+            .write_all(
+                format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_http_header(&mut tunnel).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.certificate_der()).unwrap();
+        let tls = TlsConnector::from(Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ))
+        .connect(ServerName::try_from(host.to_string()).unwrap(), tunnel)
+        .await
+        .expect("MITM client TLS");
+        let (mut websocket, response) = client_async(format!("ws://{host}:{port}/echo"), tls)
+            .await
+            .expect("websocket upgrade through MITM");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        websocket
+            .send(Message::text("align"))
+            .await
+            .expect("send frame");
+        assert_eq!(
+            timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .expect("echo timeout")
+                .unwrap()
+                .unwrap(),
+            Message::text("align")
+        );
+        let _ = websocket.close(None).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.stop().await;
+        server.abort();
+
+        let captured = captured.lock().unwrap();
+        let handshake = captured
+            .iter()
+            .find(|request| request.resource_type == "websocket")
+            .expect("websocket handshake captured");
+        assert_eq!(handshake.scheme.as_deref(), Some("wss"));
+        assert!(
+            handshake
+                .tls_version
+                .as_deref()
+                .is_some_and(|value| value.contains("wreq") || value.contains("TLS")),
+            "wss handshake should record Chrome/wreq TLS, got {:?}",
+            handshake.tls_version
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.phase == "websocket"),
+            "websocket frames must still be captured"
         );
     }
 

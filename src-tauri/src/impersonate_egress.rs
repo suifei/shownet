@@ -385,6 +385,99 @@ pub async fn send(
         .map_err(|error| format!("wreq 请求失败: {error}"))
 }
 
+/// Origin WebSocket after a Chrome TLS handshake.
+///
+/// wreq still cannot be driven as a raw `Connection: Upgrade` stream through
+/// the ordinary HTTP sender — hop-by-hop headers are stripped there. Its
+/// websocket builder does the Upgrade itself on the same BoringSSL profile
+/// HTTPS uses, then hands back the upgraded IO for our relay.
+pub struct ImpersonateWebsocket {
+    pub status: u16,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub socket: wreq::ws::WebSocket,
+}
+
+impl ImpersonateClient {
+    fn route_client(&self, routing_host: &str) -> &Client {
+        if self
+            .proxied
+            .as_ref()
+            .is_some_and(|_| !crate::proxy::should_bypass(routing_host, &self.bypass))
+        {
+            self.proxied.as_ref().expect("checked above")
+        } else {
+            &self.direct
+        }
+    }
+
+    pub async fn websocket_upgrade(
+        &self,
+        url: &str,
+        headers: &[(String, Vec<u8>)],
+    ) -> Result<ImpersonateWebsocket, String> {
+        let uri: Uri = url
+            .parse()
+            .map_err(|error| format!("WebSocket 地址无效 {url}: {error}"))?;
+        let routing_host = self
+            .route_connection_host
+            .as_deref()
+            .unwrap_or_else(|| uri.host().unwrap_or_default());
+        let mut request = self.route_client(routing_host).websocket(uri);
+        let mut accept_key = None;
+        let mut protocols = Vec::new();
+        for (name, value) in collapse_cookie_header_pairs(headers) {
+            let lower = name.to_ascii_lowercase();
+            if lower == "sec-websocket-key" {
+                accept_key = String::from_utf8(value).ok();
+                continue;
+            }
+            if lower == "sec-websocket-protocol" {
+                if let Ok(text) = String::from_utf8(value) {
+                    protocols.extend(
+                        text.split(',')
+                            .map(str::trim)
+                            .filter(|item| !item.is_empty())
+                            .map(str::to_string),
+                    );
+                }
+                continue;
+            }
+            if lower == "sec-websocket-version" || is_client_owned(&lower) {
+                continue;
+            }
+            request = request.header(name.as_str(), value.as_slice());
+        }
+        if let Some(key) = accept_key {
+            request = request.accept_key(key);
+        }
+        if !protocols.is_empty() {
+            request = request.protocols(protocols);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("wreq WebSocket 握手失败: {error}"))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+            .collect();
+        if status != 101 {
+            return Err(format!("WebSocket 升级失败: HTTP {status}"));
+        }
+        let socket = response
+            .into_websocket()
+            .await
+            .map_err(|error| format!("WebSocket 升级失败: {error}"))?;
+        Ok(ImpersonateWebsocket {
+            status,
+            headers,
+            socket,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
