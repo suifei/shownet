@@ -548,8 +548,9 @@ function App() {
     );
   }, []);
 
-  const refreshRequests = useCallback(async (sessionId: string) => {
+  const refreshRequests = useCallback(async (sessionId: string, options?: { resetWindow?: boolean }) => {
     if (!hasNativeRuntime || !sessionId) return;
+    const resetWindow = options?.resetWindow !== false;
     const generation = ++requestLoadGenerationRef.current;
     requestWindowLoadGenerationRef.current += 1;
     requestWindowTargetRef.current = undefined;
@@ -563,10 +564,31 @@ function App() {
         query: { sessionId, filter: requestFilter, sort: requestSort, limit: REQUEST_LIST_WINDOW_SIZE },
       });
       if (generation !== requestLoadGenerationRef.current) return;
-      setRequests(loaded.items);
-      setRequestListPage(loaded);
-      requestWindowOffsetRef.current = 0;
-      setRequestWindowOffset(0);
+      const offset = resetWindow ? 0 : requestWindowOffsetRef.current;
+      if (resetWindow || offset === 0) {
+        setRequests(loaded.items);
+        setRequestListPage(loaded);
+        if (resetWindow) {
+          requestWindowOffsetRef.current = 0;
+          setRequestWindowOffset(0);
+        }
+        return;
+      }
+      const window = await invoke<RequestListWindow>("query_request_window", {
+        queryId,
+        query: {
+          sessionId,
+          filter: requestFilter,
+          sort: requestSort,
+          offset,
+          limit: REQUEST_LIST_WINDOW_SIZE,
+        },
+      });
+      if (generation !== requestLoadGenerationRef.current) return;
+      requestWindowOffsetRef.current = window.offset;
+      setRequestWindowOffset(window.offset);
+      setRequests(window.items);
+      setRequestListPage({ ...loaded, items: window.items, nextCursor: undefined });
     } catch (error) {
       if (generation !== requestLoadGenerationRef.current || isRequestQueryCancelled(error)) return;
       throw error;
@@ -739,7 +761,7 @@ function App() {
   const requestListBatcher = useMemo(
     () => createRequestListBatcher((entries) => {
       if (requiresLiveQueryRefresh(requestFilter, requestSort)) {
-        void refreshRequests(activeSessionId);
+        void refreshRequests(activeSessionId, { resetWindow: false });
         return;
       }
       const offset = requestWindowOffsetRef.current;
@@ -779,7 +801,7 @@ function App() {
     liveDisplaySyncBufferRef.current.clear();
     publishLiveDisplay(liveDisplayController.startSync(Date.now()));
     try {
-      if (activeSessionId) await refreshRequests(activeSessionId);
+      if (activeSessionId) await refreshRequests(activeSessionId, { resetWindow: false });
       const buffered = [...liveDisplaySyncBufferRef.current.values()];
       liveDisplaySyncBufferRef.current.clear();
       publishLiveDisplay(liveDisplayController.finishSync(Date.now()));

@@ -96,7 +96,7 @@ describe("request list incremental updates", () => {
     assert.match(source, /createRefreshCoalescer\(\(\) => void refreshSessions\(\), 250\)/);
     assert.match(source, /createRequestListBatcher[\s\S]{0,1200}requiresLiveQueryRefresh/);
     assert.match(source, /createRequestListBatcher[\s\S]{0,1400}, 100\)/);
-    assert.match(source, /synchronizeLiveDisplay[\s\S]{0,1800}refreshRequests\(activeSessionId\)/);
+    assert.match(source, /synchronizeLiveDisplay[\s\S]{0,1800}refreshRequests\(activeSessionId, \{ resetWindow: false \}\)/);
   });
 
   it("keeps native request summaries in a bounded remote window", () => {

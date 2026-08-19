@@ -80,6 +80,14 @@ import { headerValue, INSPECTOR_PREFERENCES_KEY, legacyBodyMetadata, parseCookie
 import { initialRequestSelection, requestSelectionReducer } from "../requestSelection";
 import type { LiveCaptureDisplaySnapshot } from "../liveCaptureDisplay";
 import { nextRequestListWindowOffset, shouldChangeRequestListWindow } from "../requestList";
+import {
+  nextScrollTopToRevealRow,
+  shouldKeepFocusedRowInView,
+  shouldResetTrafficListScroll,
+  trafficListFilterKey,
+  trafficListSortKey,
+  type TrafficListQueryIdentity,
+} from "../trafficListScroll";
 import { generateRequestCode, requestCodeTemplates, type RequestCodeTemplate } from "../requestCode";
 import { t } from "../i18n.ts";
 import { calculateVirtualWindow, defaultRequestGridPreferences, estimateRequestColumnWidth, nextRequestSort, parseRequestGridPreferences, reorderRequestColumn, REQUEST_GRID_HEADER_HEIGHT, REQUEST_GRID_PREFERENCES_KEY, REQUEST_GRID_ROW_HEIGHT, requestColumnDefinitions, requestColumnLabel, requestGridTemplate, requestGridWidth, resizeRequestColumn, toggleRequestColumn, visibleRequestColumns, type RequestColumnId } from "../trafficGrid";
@@ -170,6 +178,8 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
   const [actionError, setActionError] = useState("");
   const selectionMoreRef = useRef<HTMLDivElement>(null);
   const locatingFocusIdRef = useRef<string | undefined>(undefined);
+  const queryIdentityRef = useRef<TrafficListQueryIdentity | undefined>(undefined);
+  const revealedFocusedIdRef = useRef<string | undefined>(undefined);
 
   useDismissibleLayer(Boolean(menu), toolbarRef, () => setMenu(undefined));
   useDismissibleLayer(Boolean(contextMenu), contextMenuRef, () => setContextMenu(undefined));
@@ -188,15 +198,28 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
     return () => window.clearTimeout(timer);
   }, [query]);
 
+  const queryIdentity = useMemo(
+    () => ({
+      sessionId,
+      filterKey: trafficListFilterKey(quickFilter, advancedFilter),
+      sortKey: trafficListSortKey(sort),
+    }),
+    [advancedFilter, quickFilter, sessionId, sort],
+  );
+
   useEffect(() => {
-    dispatchSelection({ type: "clear" });
-    selectionCacheRef.current.clear();
-    setBookmarkCountDelta(0);
-    setPendingFocus(undefined);
-    setScrollTop(0);
-    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    const previous = queryIdentityRef.current;
+    queryIdentityRef.current = queryIdentity;
+    if (shouldResetTrafficListScroll(previous, queryIdentity)) {
+      dispatchSelection({ type: "clear" });
+      selectionCacheRef.current.clear();
+      setBookmarkCountDelta(0);
+      setPendingFocus(undefined);
+      setScrollTop(0);
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    }
     onQueryChange(buildQuickFilter(quickFilter, normalizeFilterExpression(advancedFilter)), sort);
-  }, [advancedFilter, onQueryChange, quickFilter, sessionId, sort]);
+  }, [onQueryChange, queryIdentity, quickFilter, advancedFilter, sort]);
 
   useEffect(() => {
     globalThis.localStorage?.setItem(REQUEST_GRID_PREFERENCES_KEY, JSON.stringify(preferences));
@@ -274,12 +297,21 @@ export function TrafficView({ requests, totalCount, filteredCount, hookCount, bo
 
   useEffect(() => {
     const element = scrollRef.current;
-    const index = requests.findIndex((request) => request.id === selection.focusedId);
-    if (!element || index < 0) return;
-    const rowTop = 32 + (requestWindowOffset + index) * REQUEST_GRID_ROW_HEIGHT;
-    const rowBottom = rowTop + REQUEST_GRID_ROW_HEIGHT;
-    if (rowTop < element.scrollTop + 32) element.scrollTop = Math.max(0, rowTop - 32);
-    else if (rowBottom > element.scrollTop + element.clientHeight) element.scrollTop = rowBottom - element.clientHeight;
+    const nextFocusedId = selection.focusedId;
+    const shouldFollow = shouldKeepFocusedRowInView(revealedFocusedIdRef.current, nextFocusedId);
+    revealedFocusedIdRef.current = nextFocusedId;
+    if (!shouldFollow || !element || !nextFocusedId) return;
+    const index = requests.findIndex((request) => request.id === nextFocusedId);
+    if (index < 0) return;
+    const rowTop = REQUEST_GRID_HEADER_HEIGHT + (requestWindowOffset + index) * REQUEST_GRID_ROW_HEIGHT;
+    const nextTop = nextScrollTopToRevealRow({
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+      rowTop,
+      rowHeight: REQUEST_GRID_ROW_HEIGHT,
+      headerHeight: REQUEST_GRID_HEADER_HEIGHT,
+    });
+    if (nextTop !== undefined) element.scrollTop = nextTop;
   }, [requestWindowOffset, requests, selection.focusedId]);
 
   const loadSavedViews = useCallback(async () => {

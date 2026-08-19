@@ -24,6 +24,21 @@ test.describe("request grid", () => {
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
   });
 
+  test("a driven scroll-away stays put without a query change", async ({ page }) => {
+    await gotoApp(page, { largeList: true });
+    const scroller = page.locator(".request-grid-scroll");
+    await scroller.hover();
+    await page.mouse.wheel(0, 800);
+    await page.waitForTimeout(200);
+    const away = await scroller.evaluate((node) => node.scrollTop);
+    expect(away).toBeGreaterThan(200);
+    await page.waitForTimeout(400);
+    expect(await scroller.evaluate((node) => node.scrollTop)).toBe(away);
+    if (process.env.SHOWNET_GOAL_SCRATCH) {
+      await page.screenshot({ path: `${process.env.SHOWNET_GOAL_SCRATCH}/traffic-scroll.png` });
+    }
+  });
+
   test("the header stays put while the rows scroll", async ({ page }) => {
     await gotoApp(page, { largeList: true });
     const header = page.locator(".request-grid-header");
