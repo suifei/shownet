@@ -41,6 +41,13 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
     assert.match(readme, /WebSocket 出站握手走与 HTTPS 同一套 wreq/);
     assert.doesNotMatch(readme, /不能终止 Upgrade|仍不一致/);
     assert.match(readme, /无需 Root/);
+    assert.match(readme, /浅色 \/ 深色 \/ 跟随系统/);
+    assert.ok(readme.includes("docs/assets/readme/ui-traffic.jpg"));
+    assert.ok(readme.includes("docs/assets/readme/ui-traffic-dark.jpg"));
+    assert.ok(readme.includes("docs/assets/readme/ui-appearance.jpg"));
+    await assertNonEmptyFile("docs/assets/readme/ui-traffic.jpg", 50_000);
+    await assertNonEmptyFile("docs/assets/readme/ui-traffic-dark.jpg", 50_000);
+    await assertNonEmptyFile("docs/assets/readme/ui-appearance.jpg", 50_000);
     assert.doesNotMatch(readme, /12306|春秋航空|kyfw\.|ch\.com/i);
 
     const sceneArt = [
@@ -147,6 +154,9 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
     assert.match(en, /same wreq Chrome TLS profile as HTTPS/);
     assert.doesNotMatch(en, /cannot terminate Upgrade|still inconsistent/i);
     assert.match(en, /no Root required/);
+    assert.match(en, /Light \/ Dark \/ Match system/);
+    assert.ok(en.includes("docs/assets/readme/ui-traffic-dark.jpg"));
+    assert.ok(en.includes("docs/assets/readme/ui-appearance.jpg"));
     assert.doesNotMatch(en, /12306|春秋航空|kyfw\.|ch\.com/i);
 
     const start = en.indexOf("## Ten minutes to first traffic");

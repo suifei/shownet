@@ -60,6 +60,12 @@ export const commandsZh = {
   "cmd.data.subtitle": "数据库位置、保留天数与清理",
   "cmd.captureSettings.title": "代理与 HTTPS 设置",
   "cmd.captureSettings.subtitle": "监听、系统代理、出口代理与解密策略",
+  "cmd.theme.system": "跟随系统外观",
+  "cmd.theme.systemSub": "浅色或深色随操作系统变化",
+  "cmd.theme.light": "浅色外观",
+  "cmd.theme.lightSub": "冷银背景、实底内容、系统蓝主操作",
+  "cmd.theme.dark": "深色外观",
+  "cmd.theme.darkSub": "现有黑色界面",
 } as const;
 
 export const commandsEn = {
@@ -124,4 +130,10 @@ export const commandsEn = {
   "cmd.data.subtitle": "Database location, retention, and cleanup",
   "cmd.captureSettings.title": "Proxy & HTTPS",
   "cmd.captureSettings.subtitle": "Listen, system proxy, upstream proxy, and decrypt policy",
+  "cmd.theme.system": "Match system appearance",
+  "cmd.theme.systemSub": "Follow the operating system light or dark setting",
+  "cmd.theme.light": "Light appearance",
+  "cmd.theme.lightSub": "Cool silver canvas, solid content, system-blue actions",
+  "cmd.theme.dark": "Dark appearance",
+  "cmd.theme.darkSub": "The existing black interface",
 } as const satisfies Record<keyof typeof commandsZh, string>;

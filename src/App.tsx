@@ -78,6 +78,14 @@ import { addCreatedItemsToFacets, createRefreshCoalescer, createRequestListBatch
 import { formatBytes } from "./format";
 import { activateUiLocale, createTranslator, resolveUiLocale, t, writeStoredUiLocale, type Translate } from "./i18n.ts";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
+import { ThemeSwitcher } from "./components/ThemeSwitcher";
+import {
+  applyThemePreference,
+  readStoredThemePreference,
+  subscribeSystemTheme,
+  writeStoredThemePreference,
+  type ThemePreference,
+} from "./theme.ts";
 import { chromeLabel, chromeTitle, NAV_VIEWS } from "./navChrome";
 import { toastTone } from "./toastTone";
 import { createProxyErrorQueue, type ProxyErrorQueue } from "./proxyErrorQueue";
@@ -372,6 +380,18 @@ function App() {
     writeStoredUiLocale(pack.id);
     setUiLocale(pack.id);
   };
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => readStoredThemePreference());
+  const chooseTheme = (preference: ThemePreference) => {
+    writeStoredThemePreference(preference);
+    setThemePreference(preference);
+  };
+  useEffect(() => {
+    applyThemePreference(themePreference);
+    if (themePreference !== "system") return;
+    return subscribeSystemTheme((dark) => {
+      applyThemePreference("system", { systemDark: dark });
+    });
+  }, [themePreference]);
   const views = viewMeta(t);
   const navGroups = primaryNavigationGroups(t);
   const [activeView, setActiveView] = useState<ViewId>("traffic");
@@ -1684,6 +1704,36 @@ function App() {
     { id: "mcp-settings", title: t("cmd.mcp.title"), subtitle: t("cmd.mcp.subtitle"), group: "config", keywords: ["mcp", "claude", "cursor", "codex", "client"], run: () => openSettingsTab("mcp") },
     { id: "data-settings", title: t("cmd.data.title"), subtitle: t("cmd.data.subtitle"), group: "config", keywords: ["data", "storage", "database", "cleanup", "sj"], run: () => openSettingsTab("data") },
     { id: "capture-settings", title: t("cmd.captureSettings.title"), subtitle: t("cmd.captureSettings.subtitle"), group: "config", keywords: ["settings", "proxy", "port", "upstream", "decrypt", "sz"], run: () => openSettingsTab("capture") },
+    {
+      id: "theme-system",
+      title: t("cmd.theme.system"),
+      subtitle: t("cmd.theme.systemSub"),
+      group: "config",
+      keywords: ["theme", "appearance", "system", "auto", "外观", "主题", "跟随系统"],
+      badge: themePreference === "system" ? t("common.enabled") : undefined,
+      badgeTone: themePreference === "system" ? "ok" : "neutral",
+      run: () => { chooseTheme("system"); setCommandOpen(false); },
+    },
+    {
+      id: "theme-light",
+      title: t("cmd.theme.light"),
+      subtitle: t("cmd.theme.lightSub"),
+      group: "config",
+      keywords: ["theme", "appearance", "light", "外观", "主题", "浅色", "亮色"],
+      badge: themePreference === "light" ? t("common.enabled") : undefined,
+      badgeTone: themePreference === "light" ? "ok" : "neutral",
+      run: () => { chooseTheme("light"); setCommandOpen(false); },
+    },
+    {
+      id: "theme-dark",
+      title: t("cmd.theme.dark"),
+      subtitle: t("cmd.theme.darkSub"),
+      group: "config",
+      keywords: ["theme", "appearance", "dark", "外观", "主题", "深色", "黑色"],
+      badge: themePreference === "dark" ? t("common.enabled") : undefined,
+      badgeTone: themePreference === "dark" ? "ok" : "neutral",
+      run: () => { chooseTheme("dark"); setCommandOpen(false); },
+    },
   ];
 
   return (
@@ -1927,6 +1977,7 @@ function App() {
               {capturing ? <Square size={13} fill="currentColor" /> : <CircleDot size={15} />}
               <span>{!sessionCatalogReady ? t("shell.loadSession") : captureTransitioning ? t("common.processing") : capturing ? t("shell.stopCapture") : t("shell.startCapture")}</span>
             </button>
+            <ThemeSwitcher preference={themePreference} onChange={chooseTheme} />
             <LocaleSwitcher onChange={applyUiLocale} />
           </div>
         </header>
@@ -2049,6 +2100,8 @@ function App() {
               onRuntimeChange={(status) => setRuntime(withClientAccessDefaults(status))}
               onNotify={setToast}
               initialTab={settingsTab}
+              themePreference={themePreference}
+              onThemeChange={chooseTheme}
             />
           )}
         </main>

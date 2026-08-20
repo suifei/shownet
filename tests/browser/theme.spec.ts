@@ -123,6 +123,7 @@ test("declares the dark color scheme so native UI matches", async ({ page }) => 
     () => getComputedStyle(document.documentElement).colorScheme,
   );
   expect(scheme).toContain("dark");
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
 
   // The custom thumb must stay dim enough to read as chrome rather than content.
   const thumb = await page.evaluate(() =>
@@ -131,6 +132,64 @@ test("declares the dark color scheme so native UI matches", async ({ page }) => 
   const channels = thumb.replace("#", "").match(/../g)!.map((pair) => parseInt(pair, 16));
   const brightest = Math.max(...channels);
   expect(brightest, `scrollbar thumb ${thumb} is too bright for a dark surface`).toBeLessThan(140);
+});
+
+test("light preference swaps the semantic ramp and native color scheme", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("shownet.ui.theme", "light"));
+  await page.goto("/");
+  await page.waitForSelector(".app-shell");
+
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+  const scheme = await page.evaluate(
+    () => getComputedStyle(document.documentElement).colorScheme,
+  );
+  expect(scheme).toContain("light");
+
+  const pageBg = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--surface-page").trim(),
+  );
+  const text = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--text-primary").trim(),
+  );
+  expect(pageBg.toLowerCase()).toBe("#e9edf3");
+  expect(text.toLowerCase()).toBe("#1d1d1f");
+
+  const canvas = await page.locator(".app-shell").evaluate((node) => {
+    const color = getComputedStyle(node).backgroundColor;
+    const match = color.match(/rgba?\((\d+), (\d+), (\d+)/);
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : [0, 0, 0];
+  });
+  expect(canvas[0] + canvas[1] + canvas[2], `light canvas stayed dark: ${canvas.join(",")}`).toBeGreaterThan(400);
+});
+
+test("the topbar appearance menu switches light and dark without a reload", async ({ page }) => {
+  await gotoApp(page);
+  await page.getByRole("button", { name: "外观" }).click();
+  await page.getByRole("option", { name: "浅色" }).click();
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+  expect(await page.evaluate(() => localStorage.getItem("shownet.ui.theme"))).toBe("light");
+
+  await page.getByRole("button", { name: "外观" }).click();
+  await page.getByRole("option", { name: "跟随系统" }).click();
+  expect(await page.evaluate(() => localStorage.getItem("shownet.ui.theme"))).toBe("system");
+
+  await page.getByRole("button", { name: "外观" }).click();
+  await page.getByRole("option", { name: "深色" }).click();
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
+  expect(await page.evaluate(() => localStorage.getItem("shownet.ui.theme"))).toBe("dark");
+});
+
+test("settings appearance radios apply the same preference", async ({ page, viewport }) => {
+  test.skip((viewport?.width ?? 0) <= 1060, "窄布局下设置导航折叠");
+  await gotoApp(page);
+  await openView(page, "设置");
+  await page.locator("[data-settings-tab=data]").click();
+  const light = page.getByRole("radio", { name: "浅色" });
+  await expect(light).toBeVisible();
+  await light.click();
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+  await page.getByRole("radio", { name: "深色" }).click();
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
 });
 
 test("floating surfaces read as glass with thickness", async ({ page }) => {

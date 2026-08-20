@@ -23,10 +23,17 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet 实时流量" width="920" />
+  <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet 浅色流量工作台" width="920" />
+</p>
+<p align="center">
+  <img src="docs/assets/readme/ui-traffic-dark.jpg" alt="ShowNet 深色流量工作台" width="920" />
+</p>
+<p align="center">顶栏一键切换<strong>浅色 / 深色 / 跟随系统</strong>。浅色是冷银画布与系统蓝主操作，深色仍是原来的黑色工作台。默认深色。</p>
+<p align="center">
+  <img src="docs/assets/readme/ui-appearance.jpg" alt="设置里选择浅色、深色或跟随系统" width="920" />
 </p>
 
-当前发布版：[v0.4.35](https://github.com/suifei/shownet/releases/tag/v0.4.35)。更细的能力边界见 [功能全景](docs/feature-map.md)。
+当前发布版：[v0.4.36](https://github.com/suifei/shownet/releases/tag/v0.4.36)。更细的能力边界见 [功能全景](docs/feature-map.md)。
 
 ## 它解决什么
 

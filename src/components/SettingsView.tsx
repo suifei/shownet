@@ -19,6 +19,8 @@ import {
   ListFilter,
   LockKeyhole,
   MessageCircle,
+  Monitor,
+  Moon,
   Network,
   PlugZap,
   Plus,
@@ -33,6 +35,7 @@ import {
   Smartphone,
   Sparkles,
   SquareTerminal,
+  Sun,
   Trash2,
   Wifi,
   X,
@@ -47,7 +50,7 @@ import type { ReactNode } from "react";
 import { forgetAllStoredBrowserUrls } from "../browserSessionUrl";
 import { formatBytes } from "../format";
 import { sourceLabels } from "../data";
-import { t } from "../i18n.ts";
+import { t, type MessageKey } from "../i18n.ts";
 import { formatReleaseNotes } from "../format";
 import { defaultMcpServerStatus, mcpEndpoint } from "../mcpDefaults";
 import {
@@ -75,6 +78,7 @@ import {
 } from "../aiContextBudget";
 import type { AgentRuntimeStatus, AiAnalysisSettings, AiProviderSettings, CaptureListenerSettings, ClientAccessMode, DataStorageSettings, DetectedEnvProxy, McpClientSettings, McpClientTestResult, McpServerStatus, OutboundTlsProfileStatus, ReverseProxyStatus, RuntimeStatus, StorageStats, SystemProxySettings, TlsInterceptionMode, TlsInterceptionSettings, UpdateCheckResult, UpstreamProbeResult, UpstreamProxyMode, UpstreamProxySettings } from "../types";
 import { displayedClientHelloPresetId } from "../clientHelloPreset.ts";
+import { THEME_PREFERENCES, type ThemePreference } from "../theme.ts";
 import { clientAccessModeLabel, parseClientAccessRules, validateClientAccessSettings } from "../clientAccess";
 import { buildMcpClientGuide, MCP_GUIDE_CLIENTS, type McpGuideClientId } from "../mcpClientGuide";
 import {
@@ -112,6 +116,8 @@ interface SettingsViewProps {
   onRuntimeChange: (runtime: RuntimeStatus) => void;
   onNotify: (message: string) => void;
   initialTab?: SettingsTab;
+  themePreference?: ThemePreference;
+  onThemeChange?: (preference: ThemePreference) => void;
 }
 
 interface CertificateAuthorityStatus {
@@ -213,7 +219,26 @@ const defaultStorageStats: StorageStats = {
   dataDirectory: "--",
 };
 
-export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = "capture" }: SettingsViewProps) {
+const THEME_ICONS = {
+  system: Monitor,
+  light: Sun,
+  dark: Moon,
+} as const;
+
+const THEME_LABELS = {
+  system: "settings.appearance.system",
+  light: "settings.appearance.light",
+  dark: "settings.appearance.dark",
+} as const satisfies Record<ThemePreference, MessageKey>;
+
+export function SettingsView({
+  runtime,
+  onRuntimeChange,
+  onNotify,
+  initialTab = "capture",
+  themePreference = "dark",
+  onThemeChange,
+}: SettingsViewProps) {
   const effectiveRuntimeAccessMode = runtime.accessMode ?? "private";
   const effectiveRuntimeAccessRules = runtime.accessRules ?? [];
   const [tab, setTab] = useState<SettingsTab>(initialTab);
@@ -2121,6 +2146,27 @@ export function SettingsView({ runtime, onRuntimeChange, onNotify, initialTab = 
         {!settingsQuery && tab === "data" && (
           <>
             <SettingsHeader kicker="DATA & STORAGE" title={t("settings.header.data")} />
+            <SettingsSection id="data.appearance" title={settingsSectionTitle("data.appearance")}>
+              <div className="theme-preference" role="radiogroup" aria-label={t("settings.appearance.choice")}>
+                {THEME_PREFERENCES.map((id) => {
+                  const Icon = THEME_ICONS[id];
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="radio"
+                      aria-checked={themePreference === id}
+                      className={themePreference === id ? "is-active" : ""}
+                      onClick={() => onThemeChange?.(id)}
+                    >
+                      <Icon size={15} />
+                      {t(THEME_LABELS[id])}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="theme-preference-hint">{t("settings.appearance.hint")}</p>
+            </SettingsSection>
             <SettingsSection id="data.database" title={settingsSectionTitle("data.database")}>
               <div className="storage-path"><span><Database size={19} /></span><div><strong>{storageFileName}</strong><code title={storageStats.dataDirectory}>{storageStats.dataDirectory}</code></div><button className="icon-button" onClick={openStorageDirectory} title={t("settings.data.openDir")} aria-label={t("settings.data.openDir")}><FolderOpen size={16} /></button></div>
               <div className={`storage-metrics ${storageStatsLoading ? "is-loading" : ""}`}><div><strong>{storageStatsLoading ? t("settings.models.reading") : formatBytes(storageStats.databaseBytes)}</strong><span>{t("settings.data.sqlite")}</span></div><div><strong>{storageStatsLoading ? t("settings.models.reading") : formatBytes(storageStats.responseBodyBytes)}</strong><span>{t("settings.data.storedBodies")}</span></div><div><strong>{storageStatsLoading ? t("settings.models.reading") : storageStats.sessionCount}</strong><span>{t("settings.data.requestCount", { count: storageStats.requestCount })}</span></div></div>

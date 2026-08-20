@@ -112,6 +112,7 @@ describe("chrome lookup wiring", () => {
     assert.doesNotMatch(app, /label: "流量"/);
     assert.doesNotMatch(app, /<span>设置<\/span>/);
     assert.doesNotMatch(app, /<span>命令<\/span>/);
+    assert.match(app, /<ThemeSwitcher preference=\{themePreference\} onChange=\{chooseTheme\} \/>/);
     assert.match(app, /<LocaleSwitcher onChange=\{applyUiLocale\} \/>/);
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     assert.match(css, /\.topbar\s*\{[^}]*z-index:\s*40/s);

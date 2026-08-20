@@ -65,6 +65,8 @@ describe("settings index", () => {
     assert.equal(searchSettings("502")[0].id, "capture.upstream", "a symptom should reach its cause");
     assert.equal(searchSettings("token")[0].id, "mcp.auth");
     assert.equal(searchSettings("手机")[0].id, "capture.devices");
+    assert.equal(searchSettings("主题")[0].id, "data.appearance");
+    assert.equal(searchSettings("appearance")[0].id, "data.appearance");
   });
 
   it("ranks a title match above a keyword match", () => {

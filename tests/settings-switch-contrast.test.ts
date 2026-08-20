@@ -234,4 +234,40 @@ describe("Settings switch contrast (#54)", () => {
     assert.match(settings, /title=\{server\.enabled \? t\("settings\.mcp\.disableAgent"\) : t\("settings\.mcp\.enableAgent"\)\}/);
     assert.match(settings, /t\("settings\.mcp\.forBuiltin"\)/);
   });
+
+  it("keeps the same contrast contract on the light token ramp", () => {
+    const vars = new Map(rootVars(styles));
+    const lightBody = stripComments(blockAfter(styles, 'html[data-theme="light"]'));
+    for (const chunk of lightBody.split(";")) {
+      const match = chunk.match(/^\s*(--[\w-]+)\s*:\s*([\s\S]+)$/);
+      if (match) vars.set(match[1], match[2].trim());
+    }
+    const off = parseRgb(resolveValue("var(--switch-track-off)", vars));
+    const on = parseRgb(resolveValue("var(--switch-track-on)", vars));
+    const knob = parseRgb(resolveValue("var(--switch-knob)", vars));
+    const panelSolid = parseRgb(resolveValue("var(--surface-panel)", vars));
+    const panelGlass = parseRgb(resolveValue("var(--material-regular)", vars));
+    assert.notEqual(key(off), key(on));
+    assert.notEqual(key(off), key(knob));
+    assert.notEqual(key(on), key(knob));
+    for (const [name, color] of [
+      ["off", off],
+      ["on", on],
+    ] as const) {
+      assert.notEqual(key(color), key(panelSolid), `light ${name} matches --surface-panel`);
+      assert.notEqual(key(color), key(panelGlass), `light ${name} matches the frosted settings pane`);
+      assert.ok(
+        contrast(color, panelSolid) >= 3,
+        `light ${name} vs panel ${contrast(color, panelSolid).toFixed(2)}:1`,
+      );
+      assert.ok(
+        contrast(color, panelGlass) >= 3,
+        `light ${name} vs glass panel ${contrast(color, panelGlass).toFixed(2)}:1`,
+      );
+    }
+    assert.notEqual(key(knob), key(off), "light knob must differ from off track");
+    assert.notEqual(key(knob), key(on), "light knob must differ from on track");
+    assert.ok(contrast(knob, off) >= 3, `light knob vs off ${contrast(knob, off).toFixed(2)}:1`);
+    assert.ok(contrast(knob, on) >= 3, `light knob vs on ${contrast(knob, on).toFixed(2)}:1`);
+  });
 });

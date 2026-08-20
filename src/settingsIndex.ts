@@ -108,6 +108,13 @@ export const SETTINGS_INDEX: SettingsSectionEntry[] = [
     keywords: ["qq", "support", "free", "quota", "群", "额度"],
   },
   {
+    id: "data.appearance",
+    tab: "data",
+    title: "外观",
+    summary: "浅色、深色或跟随系统",
+    keywords: ["theme", "appearance", "light", "dark", "system", "外观", "主题", "亮色", "浅色", "深色", "跟随系统"],
+  },
+  {
     id: "data.database",
     tab: "data",
     title: "会话数据库",
@@ -193,7 +200,7 @@ export const SETTINGS_OPEN_SECTIONS_KEY = "shownet.settings.open-sections.v1";
  * Sections a tab opens with when the user has no saved preference. Everything
  * a beginner needs is open; the long power-user sections stay folded.
  */
-export const DEFAULT_OPEN_SECTIONS = ["capture.https", "capture.routing", "ai.runtime", "ai.provider", "data.database", "mcp.clients"];
+export const DEFAULT_OPEN_SECTIONS = ["capture.https", "capture.routing", "ai.runtime", "ai.provider", "data.appearance", "data.database", "mcp.clients"];
 
 export function parseOpenSections(raw: string | null | undefined): string[] {
   if (!raw) return DEFAULT_OPEN_SECTIONS;

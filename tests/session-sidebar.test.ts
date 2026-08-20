@@ -45,11 +45,11 @@ describe("session sidebar", () => {
     );
     assert.match(
       css,
-      /\.session-tools-menu(?:,\s*\.locale-switcher__menu)?\s*\{[^}]*backdrop-filter:\s*none/s,
+      /\.session-tools-menu(?:,\s*\.[^{]+)*\s*\{[^}]*backdrop-filter:\s*none/s,
     );
     assert.match(
       css,
-      /\.session-tools-menu(?:,\s*\.locale-switcher__menu)?\s*\{[^}]*background-color:\s*var\(--dark-elevated\)/s,
+      /\.session-tools-menu(?:,\s*\.[^{]+)*\s*\{[^}]*background-color:\s*var\(--dark-elevated\)/s,
     );
   });
 });

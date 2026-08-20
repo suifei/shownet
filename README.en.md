@@ -18,10 +18,17 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet live traffic" width="920" />
+  <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet light traffic workbench" width="920" />
+</p>
+<p align="center">
+  <img src="docs/assets/readme/ui-traffic-dark.jpg" alt="ShowNet dark traffic workbench" width="920" />
+</p>
+<p align="center"><strong>Light / Dark / Match system</strong> from the top bar. Light uses a cool-silver canvas and system-blue actions; dark is the original black workbench. Dark remains the default.</p>
+<p align="center">
+  <img src="docs/assets/readme/ui-appearance.jpg" alt="Choose light, dark, or match the system in Settings" width="920" />
 </p>
 
-Current release: [v0.4.35](https://github.com/suifei/shownet/releases/tag/v0.4.35). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
+Current release: [v0.4.36](https://github.com/suifei/shownet/releases/tag/v0.4.36). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
 
 The [Chinese README](./README.md) is the default GitHub homepage. This English page is the same product story for a global audience.
 
