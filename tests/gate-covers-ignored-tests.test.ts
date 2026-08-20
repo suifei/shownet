@@ -43,6 +43,8 @@ const EXCLUDED: Record<string, string> = {
     "drives a real site through the production proxy and browser; run via npm run test:live-capture",
   browser_and_egress_present_one_fingerprint:
     "needs a locally installed Chrome and a live reflector; run via npm run test:ja4-parity",
+  mapped_presets_match_detector_ja4:
+    "hits public JA3/JA4 detectors for every mapped catalog id; run explicitly under --features impersonate-boring -- --ignored",
 };
 
 describe("the release gate runs every ignored test it can", () => {
