@@ -26,7 +26,7 @@
   <img src="docs/assets/readme/ui-traffic.jpg" alt="ShowNet 实时流量" width="920" />
 </p>
 
-当前发布版：[v0.4.34](https://github.com/suifei/shownet/releases/tag/v0.4.34)。更细的能力边界见 [功能全景](docs/feature-map.md)。
+当前发布版：[v0.4.35](https://github.com/suifei/shownet/releases/tag/v0.4.35)。更细的能力边界见 [功能全景](docs/feature-map.md)。
 
 ## 它解决什么
 
