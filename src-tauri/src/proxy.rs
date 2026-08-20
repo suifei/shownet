@@ -2766,7 +2766,7 @@ async fn forward_mitm_https(
         // "http2 error" this path exists to avoid.
         let use_dedicated_base = authority_changed || websocket;
         #[cfg(feature = "impersonate-boring")]
-        let impersonate_client = if websocket && scheme == "https" {
+        let mut impersonate_client = if websocket && scheme == "https" {
             let slot = sender.lock().await;
             match &*slot {
                 HttpsRequestSender::Impersonate { client, .. } => Some(client.clone()),
@@ -2775,11 +2775,6 @@ async fn forward_mitm_https(
         } else {
             None
         };
-        // Product WSS must use the same wreq ClientHello as HTTPS even when the
-        // shared slot is not Impersonate (retired sender, first request is a
-        // socket). rustls Upgrade is not a product path.
-        #[cfg(feature = "impersonate-boring")]
-        let impersonate_websocket = websocket && scheme == "https";
         #[cfg(not(feature = "impersonate-boring"))]
         let impersonate_websocket = false;
         let outbound_profile =
@@ -2835,6 +2830,22 @@ async fn forward_mitm_https(
             }
         }
         let use_dedicated = use_dedicated_base || shared_retired;
+        // Product WSS uses wreq even when the shared slot is not Impersonate
+        // (retired sender / first request is a socket). Tests still inject an
+        // Http1 dedicated factory; keep that hyper Upgrade path.
+        #[cfg(feature = "impersonate-boring")]
+        let mut prefetched_dedicated = None;
+        #[cfg(feature = "impersonate-boring")]
+        if websocket && scheme == "https" && impersonate_client.is_none() {
+            match dedicated_sender_factory(dedicated_route.clone()).await? {
+                HttpsRequestSender::Impersonate { client, .. } => {
+                    impersonate_client = Some(client);
+                }
+                other => prefetched_dedicated = Some(other),
+            }
+        }
+        #[cfg(feature = "impersonate-boring")]
+        let impersonate_websocket = impersonate_client.is_some();
         // The sender is chosen before the request is shaped, because how it must
         // be shaped — absolute vs origin-form URI, and whether h1's
         // connection-specific headers are legal — depends on the protocol of the
@@ -2842,6 +2853,13 @@ async fn forward_mitm_https(
         // protocol, or from the shared connection while sending on a dedicated
         // one, produces a request the origin rejects outright.
         let mut dedicated_sender = if use_dedicated && !impersonate_websocket {
+            #[cfg(feature = "impersonate-boring")]
+            if let Some(prefetched) = prefetched_dedicated {
+                Some(prefetched)
+            } else {
+                Some(dedicated_sender_factory(dedicated_route.clone()).await?)
+            }
+            #[cfg(not(feature = "impersonate-boring"))]
             Some(dedicated_sender_factory(dedicated_route.clone()).await?)
         } else {
             None
@@ -2954,17 +2972,8 @@ async fn forward_mitm_https(
                 .iter()
                 .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
                 .collect();
-            let client = if let Some(client) = impersonate_client {
-                client
-            } else {
-                match dedicated_sender_factory(dedicated_route.clone()).await? {
-                    HttpsRequestSender::Impersonate { client, .. } => client,
-                    _ => {
-                        return Err("HTTPS WebSocket 出站需要与 HTTPS 相同的 wreq 客户端".to_string())
-                    }
-                }
-            };
-            let upgraded = client
+            let upgraded = impersonate_client
+                .expect("impersonate_websocket implies a wreq client")
                 .websocket_upgrade(&url, &header_pairs)
                 .await?;
             let mut builder = Response::builder().status(upgraded.status);
@@ -7440,8 +7449,8 @@ mod tests {
             "the rustls Upgrade fallback is no longer the product HTTPS WebSocket path"
         );
         assert!(
-            source.contains("let impersonate_websocket = websocket && scheme == \"https\""),
-            "MITM WSS must take the wreq path even when the shared sender is not Impersonate"
+            source.contains("if websocket && scheme == \"https\" && impersonate_client.is_none()"),
+            "MITM WSS must try the wreq factory when the shared sender is not Impersonate"
         );
         assert!(
             !source.contains("if route.scheme == \"https\" && route.prefer_http2"),
