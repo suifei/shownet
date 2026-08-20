@@ -38,6 +38,8 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
 
     // Product-truth guards (must not overclaim)
     assert.match(readme, /不宣称.*JA3|位级浏览器 JA3/);
+    assert.match(readme, /WebSocket 出站握手走与 HTTPS 同一套 wreq/);
+    assert.doesNotMatch(readme, /不能终止 Upgrade|仍不一致/);
     assert.match(readme, /无需 Root/);
     assert.doesNotMatch(readme, /12306|春秋航空|kyfw\.|ch\.com/i);
 
@@ -142,6 +144,8 @@ describe("marketing: core capabilities, demo assets, beginner path", () => {
     assert.match(en, /https:\/\/claudegpt\.org\/v1/);
     assert.match(en, /553354813/);
     assert.match(en, /does not claim.*JA3|not claim.*JA3/i);
+    assert.match(en, /same wreq Chrome TLS profile as HTTPS/);
+    assert.doesNotMatch(en, /cannot terminate Upgrade|still inconsistent/i);
     assert.match(en, /no Root required/);
     assert.doesNotMatch(en, /12306|春秋航空|kyfw\.|ch\.com/i);
 

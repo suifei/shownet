@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
+import { COMMAND_GROUP_LABELS } from "../src/commandRegistry.ts";
 import {
+  activateUiLocale,
   createTranslator,
   EN_PACK,
   FALLBACK_PACK_ID,
@@ -126,6 +128,20 @@ describe("chrome lookup wiring", () => {
     assert.ok(localeMatchesRegisteredPack("en-US"));
     assert.ok(localeMatchesRegisteredPack("zh-CN"));
     assert.equal(localeMatchesRegisteredPack("th"), false);
+  });
+
+  it("command palette groups follow the registered pack; unmatched host falls back to Chinese", () => {
+    const { t: en } = createTranslator("en-GB");
+    assert.equal(en("cmd.group.start"), lookupMessage(EN_PACK, "cmd.group.start"));
+    assert.equal(en("shell.commandTitle"), lookupMessage(EN_PACK, "shell.commandTitle"));
+    const { t: unmatched } = createTranslator("th-TH");
+    assert.equal(unmatched("cmd.group.start"), lookupMessage(ZH_PACK, "cmd.group.start"));
+    assert.equal(unmatched("nav.traffic"), lookupMessage(ZH_PACK, "nav.traffic"));
+    activateUiLocale("en-US");
+    assert.equal(COMMAND_GROUP_LABELS.navigate, lookupMessage(EN_PACK, "cmd.group.navigate"));
+    activateUiLocale("zh-CN");
+    assert.equal(COMMAND_GROUP_LABELS.navigate, lookupMessage(ZH_PACK, "cmd.group.navigate"));
+    assert.notEqual(lookupMessage(EN_PACK, "cmd.group.navigate"), lookupMessage(ZH_PACK, "cmd.group.navigate"));
   });
 
   it("interpolates named placeholders", () => {

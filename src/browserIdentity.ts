@@ -13,21 +13,23 @@ export type BrowserIdentityStatus = Pick<
  */
 export function userAgentMetadataFor(status: BrowserIdentityStatus) {
   const major = status.browserUserAgentMajorVersion;
+  const family = status.browserPresetFamily;
   if (
-    status.browserPresetFamily !== "chrome"
+    (family !== "chrome" && family !== "edge")
     || status.browserPresetMajorVersion <= 0
     || major <= 0
   ) return undefined;
+  const product = family === "edge" ? "Microsoft Edge" : "Google Chrome";
   return {
     brands: [
       { brand: "Not/A Brand", version: "99" },
       { brand: "Chromium", version: String(major) },
-      { brand: "Google Chrome", version: String(major) },
+      { brand: product, version: String(major) },
     ],
     fullVersionList: [
       { brand: "Not/A Brand", version: "99.0.0.0" },
       { brand: "Chromium", version: `${major}.0.0.0` },
-      { brand: "Google Chrome", version: `${major}.0.0.0` },
+      { brand: product, version: `${major}.0.0.0` },
     ],
     platform: /Mac/i.test(status.honestUserAgent)
       ? "macOS"

@@ -2437,11 +2437,12 @@ fn dedicated_request_sender_factory(
         Box::pin(async move {
             let profile = route.tls_profile;
             let _ = default_profile;
-            // Normal HTTPS reconnects use wreq so they keep the same Chrome JA4
-            // as the shared tunnel. WebSocket upgrades use wreq's websocket
-            // builder at the call site, not this factory.
+            // Every HTTPS reconnect uses wreq so JA4 matches the shared tunnel,
+            // including hosts on the forced-h1 list. WebSocket still upgrades
+            // through wreq's websocket builder at the call site — this factory
+            // only supplies the client, never a rustls Upgrade stream.
             #[cfg(feature = "impersonate-boring")]
-            if route.scheme == "https" && route.prefer_http2 {
+            if route.scheme == "https" {
                 let client = crate::impersonate_egress::build_client_for_route(
                     &upstream,
                     &route.connection_host,
@@ -2774,8 +2775,11 @@ async fn forward_mitm_https(
         } else {
             None
         };
+        // Product WSS must use the same wreq ClientHello as HTTPS even when the
+        // shared slot is not Impersonate (retired sender, first request is a
+        // socket). rustls Upgrade is not a product path.
         #[cfg(feature = "impersonate-boring")]
-        let impersonate_websocket = impersonate_client.is_some();
+        let impersonate_websocket = websocket && scheme == "https";
         #[cfg(not(feature = "impersonate-boring"))]
         let impersonate_websocket = false;
         let outbound_profile =
@@ -2950,8 +2954,17 @@ async fn forward_mitm_https(
                 .iter()
                 .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
                 .collect();
-            let upgraded = impersonate_client
-                .expect("checked above")
+            let client = if let Some(client) = impersonate_client {
+                client
+            } else {
+                match dedicated_sender_factory(dedicated_route.clone()).await? {
+                    HttpsRequestSender::Impersonate { client, .. } => client,
+                    _ => {
+                        return Err("HTTPS WebSocket 出站需要与 HTTPS 相同的 wreq 客户端".to_string())
+                    }
+                }
+            };
+            let upgraded = client
                 .websocket_upgrade(&url, &header_pairs)
                 .await?;
             let mut builder = Response::builder().status(upgraded.status);
@@ -7425,6 +7438,14 @@ mod tests {
         assert!(
             !source.contains("wreq cannot terminate"),
             "the rustls Upgrade fallback is no longer the product HTTPS WebSocket path"
+        );
+        assert!(
+            source.contains("let impersonate_websocket = websocket && scheme == \"https\""),
+            "MITM WSS must take the wreq path even when the shared sender is not Impersonate"
+        );
+        assert!(
+            !source.contains("if route.scheme == \"https\" && route.prefer_http2"),
+            "dedicated HTTPS reconnects must stay on wreq; prefer_http2 must not select rustls"
         );
     }
 

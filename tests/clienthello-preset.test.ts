@@ -18,6 +18,23 @@ describe("ClientHello preset display", () => {
     assert.equal(displayedClientHelloPresetId(undefined), "");
   });
 
+  it("maps catalog ids onto linked wreq-util profiles without inventing missing majors", () => {
+    const source = readFileSync(join(root, "src-tauri/src/tls_clienthello_catalog.rs"), "utf8");
+    const egress = readFileSync(join(root, "src-tauri/src/impersonate_egress.rs"), "utf8");
+    const report = readFileSync(join(root, "docs/clienthello-open-source-presets.md"), "utf8");
+    assert.match(source, /"chrome131" => "Chrome131"/);
+    assert.match(source, /"firefox133" => "Firefox133"/);
+    assert.match(source, /uses_chrome151_sigalgs_overlay/);
+    assert.match(egress, /fn emulation_for_preset/);
+    assert.match(egress, /mapped_presets_match_detector_ja4/);
+    assert.match(egress, /is_profile_identity_header/);
+    assert.match(egress, /Profile::Firefox133/);
+    assert.match(report, /下一步/);
+    assert.match(report, /chrome-android150/);
+    assert.match(report, /edge150/);
+    assert.match(report, /firefox115/);
+  });
+
   it("settings and advanced console use the shipped display helper", () => {
     const settings = readFileSync(join(root, "src/components/SettingsView.tsx"), "utf8");
     const advanced = readFileSync(join(root, "src/components/AdvancedConsoleView.tsx"), "utf8");

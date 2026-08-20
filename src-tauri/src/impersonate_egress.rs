@@ -18,8 +18,9 @@ use crate::models::EffectiveUpstreamProxy;
 use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::lookup_host;
+use wreq::header::{HeaderValue, USER_AGENT};
 use wreq::{Body, Client, IntoEmulation, Response, Uri};
-use wreq_util::Profile;
+use wreq_util::{Platform, Profile};
 
 #[cfg(test)]
 static TEST_ROOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -105,14 +106,127 @@ struct DirectRouteOverride {
     addresses: Vec<SocketAddr>,
 }
 
+fn host_platform() -> Platform {
+    if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
+    } else {
+        Platform::MacOS
+    }
+}
+
+fn platform_for_preset(preset_id: &str) -> Platform {
+    if preset_id.starts_with("safari-ios") {
+        Platform::IOS
+    } else if preset_id.starts_with("chrome-android") {
+        Platform::Android
+    } else {
+        host_platform()
+    }
+}
+
+fn emulation_from_profile(profile: Profile, preset_id: &str) -> wreq::Emulation {
+    wreq_util::Emulation::builder()
+        .profile(profile)
+        .platform(platform_for_preset(preset_id))
+        .build()
+        .into_emulation()
+}
+
+fn overlay_chrome_major_identity(
+    headers: &mut wreq::header::HeaderMap,
+    from_major: u16,
+    to_major: u16,
+) {
+    let from = from_major.to_string();
+    let to = to_major.to_string();
+    let names = [
+        USER_AGENT,
+        wreq::header::HeaderName::from_static("sec-ch-ua"),
+    ];
+    for name in names {
+        let Some(current) = headers.get(&name).and_then(|value| value.to_str().ok()) else {
+            continue;
+        };
+        let rewritten = current
+            .replace(&format!("Chrome/{from}"), &format!("Chrome/{to}"))
+            .replace(&format!("CriOS/{from}"), &format!("CriOS/{to}"))
+            .replace(&format!("v=\"{from}\""), &format!("v=\"{to}\""));
+        if rewritten == current {
+            continue;
+        }
+        if let Ok(value) = HeaderValue::from_str(&rewritten) {
+            headers.insert(name, value);
+        }
+    }
+}
+
 fn chrome_151_emulation() -> Result<wreq::Emulation, String> {
-    let mut emulation = EMULATION.into_emulation();
+    let mut emulation = emulation_from_profile(EMULATION, "chrome151");
     let tls = emulation
         .tls_options
         .as_mut()
         .ok_or_else(|| "Chrome 149 emulation is missing TLS options".to_string())?;
     tls.sigalgs_list = Some(Cow::Borrowed(CHROME_151_SIGNATURE_ALGORITHMS));
+    overlay_chrome_major_identity(&mut emulation.headers, 149, 151);
     Ok(emulation)
+}
+
+fn wreq_profile_from_name(name: &str) -> Option<Profile> {
+    Some(match name {
+        "Chrome120" => Profile::Chrome120,
+        "Chrome124" => Profile::Chrome124,
+        "Chrome128" => Profile::Chrome128,
+        "Chrome131" => Profile::Chrome131,
+        "Chrome133" => Profile::Chrome133,
+        "Chrome136" => Profile::Chrome136,
+        "Chrome140" => Profile::Chrome140,
+        "Chrome144" => Profile::Chrome144,
+        "Chrome145" => Profile::Chrome145,
+        "Chrome146" => Profile::Chrome146,
+        "Chrome149" => Profile::Chrome149,
+        "Firefox128" => Profile::Firefox128,
+        "Firefox133" => Profile::Firefox133,
+        "Firefox136" => Profile::Firefox136,
+        "Edge131" => Profile::Edge131,
+        "Edge136" => Profile::Edge136,
+        "Safari17_6" => Profile::Safari17_6,
+        "Safari18" => Profile::Safari18,
+        "SafariIos17_4_1" => Profile::SafariIos17_4_1,
+        "SafariIos18_1_1" => Profile::SafariIos18_1_1,
+        _ => return None,
+    })
+}
+
+/// wreq ClientHello for the active catalog id. Exact wreq-util profiles when
+/// we have them; Chrome 150/151 keep the existing Chrome149 + ML-DSA overlay.
+pub fn emulation_for_preset(preset_id: &str) -> Result<wreq::Emulation, String> {
+    match crate::tls_clienthello_catalog::wreq_emulation_kind(preset_id) {
+        crate::tls_clienthello_catalog::WreqEmulationKind::Chrome149PlusMldsa
+        | crate::tls_clienthello_catalog::WreqEmulationKind::None => chrome_151_emulation(),
+        crate::tls_clienthello_catalog::WreqEmulationKind::Exact => {
+            let name = crate::tls_clienthello_catalog::wreq_profile_name(preset_id)
+                .ok_or_else(|| format!("missing wreq profile for {preset_id}"))?;
+            let profile = wreq_profile_from_name(name)
+                .ok_or_else(|| format!("wreq-util has no Profile::{name}"))?;
+            Ok(emulation_from_profile(profile, preset_id))
+        }
+    }
+}
+
+fn emulation_for_active_preset() -> Result<wreq::Emulation, String> {
+    emulation_for_preset(&crate::tls_clienthello_catalog::active_preset_id())
+}
+
+/// User-Agent the impersonate client will send for this catalog id.
+pub fn user_agent_for_preset(preset_id: &str) -> Option<String> {
+    let emulation = emulation_for_preset(preset_id).ok()?;
+    emulation
+        .headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// Builds a wreq client that egresses like Chrome, honoring ShowNet's upstream
@@ -135,7 +249,7 @@ fn build_client_inner(
     // this client may use. (Invariant enforced by upstream-egress-ui.test.ts.)
     let mut direct_builder = Client::builder()
         .no_proxy()
-        .emulation(chrome_151_emulation()?);
+        .emulation(emulation_for_active_preset()?);
     if let Some(route) = route.as_ref() {
         direct_builder = direct_builder
             .resolve_to_addrs(route.identity_host.clone(), route.addresses.iter().copied());
@@ -160,7 +274,7 @@ fn build_client_inner(
         }
         let mut builder = Client::builder()
             .no_proxy()
-            .emulation(chrome_151_emulation()?)
+            .emulation(emulation_for_active_preset()?)
             .proxy(proxy);
         if let Some(store) = cert_store {
             builder = builder.tls_cert_store(store);
@@ -319,6 +433,27 @@ fn is_client_owned(name: &str) -> bool {
     )
 }
 
+/// Captured-browser identity. The selected ClientHello profile owns these on
+/// the wire; copying the embedded Chrome values would advertise 151 next to a
+/// Firefox or Safari handshake.
+fn is_profile_identity_header(name: &str) -> bool {
+    matches!(
+        name,
+        "user-agent"
+            | "sec-ch-ua"
+            | "sec-ch-ua-mobile"
+            | "sec-ch-ua-platform"
+            | "sec-ch-ua-full-version"
+            | "sec-ch-ua-full-version-list"
+            | "sec-ch-ua-arch"
+            | "sec-ch-ua-bitness"
+            | "sec-ch-ua-model"
+            | "sec-ch-ua-wow64"
+            | "sec-ch-ua-form-factors"
+            | "sec-ch-ua-platform-version"
+    )
+}
+
 /// wreq `RequestBuilder::header` replaces same-name values. HTTP/2 clients
 /// send one Cookie header per cookie; iterating those crumbs would keep only
 /// the last one. Join them the way RFC 6265 user agents send a single Cookie.
@@ -371,7 +506,8 @@ pub async fn send(
     };
     let mut request = target.request(method, uri);
     for (name, value) in collapse_cookie_header_pairs(headers) {
-        if is_client_owned(&name.to_ascii_lowercase()) {
+        let lower = name.to_ascii_lowercase();
+        if is_client_owned(&lower) || is_profile_identity_header(&lower) {
             continue;
         }
         request = request.header(name.as_str(), value.as_slice());
@@ -442,7 +578,10 @@ impl ImpersonateClient {
                 }
                 continue;
             }
-            if lower == "sec-websocket-version" || is_client_owned(&lower) {
+            if lower == "sec-websocket-version"
+                || is_client_owned(&lower)
+                || is_profile_identity_header(&lower)
+            {
                 continue;
             }
             request = request.header(name.as_str(), value.as_slice());
@@ -539,6 +678,9 @@ mod tests {
         assert!(!is_client_owned("content-length"));
         assert!(is_client_owned("transfer-encoding"));
         assert!(is_client_owned("connection"));
+        assert!(is_profile_identity_header("user-agent"));
+        assert!(is_profile_identity_header("sec-ch-ua"));
+        assert!(!is_profile_identity_header("accept-language"));
     }
 
     #[test]
@@ -747,6 +889,167 @@ mod tests {
         .expect("empty post");
         assert_eq!(response.status(), 204);
         server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn origin_sees_profile_user_agent_not_the_captured_browser() {
+        let _serial = TEST_ROOT_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = crate::tls_clienthello_catalog::active_preset_id();
+        crate::tls_clienthello_catalog::set_active_preset_id("firefox133")
+            .expect("select firefox133");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let head = String::from_utf8(read_http_head(&mut stream).await).expect("http header");
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response");
+            head
+        });
+
+        let client = build_client(&EffectiveUpstreamProxy {
+            mode: "direct".to_string(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: None,
+            bypass: Vec::new(),
+        })
+        .expect("client");
+        let response = send(
+            &client,
+            "GET",
+            &format!("http://{address}/ua"),
+            &[(
+                "User-Agent".to_string(),
+                b"Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36".to_vec(),
+            )],
+            None,
+        )
+        .await
+        .expect("send");
+        assert_eq!(response.status(), 204);
+        let head = server.await.expect("server");
+        let _ = crate::tls_clienthello_catalog::set_active_preset_id(&previous);
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("user-agent: mozilla/5.0")
+                && head.contains("Firefox/133"),
+            "origin must see Firefox 133, not the captured Chrome UA: {head}"
+        );
+        assert!(
+            !head.contains("Chrome/151"),
+            "captured Chrome UA leaked to origin: {head}"
+        );
+    }
+
+    #[test]
+    fn mapped_catalog_ids_select_the_linked_wreq_profile() {
+        let mut exact = 0;
+        for id in crate::tls_clienthello_catalog::list_preset_ids() {
+            let emulation =
+                emulation_for_preset(id).unwrap_or_else(|error| panic!("{id}: {error}"));
+            let sigs = emulation
+                .tls_options
+                .as_ref()
+                .and_then(|tls| tls.sigalgs_list.as_ref())
+                .map(|list| list.as_ref())
+                .unwrap_or("");
+            match crate::tls_clienthello_catalog::wreq_emulation_kind(id) {
+                crate::tls_clienthello_catalog::WreqEmulationKind::Exact => {
+                    exact += 1;
+                    let name = crate::tls_clienthello_catalog::wreq_profile_name(id)
+                        .unwrap_or_else(|| panic!("{id} missing wreq profile name"));
+                    assert!(
+                        wreq_profile_from_name(name).is_some(),
+                        "{id} → {name} is not a linked wreq-util Profile"
+                    );
+                    assert!(
+                        !sigs.contains("mldsa44"),
+                        "{id} must not ride the Chrome 151 ML-DSA overlay: {sigs}"
+                    );
+                }
+                crate::tls_clienthello_catalog::WreqEmulationKind::Chrome149PlusMldsa
+                | crate::tls_clienthello_catalog::WreqEmulationKind::None => {
+                    assert!(
+                        sigs.contains("mldsa44"),
+                        "{id} falls back to the Chrome 151 overlay"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            exact, 20,
+            "catalog ↔ wreq-util exact map drifted; update the report"
+        );
+    }
+
+    fn expected_ua_needle(preset_id: &str) -> Option<&'static str> {
+        Some(match preset_id {
+            "chrome120" => "Chrome/120",
+            "chrome124" => "Chrome/124",
+            "chrome128" => "Chrome/128",
+            "chrome131" => "Chrome/131",
+            "chrome133" => "Chrome/133",
+            "chrome136" => "Chrome/136",
+            "chrome140" => "Chrome/140",
+            "chrome144" => "Chrome/144",
+            "chrome145" => "Chrome/145",
+            "chrome146" => "Chrome/146",
+            "chrome149" => "Chrome/149",
+            "chrome150" | "chrome151" | "chrome-like" | "firefox115" => "Chrome/151",
+            "firefox128" => "Firefox/128",
+            "firefox133" => "Firefox/133",
+            "firefox136" => "Firefox/136",
+            "edge131" => "Edg/131",
+            "edge136" => "Chrome/136",
+            "safari17" => "Version/17.6",
+            "safari18" => "Version/18.0",
+            "safari-ios17" => "Version/17.4.1",
+            "safari-ios18" => "Version/18.1.1",
+            _ => return None,
+        })
+    }
+
+    #[test]
+    fn mapped_presets_carry_the_matching_user_agent() {
+        for id in crate::tls_clienthello_catalog::list_preset_ids() {
+            let Some(needle) = expected_ua_needle(id) else {
+                continue;
+            };
+            let ua = user_agent_for_preset(id).unwrap_or_else(|| panic!("{id} missing UA"));
+            assert!(
+                ua.contains(needle),
+                "{id} User-Agent {ua} does not contain {needle}"
+            );
+            if id.starts_with("firefox") && id != "firefox115" {
+                assert!(
+                    !ua.contains("Chrome/"),
+                    "{id} must not keep a Chrome User-Agent: {ua}"
+                );
+            }
+        }
+        let chrome151 = user_agent_for_preset("chrome151").expect("chrome151 ua");
+        assert!(
+            !chrome151.contains("Chrome/149"),
+            "Chrome 151 overlay still advertises 149: {chrome151}"
+        );
+        let sec_ch_ua = emulation_for_preset("chrome151")
+            .expect("chrome151")
+            .headers
+            .get("sec-ch-ua")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            sec_ch_ua.contains("v=\"151\""),
+            "Chrome 151 sec-ch-ua still on 149: {sec_ch_ua}"
+        );
+        assert!(!sec_ch_ua.contains("v=\"149\""), "{sec_ch_ua}");
     }
 
     #[test]
@@ -1052,6 +1355,195 @@ mod tests {
             .await
             .is_err());
         target_task.await.expect("target task");
+    }
+
+    /// JA4 values wreq-util 3.0.0-rc.14 already measured on tls.browserleaks.com
+    /// (`tests/emulate_*.rs`). ECH padding can flip the first JA4 token
+    /// (t13d1516 ↔ t13d1517); the cipher hash (second token) is the stable check.
+    fn expected_detector_ja4(preset_id: &str) -> &'static [&'static str] {
+        match preset_id {
+            "chrome120" => &[
+                "t13d1516h2_8daaf6152771_02713d6af862",
+                "t13d1517h2_8daaf6152771_b1ff8ab2d16f",
+            ],
+            "chrome124" | "chrome128" | "chrome131" | "edge131" => {
+                &["t13d1516h2_8daaf6152771_02713d6af862"]
+            }
+            "chrome133" | "chrome136" | "chrome140" | "chrome144" | "chrome145" | "chrome146"
+            | "chrome149" | "edge136" => &["t13d1516h2_8daaf6152771_d8a2da3f94cd"],
+            "chrome150" | "chrome151" | "chrome-like" | "firefox115" => &[EGRESS_JA4],
+            "firefox128" => &["t13d1513h2_8daaf6152771_748f4c70de1c"],
+            "firefox133" => &["t13d1716h2_5b57614c22b0_eeeea6562960"],
+            "firefox136" => &["t13d1717h2_5b57614c22b0_3cbfd9057e0d"],
+            "safari17" | "safari18" | "safari-ios17" | "safari-ios18" => {
+                &["t13d2014h2_a09f3c656075_14788d8d241b"]
+            }
+            _ => &[],
+        }
+    }
+
+    fn ja4_cipher_hash(ja4: &str) -> Option<&str> {
+        ja4.split('_').nth(1)
+    }
+
+    fn ja4_agrees_with_expected(measured: &str, expected: &[&str]) -> bool {
+        if expected.is_empty() {
+            return true;
+        }
+        if expected.iter().any(|item| *item == measured) {
+            return true;
+        }
+        let Some(got) = ja4_cipher_hash(measured) else {
+            return false;
+        };
+        expected
+            .iter()
+            .any(|item| ja4_cipher_hash(item) == Some(got))
+    }
+
+    fn family_ja4_ok(preset_id: &str, ja4: &str) -> bool {
+        if preset_id.starts_with("safari") {
+            return ja4.starts_with("t13d20");
+        }
+        if preset_id.starts_with("firefox") && preset_id != "firefox115" {
+            return ja4.starts_with("t13d1513") || ja4.starts_with("t13d17");
+        }
+        ja4.starts_with("t13d15")
+    }
+
+    fn extract_detector_ja4(url: &str, value: &serde_json::Value) -> Option<String> {
+        let ja4 = if url.contains("peet.ws") {
+            value["tls"]["ja4"].as_str()
+        } else {
+            value
+                .get("ja4")
+                .and_then(|item| item.as_str())
+                .or_else(|| value["tls"]["ja4"].as_str())
+        }?;
+        let ja4 = ja4.trim();
+        if ja4.is_empty() {
+            None
+        } else {
+            Some(ja4.to_string())
+        }
+    }
+
+    async fn probe_preset_ja4(
+        preset_id: &str,
+        detector: &str,
+    ) -> Result<(String, serde_json::Value), String> {
+        let client = Client::builder()
+            .emulation(emulation_for_preset(preset_id)?)
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|error| format!("build {preset_id}: {error}"))?;
+        let text = timeout(Duration::from_secs(30), client.get(detector).send())
+            .await
+            .map_err(|_| format!("{preset_id}: timeout contacting {detector}"))?
+            .map_err(|error| format!("{preset_id}: {error}"))?
+            .text()
+            .await
+            .map_err(|error| format!("{preset_id} body: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("{preset_id} json from {detector}: {error}; body={text}"))?;
+        let ja4 = extract_detector_ja4(detector, &value)
+            .ok_or_else(|| format!("{preset_id}: no ja4 in {detector} body={text}"))?;
+        Ok((ja4, value))
+    }
+
+    /// Hits public JA3/JA4 reflectors with every catalog id that has a linked
+    /// wreq-util profile. Does not install browser versions.
+    ///
+    ///   cargo test --no-default-features --features impersonate-boring \
+    ///     mapped_presets_match_detector_ja4 -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "network; run explicitly under --features impersonate-boring"]
+    async fn mapped_presets_match_detector_ja4() {
+        const DETECTORS: &[&str] = &[
+            "https://tls.peet.ws/api/all",
+            "https://tls.browserleaks.com/json",
+        ];
+        let mut ids: Vec<&str> = crate::tls_clienthello_catalog::list_preset_ids()
+            .into_iter()
+            .filter(|id| {
+                crate::tls_clienthello_catalog::wreq_emulation_kind(id)
+                    != crate::tls_clienthello_catalog::WreqEmulationKind::None
+            })
+            .collect();
+        ids.push("firefox115");
+        ids.sort();
+        ids.dedup();
+
+        let mut detector = DETECTORS[0];
+        let mut detector_ok = false;
+        for candidate in DETECTORS {
+            match probe_preset_ja4("chrome151", candidate).await {
+                Ok((ja4, _)) => {
+                    eprintln!("DETECTOR {candidate} chrome151={ja4}");
+                    detector = *candidate;
+                    detector_ok = true;
+                    break;
+                }
+                Err(error) => eprintln!("DETECTOR_SKIP {candidate}: {error}"),
+            }
+        }
+        assert!(
+            detector_ok,
+            "no public JA3/JA4 detector answered (tried {})",
+            DETECTORS.join(", ")
+        );
+
+        let mut measured = std::collections::BTreeMap::<String, String>::new();
+        for id in ids {
+            if measured.contains_key(id) {
+                continue;
+            }
+            let (ja4, value) = probe_preset_ja4(id, detector)
+                .await
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
+            let ja3 = if detector.contains("peet.ws") {
+                value["tls"]["ja3_hash"].as_str().unwrap_or_default()
+            } else {
+                value
+                    .get("ja3_hash")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+            };
+            let ua = value
+                .get("user_agent")
+                .and_then(|item| item.as_str())
+                .or_else(|| value["http"]["user_agent"].as_str())
+                .unwrap_or_default();
+            eprintln!("PROBE {id} ja4={ja4} ja3={ja3} ua={ua}");
+            if let Some(needle) = expected_ua_needle(id) {
+                assert!(
+                    ua.contains(needle),
+                    "{id} detector User-Agent {ua} does not contain {needle}"
+                );
+            }
+            assert!(
+                family_ja4_ok(id, &ja4),
+                "{id} JA4 {ja4} is not the expected browser family"
+            );
+            let expected = expected_detector_ja4(id);
+            assert!(
+                ja4_agrees_with_expected(&ja4, expected),
+                "{id} JA4 {ja4} disagrees with wreq-util/ShowNet expectation {expected:?}"
+            );
+            measured.insert(id.to_string(), ja4);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+
+        let chrome = measured.get("chrome131").expect("chrome131");
+        let firefox = measured.get("firefox133").expect("firefox133");
+        let safari = measured.get("safari18").expect("safari18");
+        assert_ne!(chrome, firefox, "Firefox 133 must not present Chrome JA4");
+        assert_ne!(chrome, safari, "Safari 18 must not present Chrome JA4");
+        assert_eq!(
+            measured.get("firefox115").map(String::as_str),
+            measured.get("chrome151").map(String::as_str),
+            "unmapped firefox115 must not pretend to be Firefox; it keeps the Chrome 151 overlay"
+        );
     }
 
     /// The whole reason wreq was chosen: Chrome byte-exact on both axes a strict

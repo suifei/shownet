@@ -720,6 +720,8 @@ pub fn status_json() -> serde_json::Value {
     serde_json::json!({
         "profile": profile.as_str(),
         "presetId": preset_id,
+        "wreqProfile": tls_clienthello_catalog::wreq_profile_name(&preset_id),
+        "wreqEmulation": tls_clienthello_catalog::wreq_emulation_kind(&preset_id).as_str(),
         "preset": preset.map(tls_clienthello_catalog::preset_view),
         "presets": tls_clienthello_catalog::list_presets(),
         "fidelityLabel": preset.map(|p| p.note).unwrap_or(profile.fidelity_label()),

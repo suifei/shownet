@@ -55,7 +55,9 @@
 
   /* Settings switches (#54). Off/on/knob must stay distinct from the glass
      settings panel (--surface-panel / --material-regular) and from each other.
-     The panel ramp (--surface-sunken, --dark-raised, --success-bg) collapses. */
+     The panel ramp (--surface-sunken, --dark-raised, --success-bg) collapses.
+     Off track is systemGray, not a slit of the panel; a 1px inset edge keeps it
+     a control instead of a seam. */
   --switch-track-off: var(--text-faint);
   --switch-track-on: var(--accent-fill);
   --switch-knob: var(--text-primary);
@@ -5215,6 +5217,7 @@ kbd {
   height: 16px;
   background: var(--switch-track-off);
   border-radius: 12px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
   transition: background 150ms ease;
 }
 
@@ -7678,7 +7681,7 @@ kbd {
 .mcp-client-row__actions .icon-button.is-danger { color: var(--danger-ink); }
 .compact-switch { position: relative; display: block; width: 30px; height: 18px; margin-right: 3px; }
 .compact-switch input { position: absolute; opacity: 0; pointer-events: none; }
-.compact-switch i { position: absolute; inset: 0; background: var(--switch-track-off); border-radius: 14px; transition: background 0.15s ease; }
+.compact-switch i { position: absolute; inset: 0; background: var(--switch-track-off); border-radius: 14px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22); transition: background 0.15s ease; }
 .compact-switch i::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; content: ""; background: var(--switch-knob); border-radius: 50%; box-shadow: 0 1px 2px rgba(20, 24, 27, 0.22); transition: transform 0.15s ease; }
 .compact-switch input:checked + i { background: var(--switch-track-on); }
 .compact-switch input:checked + i::after { transform: translateX(12px); }

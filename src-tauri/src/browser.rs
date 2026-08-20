@@ -129,10 +129,10 @@ Chrome/{major}.0.0.0 Safari/537.36"
 
 /// Select the browser UA major independently from the installed binary.
 ///
-/// The embedded browser is desktop Chrome, so only a versioned desktop Chrome
-/// preset can be represented faithfully. Firefox, Safari, Edge, Android Chrome,
-/// generic buckets, and the default preset keep the installed Chrome identity
-/// rather than combining a Chrome binary with another browser's UA.
+/// Versioned desktop Chrome presets always pin the major. With impersonate
+/// egress, exact wreq-util profiles (Firefox/Safari/Edge) also pin the major so
+/// `navigator.userAgent` matches the TLS profile. Unmapped ids keep the
+/// installed Chrome identity — those handshakes still use the Chrome 151 overlay.
 fn browser_user_agent_major(
     installed_major: Option<u32>,
     preset: Option<&ClientHelloPreset>,
@@ -141,8 +141,31 @@ fn browser_user_agent_major(
         Some(preset) if preset.family == "chrome" && preset.major_version > 0 => {
             Some(preset.major_version as u32)
         }
+        #[cfg(feature = "impersonate-boring")]
+        Some(preset)
+            if preset.major_version > 0
+                && crate::tls_clienthello_catalog::wreq_emulation_kind(preset.id)
+                    == crate::tls_clienthello_catalog::WreqEmulationKind::Exact =>
+        {
+            Some(preset.major_version as u32)
+        }
         _ => installed_major,
     }
+}
+
+fn launch_user_agent(
+    installed_major: Option<u32>,
+    preset: Option<&ClientHelloPreset>,
+) -> Option<String> {
+    #[cfg(feature = "impersonate-boring")]
+    {
+        if let Some(preset) = preset {
+            if let Some(ua) = crate::impersonate_egress::user_agent_for_preset(preset.id) {
+                return Some(ua);
+            }
+        }
+    }
+    browser_user_agent_major(installed_major, preset).map(frozen_user_agent)
 }
 
 /// Reads the major version straight off the binary that is about to be launched,
@@ -236,7 +259,7 @@ impl ProxyBrowserHandle {
         let installed_chrome_major = chrome_major_version(&chrome);
         let active_preset = tls_outbound::active_preset().ok();
         let user_agent_major = browser_user_agent_major(installed_chrome_major, active_preset);
-        let honest_launch_user_agent = user_agent_major.map(frozen_user_agent);
+        let honest_launch_user_agent = launch_user_agent(installed_chrome_major, active_preset);
         let browser_language = normalize_browser_language(browser_language)?;
         cleanup_browser_profile(&data_dir.join("browser-profile"));
         let (lab_address, lab_shutdown, lab_task) = start_lab_server().await?;
@@ -881,10 +904,30 @@ mod tests {
     #[test]
     fn non_chrome_preset_keeps_the_installed_chrome_user_agent() {
         let installed = Some(151);
-        assert_eq!(
-            browser_user_agent_major(installed, Some(get_preset("firefox136").unwrap())),
-            installed
-        );
+        #[cfg(not(feature = "impersonate-boring"))]
+        {
+            assert_eq!(
+                browser_user_agent_major(installed, Some(get_preset("firefox136").unwrap())),
+                installed
+            );
+        }
+        #[cfg(feature = "impersonate-boring")]
+        {
+            assert_eq!(
+                browser_user_agent_major(installed, Some(get_preset("firefox136").unwrap())),
+                Some(136)
+            );
+            let ua = super::launch_user_agent(installed, Some(get_preset("firefox136").unwrap()))
+                .expect("firefox ua");
+            assert!(
+                ua.contains("Firefox/136"),
+                "embedded browser UA must match the Firefox profile: {ua}"
+            );
+            let chrome =
+                super::launch_user_agent(installed, Some(get_preset("chrome131").unwrap()))
+                    .expect("chrome ua");
+            assert!(chrome.contains("Chrome/131"), "{chrome}");
+        }
         assert_eq!(
             browser_user_agent_major(installed, Some(get_preset("default").unwrap())),
             installed

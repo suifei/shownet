@@ -32,6 +32,22 @@ describe("embedded browser identity", () => {
 
   it("does not invent Chrome client hints for another family or generic preset", () => {
     assert.equal(userAgentMetadataFor(status({ browserPresetFamily: "firefox" })), undefined);
+    assert.equal(userAgentMetadataFor(status({ browserPresetFamily: "safari" })), undefined);
     assert.equal(userAgentMetadataFor(status({ browserPresetFamily: "chrome", browserPresetMajorVersion: 0 })), undefined);
+  });
+
+  it("keeps Edge UA-CH brands on the selected major", () => {
+    const metadata = userAgentMetadataFor(status({
+      browserPresetFamily: "edge",
+      browserPresetMajorVersion: 136,
+      browserUserAgentMajorVersion: 136,
+      honestUserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+    }));
+    assert.ok(metadata);
+    assert.deepEqual(metadata.brands, [
+      { brand: "Not/A Brand", version: "99" },
+      { brand: "Chromium", version: "136" },
+      { brand: "Microsoft Edge", version: "136" },
+    ]);
   });
 });

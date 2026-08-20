@@ -232,7 +232,7 @@ Network-related integration tests are ignored by default: `npm run test:rust:net
 ## Honesty bounds
 
 - Release egress uses a wreq Chrome profile. ShowNet **does not claim** a bit-level browser JA3 clone. JA3 includes GREASE, so one page load can measure several different JA3 values. Comparisons use JA4.
-- WebSocket egress uses the same wreq Chrome TLS profile as HTTPS. wreq performs the Upgrade; ShowNet still relays and stores frames. This is not a bit-level JA3 clone.
+- WebSocket egress uses the same wreq Chrome TLS profile as HTTPS (same ClientHello preset). wreq performs the Upgrade; ShowNet does not fall back to rustls, add a site whitelist, or turn TLS decryption off. Frames are still relayed and stored. This is not a bit-level JA3 clone.
 - Certificate pinning, TUN transparent capture, and store-grade signed installers are still later work.
 
 ## License

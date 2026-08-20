@@ -240,6 +240,11 @@ pub struct ClientHelloPresetView {
     pub documented_ja3: Option<String>,
     pub recipe_fingerprint: String,
     pub claims_full_browser_ja3: bool,
+    /// Linked wreq-util Profile name when impersonate egress can use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wreq_profile: Option<String>,
+    /// How impersonate egress treats this id. Not a JA3 clone claim.
+    pub wreq_emulation: String,
     pub h2_settings: Vec<Http2SettingView>,
     pub h2_pseudo_header_order: Vec<String>,
     pub h2_fingerprint: String,
@@ -673,6 +678,8 @@ pub fn preset_view(p: &ClientHelloPreset) -> ClientHelloPresetView {
         documented_ja3: documented,
         recipe_fingerprint: recipe_fingerprint(p),
         claims_full_browser_ja3: false,
+        wreq_profile: wreq_profile_name(p.id).map(str::to_string),
+        wreq_emulation: wreq_emulation_kind(p.id).as_str().to_string(),
         h2_settings: h2
             .settings_pairs()
             .into_iter()
@@ -684,6 +691,65 @@ pub fn preset_view(p: &ClientHelloPreset) -> ClientHelloPresetView {
             .map(|s| (*s).to_string())
             .collect(),
         h2_fingerprint: h2.fingerprint(),
+    }
+}
+
+/// wreq-util Profile variant name for exact catalog ids. None = no source profile.
+pub fn wreq_profile_name(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "chrome120" => "Chrome120",
+        "chrome124" => "Chrome124",
+        "chrome128" => "Chrome128",
+        "chrome131" => "Chrome131",
+        "chrome133" => "Chrome133",
+        "chrome136" => "Chrome136",
+        "chrome140" => "Chrome140",
+        "chrome144" => "Chrome144",
+        "chrome145" => "Chrome145",
+        "chrome146" => "Chrome146",
+        "chrome149" => "Chrome149",
+        "firefox128" => "Firefox128",
+        "firefox133" => "Firefox133",
+        "firefox136" => "Firefox136",
+        "edge131" => "Edge131",
+        "edge136" => "Edge136",
+        "safari17" => "Safari17_6",
+        "safari18" => "Safari18",
+        "safari-ios17" => "SafariIos17_4_1",
+        "safari-ios18" => "SafariIos18_1_1",
+        _ => return None,
+    })
+}
+
+/// Chrome 150/151 have no wreq Profile; product egress already overlays ML-DSA on Chrome149.
+pub fn uses_chrome151_sigalgs_overlay(id: &str) -> bool {
+    matches!(id, "chrome150" | "chrome151" | "chrome-like")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WreqEmulationKind {
+    Exact,
+    Chrome149PlusMldsa,
+    None,
+}
+
+impl WreqEmulationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "wreq-util-exact",
+            Self::Chrome149PlusMldsa => "wreq-chrome149-mldsa",
+            Self::None => "none",
+        }
+    }
+}
+
+pub fn wreq_emulation_kind(id: &str) -> WreqEmulationKind {
+    if uses_chrome151_sigalgs_overlay(id) {
+        WreqEmulationKind::Chrome149PlusMldsa
+    } else if wreq_profile_name(id).is_some() {
+        WreqEmulationKind::Exact
+    } else {
+        WreqEmulationKind::None
     }
 }
 
@@ -949,6 +1015,53 @@ mod tests {
             assert!(!view.h2_settings.is_empty());
             assert!(!view.h2_pseudo_header_order.is_empty());
         }
+    }
+
+    #[test]
+    fn wreq_profile_map_is_exact_and_does_not_invent_missing_versions() {
+        assert_eq!(wreq_profile_name("chrome131"), Some("Chrome131"));
+        assert_eq!(wreq_profile_name("firefox133"), Some("Firefox133"));
+        assert_eq!(wreq_profile_name("safari18"), Some("Safari18"));
+        assert_eq!(wreq_profile_name("chrome151"), None);
+        assert_eq!(wreq_profile_name("firefox115"), None);
+        assert_eq!(wreq_profile_name("edge150"), None);
+        assert_eq!(wreq_profile_name("chrome-android150"), None);
+        assert_eq!(wreq_emulation_kind("chrome131"), WreqEmulationKind::Exact);
+        assert_eq!(
+            wreq_emulation_kind("chrome151"),
+            WreqEmulationKind::Chrome149PlusMldsa
+        );
+        assert_eq!(wreq_emulation_kind("firefox115"), WreqEmulationKind::None);
+        let view = preset_view(get_preset("chrome131").unwrap());
+        assert_eq!(view.wreq_profile.as_deref(), Some("Chrome131"));
+        assert_eq!(view.wreq_emulation, "wreq-util-exact");
+        assert!(!view.claims_full_browser_ja3);
+
+        let mut exact = 0;
+        let mut overlay = 0;
+        let mut none = 0;
+        for id in list_preset_ids() {
+            match wreq_emulation_kind(id) {
+                WreqEmulationKind::Exact => {
+                    exact += 1;
+                    assert!(wreq_profile_name(id).is_some(), "{id}");
+                    assert!(!uses_chrome151_sigalgs_overlay(id), "{id}");
+                }
+                WreqEmulationKind::Chrome149PlusMldsa => {
+                    overlay += 1;
+                    assert!(uses_chrome151_sigalgs_overlay(id), "{id}");
+                    assert!(wreq_profile_name(id).is_none(), "{id}");
+                }
+                WreqEmulationKind::None => {
+                    none += 1;
+                    assert!(wreq_profile_name(id).is_none(), "{id}");
+                    assert!(!uses_chrome151_sigalgs_overlay(id), "{id}");
+                }
+            }
+        }
+        assert_eq!(exact, 20);
+        assert_eq!(overlay, 3);
+        assert_eq!(none, 7);
     }
 
     #[test]

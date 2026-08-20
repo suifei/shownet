@@ -233,7 +233,7 @@ npm run tauri dev
 ## 诚实边界
 
 - 正式包出站走 wreq Chrome 配置；**不宣称**位级浏览器 JA3 克隆。JA3 含 GREASE，一次加载就会量到多个不同 JA3，比对用 JA4。
-- WebSocket 出站握手走与 HTTPS 同一套 wreq Chrome TLS；Upgrade 由 wreq 的 websocket 构建器完成，帧仍由 ShowNet 转发并落库。不宣称位级 JA3 克隆。
+- WebSocket 出站握手走与 HTTPS 同一套 wreq Chrome TLS（同一 ClientHello 预置）。Upgrade 由 wreq 的 websocket 构建器完成，不走 rustls、不加站点白名单、不关 TLS 解密。帧仍由 ShowNet 转发并落库。不宣称位级 JA3 克隆。
 - 证书锁定、TUN 透明导流、商店级签名安装包仍是后续项。
 
 ## License

@@ -163,6 +163,8 @@ describe("Settings switch contrast (#54)", () => {
     assert.notEqual(on, raised);
     assert.notEqual(on, successBg);
     assert.notEqual(knob, panel);
+    const trackRule = ruleBody(styles, ".settings-switch-row i");
+    assert.match(trackRule, /box-shadow/, "off/on track must sit above the panel, not as a flat seam");
   });
 
   it("paints settings-switch-row and compact-switch from those tokens", () => {

@@ -775,6 +775,8 @@ export interface ClientHelloPresetInfo {
   documentedJa3?: string | null;
   recipeFingerprint?: string;
   claimsFullBrowserJa3?: boolean;
+  wreqProfile?: string | null;
+  wreqEmulation?: string;
   h2Settings?: Array<{ id: number; value: number }>;
   h2PseudoHeaderOrder?: string[];
   h2Fingerprint?: string;
@@ -784,6 +786,10 @@ export interface OutboundTlsProfileStatus {
   profile: string;
   /** Active versioned ClientHello catalog preset id (e.g. chrome150). */
   presetId?: string;
+  /** Linked wreq-util Profile name when impersonate egress can use it. */
+  wreqProfile?: string | null;
+  /** How impersonate egress treats this id. Not a JA3 clone claim. */
+  wreqEmulation?: string;
   preset?: ClientHelloPresetInfo | null;
   presets?: ClientHelloPresetInfo[];
   fidelityLabel: string;
