@@ -25,6 +25,8 @@ const EXCLUDED: Record<string, string> = {
     "needs a compatible globally installed Grok and local socket permissions",
   real_system_grok_discovers_calls_and_consumes_shownet_mcp_tool:
     "needs a compatible globally installed Grok and local socket permissions",
+  real_system_grok_accepts_shownet_cli_arguments:
+    "needs a compatible globally installed Grok; run via npm run test:grok-cli",
   request_list_performance_benchmark:
     "a benchmark, not a pass/fail check; run via npm run benchmark:request-list",
   dump_real_session_analysis:

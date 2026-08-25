@@ -115,24 +115,13 @@ where
     write_runtime_files(run_dir.path(), settings, mcp, skill_plan, prompt)?;
 
     let mut command = Command::new(binary);
+    configure_cli_arguments(
+        &mut command,
+        &run_dir.path().join("prompt.md"),
+        max_agent_turns,
+    );
     command
         .current_dir(run_dir.path())
-        .arg("--prompt-file")
-        .arg(run_dir.path().join("prompt.md"))
-        .arg("--model")
-        .arg("shownet")
-        .arg("--output-format")
-        .arg("streaming-json")
-        .arg("--permission-mode")
-        .arg("bypassPermissions")
-        .arg("--disable-web-search")
-        .args(["--deny", "Bash"])
-        .args(["--deny", "Read"])
-        .args(["--deny", "Edit"])
-        .args(["--deny", "Grep"])
-        .args(["--deny", "WebFetch"])
-        .arg("--max-turns")
-        .arg(normalized_agent_turn_limit(max_agent_turns).to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -145,7 +134,6 @@ where
         .env("GROK_EXTERNAL_OTEL", "0")
         .env("OTEL_LOGS_EXPORTER", "none")
         .env("OTEL_METRICS_EXPORTER", "none");
-    configure_os_sandbox(&mut command);
     copy_minimum_runtime_environment(&mut command);
     if let Some(api_key) = settings.api_key.as_deref() {
         command.env(API_KEY_ENV, api_key);
@@ -206,6 +194,27 @@ where
     Ok(GrokRunResult {
         content: result.content,
     })
+}
+
+fn configure_cli_arguments(command: &mut Command, prompt_path: &Path, max_agent_turns: u32) {
+    command
+        .arg("--prompt-file")
+        .arg(prompt_path)
+        .arg("--model")
+        .arg("shownet")
+        .arg("--output-format")
+        .arg("streaming-json")
+        .arg("--permission-mode")
+        .arg("bypassPermissions")
+        .arg("--disable-web-search")
+        .args(["--deny", "Bash"])
+        .args(["--deny", "Read"])
+        .args(["--deny", "Edit"])
+        .args(["--deny", "Grep"])
+        .args(["--deny", "WebFetch"])
+        .arg("--max-turns")
+        .arg(normalized_agent_turn_limit(max_agent_turns).to_string());
+    configure_os_sandbox(command);
 }
 
 async fn consume_stream<F, A>(
@@ -812,6 +821,66 @@ mod tests {
         assert_eq!(agent_runtime_timeout(1), Duration::from_secs(10 * 60));
         assert_eq!(agent_runtime_timeout(8), Duration::from_secs(80 * 60));
         assert!(agent_runtime_timeout(u32::MAX) > agent_runtime_timeout(128));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a compatible system Grok"]
+    async fn real_system_grok_accepts_shownet_cli_arguments() {
+        let binary = discover_binary()
+            .expect("install Grok globally or set SHOWNET_GROK_BINARY before this test");
+        let version = agent_runtime::probe_version(&binary)
+            .await
+            .expect("system Grok must report a valid version");
+        agent_runtime::probe_cli_compatibility(&binary)
+            .await
+            .expect("system Grok must expose every CLI capability ShowNet uses");
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "shownet-system-grok-cli-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let home_dir = test_dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let prompt_path = test_dir.join("prompt.md");
+        fs::write(&prompt_path, "Validate ShowNet CLI argument parsing only.").unwrap();
+
+        let mut command = Command::new(&binary);
+        configure_cli_arguments(&mut command, &prompt_path, 8);
+        command
+            .arg("--help")
+            .current_dir(&test_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .env_clear()
+            .env("GROK_HOME", &home_dir)
+            .env("GROK_DISABLE_AUTOUPDATER", "1")
+            .env("GROK_TELEMETRY_ENABLED", "0")
+            .env("GROK_TELEMETRY_TRACE_UPLOAD", "0")
+            .env("GROK_EXTERNAL_OTEL", "0")
+            .env("OTEL_LOGS_EXPORTER", "none")
+            .env("OTEL_METRICS_EXPORTER", "none");
+        copy_minimum_runtime_environment(&mut command);
+
+        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+            .await
+            .expect("system Grok CLI argument parsing timed out")
+            .expect("failed to execute system Grok");
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cleanup = fs::remove_dir_all(&test_dir);
+
+        assert!(
+            output.status.success(),
+            "{version} rejected ShowNet's production CLI arguments:\n{diagnostics}"
+        );
+        assert!(diagnostics.contains("Usage: grok"));
+        cleanup.expect("failed to remove isolated Grok test directory");
+        println!("{version} accepted ShowNet's production CLI arguments");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

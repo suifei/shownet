@@ -24,6 +24,7 @@
     "test:windows:portable": "node --experimental-strip-types --test tests/windows-portable-package.test.ts",
     "check:rust": "node scripts/rust-stable.mjs cargo check --manifest-path src-tauri/Cargo.toml",
     "test:rust:network": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml local_socket_ -- --ignored",
+    "test:grok-cli": "node scripts/rust-stable.mjs cargo test --manifest-path src-tauri/Cargo.toml real_system_grok_accepts_shownet_cli_arguments -- --ignored --nocapture",
     "test:browser-drag": "node --experimental-strip-types --test tests/browser-drag.test.ts",
     "test:browser-bus": "node --experimental-strip-types --test tests/browser-bus.test.ts",
     "test:replay-export-ui": "node --experimental-strip-types --test tests/replay-export-ui.test.ts",

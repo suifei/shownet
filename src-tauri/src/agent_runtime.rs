@@ -554,7 +554,7 @@ pub async fn probe_version(binary: &Path) -> Result<String, String> {
     Ok(text)
 }
 
-async fn probe_cli_compatibility(binary: &Path) -> Result<(), String> {
+pub(crate) async fn probe_cli_compatibility(binary: &Path) -> Result<(), String> {
     let output = tokio::time::timeout(
         PROBE_TIMEOUT,
         Command::new(binary)
