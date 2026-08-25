@@ -28,7 +28,7 @@
   <img src="docs/assets/readme/ui-appearance.jpg" alt="Choose light, dark, or match the system in Settings" width="920" />
 </p>
 
-Current release: [v0.4.36](https://github.com/suifei/shownet/releases/tag/v0.4.36). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
+Current release: [v0.4.37](https://github.com/suifei/shownet/releases/tag/v0.4.37). For a finer map of what is in and out of scope, see the [feature overview](docs/feature-map.md) (Chinese).
 
 The [Chinese README](./README.md) is the default GitHub homepage. This English page is the same product story for a global audience.
 

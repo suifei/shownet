@@ -133,7 +133,6 @@ where
         .args(["--deny", "WebFetch"])
         .arg("--max-turns")
         .arg(normalized_agent_turn_limit(max_agent_turns).to_string())
-        .arg("--no-auto-update")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

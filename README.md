@@ -33,7 +33,7 @@
   <img src="docs/assets/readme/ui-appearance.jpg" alt="设置里选择浅色、深色或跟随系统" width="920" />
 </p>
 
-当前发布版：[v0.4.36](https://github.com/suifei/shownet/releases/tag/v0.4.36)。更细的能力边界见 [功能全景](docs/feature-map.md)。
+当前发布版：[v0.4.37](https://github.com/suifei/shownet/releases/tag/v0.4.37)。更细的能力边界见 [功能全景](docs/feature-map.md)。
 
 ## 它解决什么
 

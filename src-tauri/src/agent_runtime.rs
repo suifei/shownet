@@ -573,6 +573,13 @@ async fn probe_cli_compatibility(binary: &Path) -> Result<(), String> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    if !cli_help_is_compatible(output.status.success(), &help) {
+        return Err("当前 Grok 版本缺少 ShowNet 所需的命令行能力".to_string());
+    }
+    Ok(())
+}
+
+fn required_cli_flags() -> Vec<&'static str> {
     let mut required_flags = vec![
         "prompt-file",
         "model",
@@ -580,17 +587,17 @@ async fn probe_cli_compatibility(binary: &Path) -> Result<(), String> {
         "streaming-json",
         "permission-mode",
         "max-turns",
-        "no-auto-update",
         "deny",
         "disable-web-search",
     ];
     if cfg!(any(target_os = "macos", target_os = "linux")) {
         required_flags.push("sandbox");
     }
-    if !output.status.success() || required_flags.iter().any(|flag| !help.contains(flag)) {
-        return Err("当前 Grok 版本缺少 ShowNet 所需的命令行能力".to_string());
-    }
-    Ok(())
+    required_flags
+}
+
+fn cli_help_is_compatible(success: bool, help: &str) -> bool {
+    success && required_cli_flags().iter().all(|flag| help.contains(flag))
 }
 
 fn parse_version_output(output: &str) -> Result<String, String> {
@@ -738,6 +745,19 @@ mod tests {
         assert!(!version_is_newer("1.2.3", "1.2.3"));
         assert!(!version_is_newer("1.2.2", "1.2.3"));
         assert!(!version_is_newer("latest", "1.2.3"));
+    }
+
+    #[test]
+    fn cli_compatibility_does_not_require_removed_auto_update_flag() {
+        let required = required_cli_flags();
+        assert!(!required.contains(&"no-auto-update"));
+        let help = required.join("\n");
+        assert!(cli_help_is_compatible(true, &help));
+        assert!(!cli_help_is_compatible(false, &help));
+        assert!(!cli_help_is_compatible(
+            true,
+            &help.replacen("model", "", 1)
+        ));
     }
 
     #[test]
